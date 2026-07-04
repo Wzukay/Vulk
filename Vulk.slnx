@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="Vulk/Vulk.vcxproj" Id="29e7ff0f-adda-40d2-b99b-28aee2e06af4" />
+</Solution>
