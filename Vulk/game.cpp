@@ -8,6 +8,16 @@ void Game::Init()
     std::cout << "Starting Base Vulkan Setup...\n";
     renderer.Initialize(1280, 720, "Vulk");
 
+    renderer.LoadModelAsset("assets/models/cucumber.obj", glm::vec3(0.0f, 5.0f, -5.0f), 1.0f, "assets/models/cucumber.png");
+    renderer.LoadModelAsset("assets/models/IronMan.obj", glm::vec3(10.0f, 0.0f, 3.0f), .01f);
+
+    try {
+        renderer.LoadModelAsset("assets/models/sponza/sponza.obj", glm::vec3(10.0f, 0.0f, 0.0f), .5f);
+    }
+    catch (const std::exception& e) {
+        std::cerr << "[FATAL] Failed to load Sponza: " << e.what() << "\n";
+    }
+
     window = renderer.GetWindow();
 
     glfwSetWindowUserPointer(window, &input);

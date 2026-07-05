@@ -11,6 +11,8 @@
 #include <fstream>
 
 #include "vertex.h"
+#include "renderMesh.h"
+#include "texture.h"
 
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
@@ -35,9 +37,36 @@ struct SwapChainSupportDetails {
 };
 
 struct UniformBufferObject {
-    glm::mat4 model;
-    glm::mat4 view;
-    glm::mat4 proj;
+    alignas(16) glm::mat4 view;
+    alignas(16) glm::mat4 proj;
+};
+
+struct PushConstants {
+    glm::mat4 modelMatrix; // 64 bytes
+    uint32_t textureId;     // 4 bytes
+    uint32_t objectId;      // 4 bytes
+};
+
+struct SubMesh {
+    uint32_t indexCount = 0;   // Number of indices to draw
+    uint32_t firstIndex = 0;   // The starting index slot in the global Index Buffer
+    int32_t  vertexOffset = 0; // The base vertex offset index in the global Vertex Buffer
+    uint32_t textureId = 0;    // Bindless texture array index
+
+    glm::vec3 boundingCenterLocal = glm::vec3(0.0f); // NEW — local-space bounding sphere center
+    float boundingRadiusLocal = 0.0f;
+};
+
+struct SceneObject {
+    uint32_t firstSubMesh = 0;
+    uint32_t subMeshCount = 0;
+    glm::mat4 modelMatrix = glm::mat4(1.0f);
+    uint32_t objectId = 0;
+};
+
+struct FrustumPlane {
+    glm::vec3 normal;
+    float distance;
 };
 
 class VulkanRenderer {
@@ -92,9 +121,17 @@ private:
     VkExtent2D swapChainExtent;
     std::vector<VkImageView> swapChainImageViews; // Handles to wrap our images
 
+    VkImage depthImage = VK_NULL_HANDLE;
+    VkDeviceMemory depthImageMemory = VK_NULL_HANDLE;
+    VkImageView depthImageView = VK_NULL_HANDLE;
+
     // New pipeline functions to add to your setup sequence
     void CreateSwapChain();
     void CreateImageViews();
+
+    void CreateDepthResources();
+    VkFormat FindDepthFormat();
+    VkFormat FindSupportedFormat(const std::vector<VkFormat>& candidates, VkImageTiling tiling, VkFormatFeatureFlags features);
 
     // Swapchain configuration helpers
     SwapChainSupportDetails QuerySwapChainSupport(VkPhysicalDevice device);
@@ -117,7 +154,7 @@ private:
 
     // New phase declarations
     void CreateRenderPass();
-    void CreateFramebuffers();
+    void CreateFrameBuffers();
     void CreateCommandPool();
     void CreateCommandBuffers();
     void CreateSyncObjects();
@@ -138,14 +175,26 @@ private:
 	uint32_t FindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);
     void CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory);
 
-private:
-    VkBuffer vertexBuffer;
-    VkDeviceMemory vertexBufferMemory;
-    uint32_t vertexCount;
+    VkBuffer globalVertexBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory globalVertexBufferMemory = VK_NULL_HANDLE;
 
-    VkBuffer indexBuffer;
-    VkDeviceMemory indexBufferMemory;
-    uint32_t indexCount;
+    VkBuffer globalIndexBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory globalIndexBufferMemory = VK_NULL_HANDLE;
+
+    std::vector<ModelVertex> globalVertices;
+    std::vector<uint32_t> globalIndices;
+    std::vector<SubMesh> globalSubMeshes;
+
+    std::vector<Texture> globalTextureRegistry;
+    std::unordered_map<std::string, uint32_t> textureToIdMap;
+
+    const VkDeviceSize MAX_GLOBAL_VERTICES = 5'000'000;
+    const VkDeviceSize MAX_GLOBAL_INDICES = 10'000'000;
+    const VkDeviceSize MAX_GLOBAL_SUBMESHES = 1'000;
+
+    int32_t terrainVertexOffset;
+    uint32_t terrainFirstIndex;
+    uint32_t terrainIndexCount;
 
     VkDescriptorSetLayout descriptorSetLayout;
     VkDescriptorPool descriptorPool;
@@ -155,9 +204,24 @@ private:
 
     VkDescriptorPool imguiDescriptorPool;
 
+    Texture defaultTexture;
+
+    void CreateTextureImage(const std::string& path, Texture& texture);
+    void CreateDefaultTexture();
+    void CreateTextureImageView(Texture& texture, VkFormat format);
+    void CreateTextureSampler(Texture& texture);
+    void TransitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout);
+    void CopyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height);
+
+    Texture& GetOrLoadTexture(const std::string& path);
+    void ParseObjFileByMaterial(const std::string& filepath,
+        std::vector<std::vector<ModelVertex>>& verticesPerMaterial,
+        std::vector<std::vector<uint32_t>>& indicesPerMaterial,
+        std::vector<std::string>& textureFilenames);
+
     void CreateDescriptorSetLayout();
-	void CreateDescriptorPool();
-	void CreateDescriptorSet();
+    void CreateDescriptorPool();
+    void CreateDescriptorSet();
 
     void CreateImGuiDescriptorPool();
     void CreateImGui();
@@ -166,18 +230,24 @@ private:
     VkCommandBuffer BeginSingleTimeCommands();
     void EndSingleTimeCommands(VkCommandBuffer commandBuffer);
 
-    // Helper to perform the copy
-    void CreateVertexBuffer(const std::vector<Vertex>& vertices);
-    void CreateIndexBuffer(const std::vector<uint32_t>& indices);
+    void CreateGlobalBuffers();
     void CreateUniformBuffer();
-    void CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size);
 
     uint32_t drawCallCount = 0;
+    std::vector<SceneObject> sceneObjects;
 
 public:
     void UpdateUniformBuffer(const CameraData& cam);
     void UpdateGeometry(const std::vector<Vertex>& vertices, const std::vector<uint32_t>& indices);
+    void LoadModelAsset(const std::string& filename, glm::vec3 position, float scale, const std::string& texturePath = "");
 
+
+private:
+    uint32_t culledCount = 0;
+
+    std::array<FrustumPlane, 6> frustumPlanes;
+    void UpdateFrustumPlanes(const glm::mat4& viewProj);
+    bool IsSphereInFrustum(const glm::vec3& center, float radius) const;
 
 #ifdef NDEBUG
     const bool enableValidationLayers = false;

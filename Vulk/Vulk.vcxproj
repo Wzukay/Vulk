@@ -180,9 +180,13 @@
     <ClInclude Include="game.h" />
     <ClInclude Include="input.h" />
     <ClInclude Include="logger.h" />
+    <ClInclude Include="renderMesh.h" />
     <ClInclude Include="networkManager.h" />
     <ClInclude Include="renderer.h" />
+    <ClInclude Include="stb_image.h" />
     <ClInclude Include="terrain.h" />
+    <ClInclude Include="texture.h" />
+    <ClInclude Include="tiny_obj_loader.h" />
     <ClInclude Include="vertex.h" />
     <ClInclude Include="worldGen.h" />
   </ItemGroup>

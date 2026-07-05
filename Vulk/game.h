@@ -11,6 +11,8 @@
 #include <vector>
 #include <mutex>
 
+#include <glm/gtc/matrix_transform.hpp>
+
 #ifdef _WIN32
 #include <conio.h> // Required for _kbhit() and _getch()
 #endif
@@ -20,7 +22,7 @@ class Game
 private:
 	bool isRunning = false;
 	bool isHost = false;
-	bool isMultiplayerGame = true;
+	bool isMultiplayerGame = false;
 
 	GLFWwindow* window;
 

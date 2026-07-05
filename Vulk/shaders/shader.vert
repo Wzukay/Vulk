@@ -1,18 +1,27 @@
 #version 450
 
 layout(binding = 0) uniform UniformBufferObject {
-    mat4 model;
     mat4 view;
     mat4 proj;
 } ubo;
 
-layout(location = 0) in vec3 inPosition; // Your terrain position
-layout(location = 1) in vec3 inColor;
+layout(push_constant) uniform Constants {
+    mat4 modelMatrix;
+    uint textureId;
+    uint objectId;
+} push;
 
-layout(location = 0) out vec3 fragColor;
+layout(location = 0) in vec3 inPosition;
+layout(location = 1) in vec3 inNormal;
+layout(location = 2) in vec2 inTexCoord;
+
+layout(location = 0) out vec3 fragNormal;
+layout(location = 1) out vec2 fragTexCoord;
+layout(location = 2) flat out uint fragTextureId;
 
 void main() {
-    // Combine matrices to transform vertex position
-    gl_Position = ubo.proj * ubo.view * ubo.model * vec4(inPosition, 1.0);
-    fragColor = inColor;
+    gl_Position = ubo.proj * ubo.view * push.modelMatrix * vec4(inPosition, 1.0);
+    fragNormal = mat3(push.modelMatrix) * inNormal;
+    fragTexCoord = inTexCoord;
+    fragTextureId = push.textureId;
 }
