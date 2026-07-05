@@ -7,6 +7,7 @@ struct Texture {
     VkDeviceMemory imageMemory = VK_NULL_HANDLE;
     VkImageView imageView = VK_NULL_HANDLE;
     VkSampler sampler = VK_NULL_HANDLE;
+    uint32_t mipLevels = 1;
 
     void CleanUp(VkDevice device) {
         if (sampler != VK_NULL_HANDLE) vkDestroySampler(device, sampler, nullptr);

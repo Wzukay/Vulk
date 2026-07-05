@@ -9,12 +9,15 @@
 
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtx/hash.hpp>
+#include <glm/gtx/norm.hpp>
 
 #define TINYOBJLOADER_IMPLEMENTATION
 #include "tiny_obj_loader.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
+#include <algorithm>
+#include <deque>
 
 // Proxy functions to handle loading Vulkan extension functions for debugging
 VkResult CreateDebugUtilsMessengerEXT(VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkDebugUtilsMessengerEXT* pDebugMessenger) {
@@ -72,8 +75,8 @@ void VulkanRenderer::InitVulkan() {
 
     CreateGlobalBuffers();
 
-    CreateDefaultTexture();
     CreateDescriptorSet();
+    CreateDefaultTexture();
 
     CreateGraphicsPipeline();   
 }
@@ -291,8 +294,6 @@ void VulkanRenderer::Cleanup() {
     vkDestroyImage(logicalDevice, depthImage, nullptr);
     vkFreeMemory(logicalDevice, depthImageMemory, nullptr);
 
-    defaultTexture.CleanUp(logicalDevice);
-
     for (auto& tex : globalTextureRegistry) {
         if (tex.sampler != VK_NULL_HANDLE) vkDestroySampler(logicalDevice, tex.sampler, nullptr);
         if (tex.imageView != VK_NULL_HANDLE) vkDestroyImageView(logicalDevice, tex.imageView, nullptr);
@@ -312,6 +313,7 @@ void VulkanRenderer::Cleanup() {
 
     if (graphicsPipeline != VK_NULL_HANDLE) vkDestroyPipeline(logicalDevice, graphicsPipeline, nullptr);
     if (pipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(logicalDevice, pipelineLayout, nullptr);
+    if (pipelineCache != VK_NULL_HANDLE) vkDestroyPipelineCache(logicalDevice, pipelineCache, nullptr);
 
     for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
         if (imageAvailableSemaphores[i] != VK_NULL_HANDLE) vkDestroySemaphore(logicalDevice, imageAvailableSemaphores[i], nullptr);
@@ -459,6 +461,91 @@ void VulkanRenderer::CreateSwapChain() {
 
     swapChainImageFormat = surfaceFormat.format;
     swapChainExtent = extent;
+}
+
+void VulkanRenderer::RecreateSwapChain() {
+    // 1. Wait for the GPU to finish all work
+    vkDeviceWaitIdle(logicalDevice);
+
+    // 2. Destroy old swapchain-dependent resources
+    // (depth resources, framebuffers, image views, swapchain itself)
+
+    // Destroy framebuffers
+    for (auto framebuffer : swapChainFramebuffers) {
+        vkDestroyFramebuffer(logicalDevice, framebuffer, nullptr);
+    }
+    swapChainFramebuffers.clear();
+
+    // Destroy image views
+    for (auto imageView : swapChainImageViews) {
+        vkDestroyImageView(logicalDevice, imageView, nullptr);
+    }
+    swapChainImageViews.clear();
+
+    // Destroy depth resources
+    if (depthImageView != VK_NULL_HANDLE) {
+        vkDestroyImageView(logicalDevice, depthImageView, nullptr);
+        depthImageView = VK_NULL_HANDLE;
+    }
+    if (depthImage != VK_NULL_HANDLE) {
+        vkDestroyImage(logicalDevice, depthImage, nullptr);
+        depthImage = VK_NULL_HANDLE;
+    }
+    if (depthImageMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(logicalDevice, depthImageMemory, nullptr);
+        depthImageMemory = VK_NULL_HANDLE;
+    }
+
+    // Destroy swapchain
+    if (swapChain != VK_NULL_HANDLE) {
+        vkDestroySwapchainKHR(logicalDevice, swapChain, nullptr);
+        swapChain = VK_NULL_HANDLE;
+    }
+
+    for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+        if (imageAvailableSemaphores[i]) {
+            vkDestroySemaphore(logicalDevice, imageAvailableSemaphores[i], nullptr);
+            imageAvailableSemaphores[i] = VK_NULL_HANDLE;
+        }
+        if (renderFinishedSemaphores[i]) {
+            vkDestroySemaphore(logicalDevice, renderFinishedSemaphores[i], nullptr);
+            renderFinishedSemaphores[i] = VK_NULL_HANDLE;
+        }
+        if (inFlightFences[i]) {
+            vkDestroyFence(logicalDevice, inFlightFences[i], nullptr);
+            inFlightFences[i] = VK_NULL_HANDLE;
+        }
+    }
+
+    // 3. Recreate swapchain and its dependent resources
+    CreateSwapChain();      // re-creates swapChainImages, swapChainImageFormat, swapChainExtent
+    CreateImageViews();
+    CreateDepthResources();
+    CreateFrameBuffers();
+
+    vkFreeCommandBuffers(logicalDevice, commandPool, static_cast<uint32_t>(commandBuffers.size()), commandBuffers.data());
+    CreateCommandBuffers(); // re-allocates commandBuffers with new framebuffers
+
+    CreateSyncObjects();
+
+    currentFrame = 0;
+
+    ImGui_ImplVulkan_Shutdown();
+    ImGui_ImplVulkan_InitInfo init_info = {};
+    init_info.Instance = instance;
+    init_info.PhysicalDevice = physicalDevice;
+    init_info.Device = logicalDevice;
+    init_info.QueueFamily = FindQueueFamilies(physicalDevice).graphicsFamily.value();
+    init_info.Queue = graphicsQueue;
+    init_info.PipelineCache = VK_NULL_HANDLE;
+    init_info.DescriptorPool = imguiDescriptorPool;
+    init_info.MinImageCount = 2;
+    init_info.ImageCount = static_cast<uint32_t>(swapChainImages.size());
+    init_info.Allocator = nullptr;
+    init_info.PipelineInfoMain.RenderPass = renderPass;
+    init_info.PipelineInfoMain.Subpass = 0;
+    init_info.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+    ImGui_ImplVulkan_Init(&init_info);
 }
 
 void VulkanRenderer::CreateImageViews() {
@@ -631,7 +718,33 @@ void VulkanRenderer::CreateGlobalBuffers() {
     CreateBuffer(indexBufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, globalIndexBuffer, globalIndexBufferMemory);
 
+    InitializeTerrainSubMesh();
+
     std::cout << "[Memory Manager] Pre-allocated global monolithic vertex/index buffers successfully.\n";
+}
+
+void VulkanRenderer::InitializeTerrainSubMesh() {
+    // 1. Create a SubMesh for terrain (initially empty, will be updated in UpdateGeometry)
+    SubMesh terrainSub{};
+    terrainSub.indexCount = 0;
+    terrainSub.firstIndex = 0;
+    terrainSub.vertexOffset = 0;
+    terrainSub.boundingCenterLocal = glm::vec3(0.0f);
+    terrainSub.boundingRadiusLocal = 1000.0f; // large to avoid early culling before first update
+    terrainSub.textureId = 0; // default texture
+
+    globalSubMeshes.push_back(terrainSub);
+    terrainSubMeshIndex = static_cast<uint32_t>(globalSubMeshes.size()) - 1;
+
+    // 2. Create a SceneObject for terrain (identity matrix)
+    SceneObject terrainObj{};
+    terrainObj.modelMatrix = glm::mat4(1.0f);
+    terrainObj.objectId = 0;
+    terrainObj.firstSubMesh = terrainSubMeshIndex;
+    terrainObj.subMeshCount = 1;
+
+    sceneObjects.push_back(terrainObj);
+    terrainObjectIndex = static_cast<uint32_t>(sceneObjects.size()) - 1;
 }
 
 void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex) {
@@ -676,7 +789,6 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 
     if (graphicsPipeline != VK_NULL_HANDLE) {
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
-
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
             pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
 
@@ -685,42 +797,48 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
             VkDeviceSize offsets[] = { 0 };
             vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
             vkCmdBindIndexBuffer(commandBuffer, globalIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-        }
 
-        PushConstants terrainConstants{};
-        terrainConstants.modelMatrix = glm::mat4(1.0f);
-        terrainConstants.objectId = 0;
-        terrainConstants.textureId = 0;
+            PushConstants terrainConstants{};
+            terrainConstants.modelMatrix = glm::mat4(1.0f);
+            terrainConstants.objectId = 0;
+            terrainConstants.textureId = 0;
 
-        vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &terrainConstants);
+            vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &terrainConstants);
 
-        if (terrainIndexCount > 0) {
-            vkCmdDrawIndexed(commandBuffer, terrainIndexCount, 1, terrainFirstIndex, terrainVertexOffset, 0);
-            drawCallCount++;
-        }
+            culledCount = 0;
 
-        VkBuffer vertexBuffers[] = { globalVertexBuffer };
-        VkDeviceSize offsets[] = { 0 };
-        vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
-        vkCmdBindIndexBuffer(commandBuffer, globalIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+            std::vector<DrawEntry> drawList;
+            drawList.reserve(globalSubMeshes.size());
 
-        culledCount = 0;
+            for (uint32_t objIdx = 0; objIdx < sceneObjects.size(); objIdx++) {
+                const auto& obj = sceneObjects[objIdx];
 
-        for (const auto& obj : sceneObjects) {
-            for (uint32_t i = obj.firstSubMesh; i < obj.firstSubMesh + obj.subMeshCount; i++){
+                for (uint32_t i = obj.firstSubMesh; i < obj.firstSubMesh + obj.subMeshCount; i++) {
+                    const auto& sub = globalSubMeshes[i];
 
-				const auto& sub = globalSubMeshes[i];
+                    glm::vec3 worldCenter = glm::vec3(obj.modelMatrix * glm::vec4(sub.boundingCenterLocal, 1.0f));
+                    float distSq = glm::length2(worldCenter - cameraPosition);
 
-                glm::vec3 worldCenter = glm::vec3(obj.modelMatrix * glm::vec4(sub.boundingCenterLocal, 1.0f));
+                    float scaleX = glm::length(glm::vec3(obj.modelMatrix[0]));
+                    float scaleY = glm::length(glm::vec3(obj.modelMatrix[1]));
+                    float scaleZ = glm::length(glm::vec3(obj.modelMatrix[2]));
+                    float worldRadius = sub.boundingRadiusLocal * std::max({ scaleX, scaleY, scaleZ });
 
-                float scaleX = glm::length(glm::vec3(obj.modelMatrix[0]));
-                float scaleY = glm::length(glm::vec3(obj.modelMatrix[1]));
-                float scaleZ = glm::length(glm::vec3(obj.modelMatrix[2]));
-                float worldRadius = sub.boundingRadiusLocal * std::max({ scaleX, scaleY, scaleZ });
+                    drawList.push_back({ objIdx, i, distSq, worldCenter, worldRadius });
+                }
+            }
 
-                if (!IsSphereInFrustum(worldCenter, worldRadius)) {
+            std::sort(drawList.begin(), drawList.end(), [](const DrawEntry& a, const DrawEntry& b) {
+                return a.distSq < b.distSq;
+                });
+
+            for (const auto& entry : drawList) {
+                const auto& obj = sceneObjects[entry.objectIndex];
+                const auto& sub = globalSubMeshes[entry.subMeshIndex];
+
+                if (!IsSphereInFrustum(entry.worldCenter, entry.worldRadius)) {
                     culledCount++;
-                    continue; // Skip this submesh entirely — outside the view frustum
+                    continue;
                 }
 
                 PushConstants constants{};
@@ -729,10 +847,17 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
                 constants.textureId = sub.textureId;
 
                 vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(PushConstants), &constants);
-
                 vkCmdDrawIndexed(commandBuffer, sub.indexCount, 1, sub.firstIndex, sub.vertexOffset, 0);
                 drawCallCount++;
             }
+        }
+        else {
+			if (globalVertexBuffer == VK_NULL_HANDLE) {
+				std::cerr << "[VULKAN RUNTIME] Global vertex buffer is not initialized yet. Skipping scene geometry draw calls.\n";
+			}
+            else if (globalIndexBuffer == VK_NULL_HANDLE) {
+				std::cerr << "[VULKAN RUNTIME] Global index buffer is not initialized yet. Skipping scene geometry draw calls.\n";
+			}
         }
     }
     else {
@@ -763,54 +888,63 @@ void VulkanRenderer::DrawFrame() {
 
     DrawGUI();
 
-    // 1. Wait for the CURRENT frame slot's fence to open
     vkWaitForFences(logicalDevice, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
-    vkResetFences(logicalDevice, 1, &inFlightFences[currentFrame]);
 
     uint32_t imageIndex;
-    // 2. Signal the current frame's image availability semaphore
-    vkAcquireNextImageKHR(logicalDevice, swapChain, UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
+    VkResult acquireResult = vkAcquireNextImageKHR(logicalDevice, swapChain, UINT64_MAX,
+        imageAvailableSemaphores[currentFrame],
+        VK_NULL_HANDLE, &imageIndex);
 
-    // 3. Reset and record your command buffer target link
+    if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR || acquireResult == VK_SUBOPTIMAL_KHR) {
+        RecreateSwapChain();
+        return; // skip this frame
+    }
+    else if (acquireResult != VK_SUCCESS) {
+        throw std::runtime_error("Failed to acquire swapchain image.");
+    }
+
+    vkResetFences(logicalDevice, 1, &inFlightFences[currentFrame]);
+
     vkResetCommandBuffer(commandBuffers[imageIndex], 0);
     RecordCommandBuffer(commandBuffers[imageIndex], imageIndex);
 
-    // 4. Submit payload configuration
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-
     VkSemaphore waitSemaphores[] = { imageAvailableSemaphores[currentFrame] };
     VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
     submitInfo.waitSemaphoreCount = 1;
     submitInfo.pWaitSemaphores = waitSemaphores;
     submitInfo.pWaitDstStageMask = waitStages;
-
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &commandBuffers[imageIndex];
-
     VkSemaphore signalSemaphores[] = { renderFinishedSemaphores[currentFrame] };
     submitInfo.signalSemaphoreCount = 1;
     submitInfo.pSignalSemaphores = signalSemaphores;
 
-    // Submit using the current frame's fence token tracking entry
     if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrame]) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to submit execution instructions to graphics queue channels.");
+        throw std::runtime_error("Failed to submit draw command buffer.");
     }
 
-    // 5. Present the frame back onto the window screen
     VkPresentInfoKHR presentInfo{};
     presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     presentInfo.waitSemaphoreCount = 1;
     presentInfo.pWaitSemaphores = signalSemaphores;
-
     VkSwapchainKHR swapChains[] = { swapChain };
     presentInfo.swapchainCount = 1;
     presentInfo.pSwapchains = swapChains;
     presentInfo.pImageIndices = &imageIndex;
 
-    vkQueuePresentKHR(presentQueue, &presentInfo);
+    VkResult presentResult = vkQueuePresentKHR(presentQueue, &presentInfo);
 
-    // 6. Advance frame slot index counter (alternating 0, 1, 0, 1...)
+    if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR) {
+        RecreateSwapChain();
+        return; // skip advancing frame
+    }
+    else if (presentResult != VK_SUCCESS) {
+        throw std::runtime_error("Failed to present swapchain image.");
+    }
+
+    // Advance to next frame
     currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
 }
 
@@ -971,29 +1105,88 @@ void VulkanRenderer::CreateGraphicsPipeline() {
         throw std::runtime_error("Failed to build pipeline uniform layout layout settings object.");
     }
 
-    // 10. Assemble the complete monolithic Pipeline Object
-    VkGraphicsPipelineCreateInfo pipelineInfo{};
-    pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-    pipelineInfo.stageCount = 2;
-    pipelineInfo.pStages = shaderStages;
-    pipelineInfo.pVertexInputState = &vertexInputInfo;
-    pipelineInfo.pInputAssemblyState = &inputAssembly;
-    pipelineInfo.pViewportState = &viewportState;
-    pipelineInfo.pRasterizationState = &rasterizer;
-    pipelineInfo.pMultisampleState = &multisampling;
-    pipelineInfo.pColorBlendState = &colorBlending;
-    pipelineInfo.pDepthStencilState = &depthStencil;
-    pipelineInfo.pDynamicState = &dynamicState;
-    pipelineInfo.layout = pipelineLayout;
-    pipelineInfo.renderPass = renderPass; // The clear frame routing loop layout we made earlier
-    pipelineInfo.subpass = 0;
-
-    VkResult result = vkCreateGraphicsPipelines(logicalDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline);
-    if (result != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create graphics pipeline! Result code: " + std::to_string(result));
+    std::vector<char> cacheData;
+    std::ifstream cacheFile("pipeline.cache", std::ios::ate | std::ios::binary);
+    if (cacheFile.is_open()) {
+        size_t size = cacheFile.tellg();
+        cacheFile.seekg(0);
+        cacheData.resize(size);
+        cacheFile.read(cacheData.data(), size);
+        cacheFile.close();
     }
 
-    // Clean up temporary shader local modules since the code is baked directly inside the pipeline now
+    VkPipelineCacheCreateInfo cacheInfo{};
+    cacheInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+    cacheInfo.initialDataSize = cacheData.size();
+    cacheInfo.pInitialData = cacheData.empty() ? nullptr : cacheData.data();
+
+    if (vkCreatePipelineCache(logicalDevice, &cacheInfo, nullptr, &pipelineCache) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create pipeline cache.");
+    }
+
+    auto createPipeline = [&](VkBool32 blendEnable, VkBool32 depthWriteEnable) -> VkPipeline {
+        // Color blend attachment
+        VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+        colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+            VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        colorBlendAttachment.blendEnable = blendEnable;
+        if (blendEnable) {
+            colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+            colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+            colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+        }
+
+        VkPipelineColorBlendStateCreateInfo colorBlending{};
+        colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        colorBlending.attachmentCount = 1;
+        colorBlending.pAttachments = &colorBlendAttachment;
+
+        // Override depth write
+        VkPipelineDepthStencilStateCreateInfo ds = depthStencil;
+        ds.depthWriteEnable = depthWriteEnable;
+
+        VkGraphicsPipelineCreateInfo pipelineInfo{};
+        pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        pipelineInfo.stageCount = 2;
+        pipelineInfo.pStages = shaderStages;
+        pipelineInfo.pVertexInputState = &vertexInputInfo;
+        pipelineInfo.pInputAssemblyState = &inputAssembly;
+        pipelineInfo.pViewportState = &viewportState;
+        pipelineInfo.pRasterizationState = &rasterizer;
+        pipelineInfo.pMultisampleState = &multisampling;
+        pipelineInfo.pColorBlendState = &colorBlending;
+        pipelineInfo.pDepthStencilState = &ds;
+        pipelineInfo.pDynamicState = &dynamicState;
+        pipelineInfo.layout = pipelineLayout;
+        pipelineInfo.renderPass = renderPass;
+        pipelineInfo.subpass = 0;
+
+        VkPipeline pipeline;
+        // Create pipeline using the cache
+        if (vkCreateGraphicsPipelines(logicalDevice, pipelineCache, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create graphics pipeline.");
+        }
+        return pipeline;
+        };
+
+    graphicsPipeline = createPipeline(VK_FALSE, VK_TRUE);          // Opaque
+    //graphicsPipelineTransparent = createPipeline(VK_TRUE, VK_FALSE); // Transparent
+
+    size_t dataSize;
+    if (vkGetPipelineCacheData(logicalDevice, pipelineCache, &dataSize, nullptr) == VK_SUCCESS && dataSize > 0) {
+        std::vector<char> newCacheData(dataSize);
+        if (vkGetPipelineCacheData(logicalDevice, pipelineCache, &dataSize, newCacheData.data()) == VK_SUCCESS) {
+            std::ofstream outFile("pipeline.cache", std::ios::binary);
+            if (outFile) {
+                outFile.write(newCacheData.data(), dataSize);
+                outFile.close();
+            }
+        }
+    }
+
     vkDestroyShaderModule(logicalDevice, fragShaderModule, nullptr);
     vkDestroyShaderModule(logicalDevice, vertShaderModule, nullptr);
 }
@@ -1149,6 +1342,8 @@ void VulkanRenderer::CreateUniformBuffer() {
 void VulkanRenderer::UpdateUniformBuffer(const CameraData& cam) {
     UniformBufferObject ubo{};
 
+    cameraPosition = cam.pos;
+
     ubo.view = glm::lookAt(cam.pos, cam.pos + cam.front, cam.up);
     ubo.proj = glm::perspective(glm::radians(45.0f), swapChainExtent.width / (float)swapChainExtent.height, 0.1f, 1000.0f);
     ubo.proj[1][1] *= -1;
@@ -1166,36 +1361,31 @@ void VulkanRenderer::UpdateGeometry(const std::vector<Vertex>& vertices, const s
         throw std::runtime_error("[Renderer Error] Cannot update geometry before global monolithic buffers are created.");
     }
 
-    // Safety check to ensure the incoming procedural terrain grid fits in the pre-allocated pools
+    // Safety check
     if (vertices.size() > MAX_GLOBAL_VERTICES || indices.size() > MAX_GLOBAL_INDICES) {
         throw std::runtime_error("[Memory Manager] Incoming terrain data exceeds pre-allocated monolithic buffer bounds!");
     }
 
-    // 1. Convert the project 'Vertex' layouts to your unified 'ModelVertex' layouts
+    // Convert to ModelVertex
     std::vector<ModelVertex> terrainVertices;
     terrainVertices.reserve(vertices.size());
     for (const auto& v : vertices) {
         ModelVertex mv{};
         mv.pos = v.pos;
-        mv.normal = glm::vec3(0.0f, 1.0f, 0.0f); // Default smooth shading up-vector fallback
+        mv.normal = glm::vec3(0.0f, 1.0f, 0.0f); // default normal
         mv.texCoord = v.texCoord;
         terrainVertices.push_back(mv);
     }
 
-    // 2. Set the terrain offsets (terrain always occupies the very beginning of the GPU buffer)
-    terrainVertexOffset = 0;
-    terrainFirstIndex = 0;
-    terrainIndexCount = static_cast<uint32_t>(indices.size());
-
-    // 3. Calculate total byte dimensions for the transfer
+    // Copy to the global buffers at offset 0 (overwrites previous terrain)
     VkDeviceSize vertexSize = sizeof(ModelVertex) * terrainVertices.size();
     VkDeviceSize indexSize = sizeof(uint32_t) * indices.size();
 
-    // 4. Create temporary local host-visible staging allocations
+    // Staging buffers
     VkBuffer stagingVert; VkDeviceMemory stagingVertMem;
     CreateBuffer(vertexSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingVert, stagingVertMem);
-
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        stagingVert, stagingVertMem);
     void* data;
     vkMapMemory(logicalDevice, stagingVertMem, 0, vertexSize, 0, &data);
     memcpy(data, terrainVertices.data(), vertexSize);
@@ -1203,29 +1393,44 @@ void VulkanRenderer::UpdateGeometry(const std::vector<Vertex>& vertices, const s
 
     VkBuffer stagingInd; VkDeviceMemory stagingIndMem;
     CreateBuffer(indexSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingInd, stagingIndMem);
-
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        stagingInd, stagingIndMem);
     vkMapMemory(logicalDevice, stagingIndMem, 0, indexSize, 0, &data);
     memcpy(data, indices.data(), indexSize);
     vkUnmapMemory(logicalDevice, stagingIndMem);
 
-    // 5. Execute direct device transfer pipeline, overwriting the front region (offset 0)
+    // Execute copy
     VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
-
-    VkBufferCopy vertCopyRegion{ 0, 0, vertexSize }; // Dst offset 0
-    vkCmdCopyBuffer(commandBuffer, stagingVert, globalVertexBuffer, 1, &vertCopyRegion);
-
-    VkBufferCopy indCopyRegion{ 0, 0, indexSize };   // Dst offset 0
-    vkCmdCopyBuffer(commandBuffer, stagingInd, globalIndexBuffer, 1, &indCopyRegion);
-
+    VkBufferCopy vertCopy{ 0, 0, vertexSize };
+    vkCmdCopyBuffer(commandBuffer, stagingVert, globalVertexBuffer, 1, &vertCopy);
+    VkBufferCopy indCopy{ 0, 0, indexSize };
+    vkCmdCopyBuffer(commandBuffer, stagingInd, globalIndexBuffer, 1, &indCopy);
     EndSingleTimeCommands(commandBuffer);
 
-    // 6. Clean up staging resources immediately
+    // Cleanup staging
     vkDestroyBuffer(logicalDevice, stagingVert, nullptr);
     vkFreeMemory(logicalDevice, stagingVertMem, nullptr);
     vkDestroyBuffer(logicalDevice, stagingInd, nullptr);
     vkFreeMemory(logicalDevice, stagingIndMem, nullptr);
+
+    // --- Update the terrain submesh ---
+    if (terrainSubMeshIndex < globalSubMeshes.size()) {
+        auto& sub = globalSubMeshes[terrainSubMeshIndex];
+        sub.indexCount = static_cast<uint32_t>(indices.size());
+        sub.firstIndex = 0;
+        sub.vertexOffset = 0;
+
+        // Compute bounding sphere
+        glm::vec3 minBound(FLT_MAX), maxBound(-FLT_MAX);
+        for (const auto& v : vertices) {
+            minBound = glm::min(minBound, v.pos);
+            maxBound = glm::max(maxBound, v.pos);
+        }
+        sub.boundingCenterLocal = (minBound + maxBound) * 0.5f;
+        sub.boundingRadiusLocal = glm::length(maxBound - sub.boundingCenterLocal);
+    }
 }
+
 void VulkanRenderer::CreateImGuiDescriptorPool() {
     VkDescriptorPoolSize pool_sizes[] = {
         { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, IMGUI_IMPL_VULKAN_MINIMUM_SAMPLED_IMAGE_POOL_SIZE },
@@ -1318,14 +1523,11 @@ void VulkanRenderer::DrawGUI() {
     uint32_t totalVertices = 0;
     uint32_t totalIndices = 0;
 
-    totalVertices += static_cast<uint32_t>(globalVertices.size());
-    totalIndices += terrainIndexCount;
+    totalVertices = static_cast<uint32_t>(globalVertices.size()) + terrainVertexCount;
 
     for (const auto& sub : globalSubMeshes) {
         totalIndices += sub.indexCount;
     }
-
-    totalVertices = static_cast<uint32_t>(globalVertices.size());
 
     uint32_t triangleCount = totalIndices / 3;
     uint32_t texturesLoaded = static_cast<uint32_t>(globalTextureRegistry.size());
@@ -1359,18 +1561,6 @@ void VulkanRenderer::DrawGUI() {
     ImGui::End();
 
     ImGui::Render();
-}
-
-uint32_t FindMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties) {
-    VkPhysicalDeviceMemoryProperties memProperties;
-    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
-
-    for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
-        if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
-            return i;
-        }
-    }
-    throw std::runtime_error("Failed to find suitable memory type allocation properties!");
 }
 
 namespace std {
@@ -1516,6 +1706,89 @@ Texture& VulkanRenderer::GetOrLoadTexture(const std::string& path) {
     return globalTextureRegistry[newTextureId];
 }
 
+void VulkanRenderer::GenerateMipmaps(VkImage image, VkFormat imageFormat, int32_t texWidth, int32_t texHeight, uint32_t mipLevels) {
+    // Check the format actually supports linear blitting (required for vkCmdBlitImage)
+    VkFormatProperties formatProperties;
+    vkGetPhysicalDeviceFormatProperties(physicalDevice, imageFormat, &formatProperties);
+    if (!(formatProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)) {
+        throw std::runtime_error("Texture image format does not support linear blitting for mipmap generation.");
+    }
+
+    VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
+
+    VkImageMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.image = image;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.baseArrayLayer = 0;
+    barrier.subresourceRange.layerCount = 1;
+    barrier.subresourceRange.levelCount = 1;
+
+    int32_t mipWidth = texWidth;
+    int32_t mipHeight = texHeight;
+
+    for (uint32_t i = 1; i < mipLevels; i++) {
+        // Transition previous mip level to TRANSFER_SRC (we're about to read from it)
+        barrier.subresourceRange.baseMipLevel = i - 1;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+
+        vkCmdPipelineBarrier(commandBuffer,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+            0, nullptr, 0, nullptr, 1, &barrier);
+
+        // Blit (downscale-copy) from mip i-1 into mip i
+        VkImageBlit blit{};
+        blit.srcOffsets[0] = { 0, 0, 0 };
+        blit.srcOffsets[1] = { mipWidth, mipHeight, 1 };
+        blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        blit.srcSubresource.mipLevel = i - 1;
+        blit.srcSubresource.baseArrayLayer = 0;
+        blit.srcSubresource.layerCount = 1;
+        blit.dstOffsets[0] = { 0, 0, 0 };
+        blit.dstOffsets[1] = { mipWidth > 1 ? mipWidth / 2 : 1, mipHeight > 1 ? mipHeight / 2 : 1, 1 };
+        blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        blit.dstSubresource.mipLevel = i;
+        blit.dstSubresource.baseArrayLayer = 0;
+        blit.dstSubresource.layerCount = 1;
+
+        vkCmdBlitImage(commandBuffer,
+            image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1, &blit, VK_FILTER_LINEAR);
+
+        // Transition mip i-1 to SHADER_READ_ONLY now that we're done reading from it
+        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+        vkCmdPipelineBarrier(commandBuffer,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+            0, nullptr, 0, nullptr, 1, &barrier);
+
+        if (mipWidth > 1) mipWidth /= 2;
+        if (mipHeight > 1) mipHeight /= 2;
+    }
+
+    // Transition the LAST mip level (never blitted from, only written to) to SHADER_READ_ONLY
+    barrier.subresourceRange.baseMipLevel = mipLevels - 1;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+    vkCmdPipelineBarrier(commandBuffer,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+        0, nullptr, 0, nullptr, 1, &barrier);
+
+    EndSingleTimeCommands(commandBuffer);
+}
+
 void VulkanRenderer::LoadModelAsset(const std::string& filename, glm::vec3 position, float scale, const std::string& texturePath) {
     std::vector<std::vector<ModelVertex>> verticesPerMaterial;
     std::vector<std::vector<uint32_t>> indicesPerMaterial;
@@ -1523,125 +1796,167 @@ void VulkanRenderer::LoadModelAsset(const std::string& filename, glm::vec3 posit
 
     ParseObjFileByMaterial(filename, verticesPerMaterial, indicesPerMaterial, textureFilenames);
 
+    for (auto& idxs : indicesPerMaterial) {
+        for (size_t i = 0; i + 2 < idxs.size(); i += 3) {
+            std::swap(idxs[i + 1], idxs[i + 2]);
+        }
+    }
+
     SceneObject obj{};
 
     glm::mat4 model = glm::mat4(1.0f);
-    model = glm::translate(model, position);
-    model = glm::rotate(model, glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-    model = glm::scale(model, glm::vec3(scale));
+    model = glm::translate(model, position);                                // Move to world position
+    model = glm::rotate(model, glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f)); // Rotate to fix axis orientation
+    model = glm::scale(model, glm::vec3(scale));                           // Apply uniform scale
+
     obj.modelMatrix = model;
     obj.objectId = static_cast<uint32_t>(sceneObjects.size()) + 1;
     obj.firstSubMesh = static_cast<uint32_t>(globalSubMeshes.size());
 
-    for (size_t m = 0; m < verticesPerMaterial.size(); m++) {
-        auto& vertices = verticesPerMaterial[m];
-        auto& indices = indicesPerMaterial[m];
+    std::vector<CopyRegion> regions;
+    uint32_t totalVertexCount = 0;
+    uint32_t totalIndexCount = 0;
+    uint32_t currentGlobalVertexOffset = static_cast<uint32_t>(globalVertices.size());
+    uint32_t currentGlobalIndexOffset = static_cast<uint32_t>(globalIndices.size());
 
+    for (size_t m = 0; m < verticesPerMaterial.size(); m++) {
+        const auto& verts = verticesPerMaterial[m];
+        const auto& idxs = indicesPerMaterial[m];
+        if (idxs.empty()) continue; // skip empty groups
+
+        regions.push_back({
+            .srcVertexOffset = totalVertexCount,
+            .dstVertexOffset = currentGlobalVertexOffset,
+            .vertexCount = static_cast<uint32_t>(verts.size()),
+            .srcIndexOffset = totalIndexCount,
+            .dstIndexOffset = currentGlobalIndexOffset,
+            .indexCount = static_cast<uint32_t>(idxs.size()),
+            .materialIndex = static_cast<uint32_t>(m)
+            });
+
+        // Update for next iteration
+        totalVertexCount += static_cast<uint32_t>(verts.size());
+        totalIndexCount += static_cast<uint32_t>(idxs.size());
+        currentGlobalVertexOffset += static_cast<uint32_t>(verts.size());
+        currentGlobalIndexOffset += static_cast<uint32_t>(idxs.size());
+    }
+
+    if (globalVertices.size() + totalVertexCount > MAX_GLOBAL_VERTICES ||
+        globalIndices.size() + totalIndexCount > MAX_GLOBAL_INDICES) {
+        throw std::runtime_error("[Memory Manager] Asset exceeds pre-allocated monolithic buffer bounds!");
+    }
+
+    globalVertices.reserve(globalVertices.size() + totalVertexCount);
+    globalIndices.reserve(globalIndices.size() + totalIndexCount);
+
+    VkDeviceSize totalVertexSize = sizeof(ModelVertex) * totalVertexCount;
+    VkDeviceSize totalIndexSize = sizeof(uint32_t) * totalIndexCount;
+
+    VkBuffer stagingVert;
+    VkDeviceMemory stagingVertMem;
+    CreateBuffer(totalVertexSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        stagingVert, stagingVertMem);
+
+    VkBuffer stagingInd;
+    VkDeviceMemory stagingIndMem;
+    CreateBuffer(totalIndexSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        stagingInd, stagingIndMem);
+
+    uint8_t* vertPtr;
+    vkMapMemory(logicalDevice, stagingVertMem, 0, totalVertexSize, 0, (void**)&vertPtr);
+    uint8_t* indPtr;
+    vkMapMemory(logicalDevice, stagingIndMem, 0, totalIndexSize, 0, (void**)&indPtr);
+
+    for (const auto& region : regions) {
+        const auto& verts = verticesPerMaterial[region.materialIndex];
+        const auto& idxs = indicesPerMaterial[region.materialIndex];
+
+        // Copy vertices
+        VkDeviceSize vertOffset = region.srcVertexOffset * sizeof(ModelVertex);
+        memcpy(vertPtr + vertOffset, verts.data(), verts.size() * sizeof(ModelVertex));
+
+        // Copy indices
+        VkDeviceSize indOffset = region.srcIndexOffset * sizeof(uint32_t);
+        memcpy(indPtr + indOffset, idxs.data(), idxs.size() * sizeof(uint32_t));
+
+        // Also append to global CPU vectors (optional, but useful for stats or future use)
+        globalVertices.insert(globalVertices.end(), verts.begin(), verts.end());
+        globalIndices.insert(globalIndices.end(), idxs.begin(), idxs.end());
+    }
+
+    vkUnmapMemory(logicalDevice, stagingVertMem);
+    vkUnmapMemory(logicalDevice, stagingIndMem);
+
+    VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
+
+    // For each region, issue a vertex copy and an index copy
+    for (const auto& region : regions) {
+        VkBufferCopy vertCopy{};
+        vertCopy.srcOffset = region.srcVertexOffset * sizeof(ModelVertex);
+        vertCopy.dstOffset = region.dstVertexOffset * sizeof(ModelVertex);
+        vertCopy.size = region.vertexCount * sizeof(ModelVertex);
+        vkCmdCopyBuffer(commandBuffer, stagingVert, globalVertexBuffer, 1, &vertCopy);
+
+        VkBufferCopy indCopy{};
+        indCopy.srcOffset = region.srcIndexOffset * sizeof(uint32_t);
+        indCopy.dstOffset = region.dstIndexOffset * sizeof(uint32_t);
+        indCopy.size = region.indexCount * sizeof(uint32_t);
+        vkCmdCopyBuffer(commandBuffer, stagingInd, globalIndexBuffer, 1, &indCopy);
+    }
+
+    EndSingleTimeCommands(commandBuffer);
+
+    vkDestroyBuffer(logicalDevice, stagingVert, nullptr);
+    vkFreeMemory(logicalDevice, stagingVertMem, nullptr);
+    vkDestroyBuffer(logicalDevice, stagingInd, nullptr);
+    vkFreeMemory(logicalDevice, stagingIndMem, nullptr);
+
+    std::vector<VkWriteDescriptorSet> descriptorWrites;
+    std::deque<VkDescriptorImageInfo> imageInfos;
+
+    // Process each region
+    for (const auto& region : regions) {
+        const auto& verts = verticesPerMaterial[region.materialIndex];
+        const auto& idxs = indicesPerMaterial[region.materialIndex];
+
+        // Compute bounding sphere (same as before)
         glm::vec3 minBound(FLT_MAX), maxBound(-FLT_MAX);
-        for (const auto& v : vertices) {
+        for (const auto& v : verts) {
             minBound = glm::min(minBound, v.pos);
             maxBound = glm::max(maxBound, v.pos);
         }
         glm::vec3 center = (minBound + maxBound) * 0.5f;
         float radius = glm::length(maxBound - center);
 
-        if (indices.empty()) continue;
-
-        // Flip winding to match your pipeline's frontFace convention
-        for (size_t i = 0; i + 2 < indices.size(); i += 3) {
-            std::swap(indices[i + 1], indices[i + 2]);
-        }
-
-        // CALCULATE GLOBAL OFFSETS BEFORE APPENDING
-        int32_t currentVertexOffset = static_cast<int32_t>(globalVertices.size());
-        uint32_t currentFirstIndex = static_cast<uint32_t>(globalIndices.size());
-
-        // Memory Bounds Check: Prevent spilling past pre-allocated giant monolithic buffer layouts
-        if ((globalVertices.size() + vertices.size() > MAX_GLOBAL_VERTICES) ||
-            (globalIndices.size() + indices.size() > MAX_GLOBAL_INDICES)) {
-            throw std::runtime_error("[Memory Manager] Loading this asset exceeds pre-allocated monolithic buffer bounds!");
-        }
-
         SubMesh sub{};
-        sub.indexCount = static_cast<uint32_t>(indices.size());
-        sub.firstIndex = currentFirstIndex;
-        sub.vertexOffset = currentVertexOffset;
+        sub.indexCount = region.indexCount;
+        sub.firstIndex = region.dstIndexOffset;
+        sub.vertexOffset = static_cast<int32_t>(region.dstVertexOffset);
         sub.boundingCenterLocal = center;
         sub.boundingRadiusLocal = radius;
 
-        // Append submesh data straight into the continuous global master lists
-        globalVertices.insert(globalVertices.end(), vertices.begin(), vertices.end());
-        globalIndices.insert(globalIndices.end(), indices.begin(), indices.end());
-
-        // STAGING & STREAMING SUB-BUFFER TO GPU
-        VkDeviceSize vertexSize = sizeof(ModelVertex) * vertices.size();
-        VkDeviceSize indexSize = sizeof(uint32_t) * indices.size();
-
-        // Staging Vertex Buffer
-        VkBuffer stagingVert; VkDeviceMemory stagingVertMem;
-        CreateBuffer(vertexSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingVert, stagingVertMem);
-        void* vertData;
-        vkMapMemory(logicalDevice, stagingVertMem, 0, vertexSize, 0, &vertData);
-        memcpy(vertData, vertices.data(), vertexSize);
-        vkUnmapMemory(logicalDevice, stagingVertMem);
-
-        // Staging Index Buffer
-        VkBuffer stagingInd; VkDeviceMemory stagingIndMem;
-        CreateBuffer(indexSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingInd, stagingIndMem);
-        void* indData;
-        vkMapMemory(logicalDevice, stagingIndMem, 0, indexSize, 0, &indData);
-        memcpy(indData, indices.data(), indexSize);
-        vkUnmapMemory(logicalDevice, stagingIndMem);
-
-        // COPY ONLY TO THE SPECIFIC SUB-REGIONS WITHIN THE GLOBAL LARGE BUFFERS
-        VkDeviceSize vertDestOffset = sizeof(ModelVertex) * currentVertexOffset;
-        VkDeviceSize indDestOffset = sizeof(uint32_t) * currentFirstIndex;
-
-        VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
-
-        VkBufferCopy vertCopyRegion{};
-        vertCopyRegion.srcOffset = 0;
-        vertCopyRegion.dstOffset = vertDestOffset;
-        vertCopyRegion.size = vertexSize;
-        vkCmdCopyBuffer(commandBuffer, stagingVert, globalVertexBuffer, 1, &vertCopyRegion);
-
-        VkBufferCopy indCopyRegion{};
-        indCopyRegion.srcOffset = 0;
-        indCopyRegion.dstOffset = indDestOffset;
-        indCopyRegion.size = indexSize;
-        vkCmdCopyBuffer(commandBuffer, stagingInd, globalIndexBuffer, 1, &indCopyRegion);
-
-        EndSingleTimeCommands(commandBuffer);
-
-        vkDestroyBuffer(logicalDevice, stagingVert, nullptr);
-        vkFreeMemory(logicalDevice, stagingVertMem, nullptr);
-        vkDestroyBuffer(logicalDevice, stagingInd, nullptr);
-        vkFreeMemory(logicalDevice, stagingIndMem, nullptr);
-
-        // Bindless Texture Index Resolution Routine
-        std::string texPath = !texturePath.empty() ? texturePath : textureFilenames[m];
+        // Texture handling (same as before)
+        std::string texPath = !texturePath.empty() ? texturePath : textureFilenames[region.materialIndex];
         uint32_t targetTextureId = 0;
-
         if (!texPath.empty()) {
-            // Check if the texture is already registered anywhere in the system
             auto it = textureToIdMap.find(texPath);
             if (it != textureToIdMap.end()) {
                 targetTextureId = it->second;
             }
             else {
                 GetOrLoadTexture(texPath);
-
                 targetTextureId = textureToIdMap[texPath];
-
                 Texture& finalTexture = globalTextureRegistry[targetTextureId];
 
-                // Write the new descriptor array slot update to inform Vulkan
+                // Update descriptor set for this texture (can be batched, but keep simple for now)
                 VkDescriptorImageInfo imageInfo{};
                 imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
                 imageInfo.imageView = finalTexture.imageView;
                 imageInfo.sampler = finalTexture.sampler;
+
+                imageInfos.push_back(imageInfo);
 
                 VkWriteDescriptorSet descriptorWrite{};
                 descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -1650,19 +1965,26 @@ void VulkanRenderer::LoadModelAsset(const std::string& filename, glm::vec3 posit
                 descriptorWrite.dstArrayElement = targetTextureId;
                 descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
                 descriptorWrite.descriptorCount = 1;
-                descriptorWrite.pImageInfo = &imageInfo;    
-
-                vkUpdateDescriptorSets(logicalDevice, 1, &descriptorWrite, 0, nullptr);
+                descriptorWrite.pImageInfo = &imageInfos.back();
+                
+                descriptorWrites.push_back(descriptorWrite);
             }
         }
-
         sub.textureId = targetTextureId;
 
-        obj.subMeshCount = static_cast<uint32_t>(globalSubMeshes.size()) - obj.firstSubMesh;
         globalSubMeshes.push_back(sub);
     }
 
+    if (!descriptorWrites.empty()) {
+        vkUpdateDescriptorSets(logicalDevice,
+            static_cast<uint32_t>(descriptorWrites.size()),
+            descriptorWrites.data(),
+            0, nullptr);
+    }
+
+    obj.subMeshCount = static_cast<uint32_t>(regions.size()); // number of non‑empty material groups
     sceneObjects.push_back(obj);
+
     std::cout << "[Asset Manager] Unified Global Memory Buffer Allocation Complete: " << filename << "\n";
 }
 
@@ -1740,7 +2062,7 @@ void VulkanRenderer::CreateDepthResources() {
     }
 }
 
-void VulkanRenderer::TransitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout) {
+void VulkanRenderer::TransitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t mipLevels) {
     VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
 
     VkImageMemoryBarrier barrier{};
@@ -1752,7 +2074,7 @@ void VulkanRenderer::TransitionImageLayout(VkImage image, VkFormat format, VkIma
     barrier.image = image;
     barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     barrier.subresourceRange.baseMipLevel = 0;
-    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.levelCount = mipLevels;
     barrier.subresourceRange.baseArrayLayer = 0;
     barrier.subresourceRange.layerCount = 1;
 
@@ -1805,6 +2127,8 @@ void VulkanRenderer::CreateTextureImage(const std::string& path, Texture& textur
         throw std::runtime_error("[Texture Error] Failed to load texture image: " + path);
     }
 
+    texture.mipLevels = static_cast<uint32_t>(std::floor(std::log2(std::max(texWidth, texHeight)))) + 1;
+
     VkDeviceSize imageSize = static_cast<VkDeviceSize>(texWidth) * texHeight * 4;
 
     VkBuffer stagingBuffer;
@@ -1826,12 +2150,12 @@ void VulkanRenderer::CreateTextureImage(const std::string& path, Texture& textur
     imageInfo.extent.width = static_cast<uint32_t>(texWidth);
     imageInfo.extent.height = static_cast<uint32_t>(texHeight);
     imageInfo.extent.depth = 1;
-    imageInfo.mipLevels = 1;
+    imageInfo.mipLevels = texture.mipLevels;
     imageInfo.arrayLayers = 1;
     imageInfo.format = VK_FORMAT_R8G8B8A8_SRGB;
     imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
     imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
     imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
@@ -1852,12 +2176,13 @@ void VulkanRenderer::CreateTextureImage(const std::string& path, Texture& textur
     }
     vkBindImageMemory(logicalDevice, texture.image, texture.imageMemory, 0);
 
-    TransitionImageLayout(texture.image, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    TransitionImageLayout(texture.image, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, texture.mipLevels);
     CopyBufferToImage(stagingBuffer, texture.image, static_cast<uint32_t>(texWidth), static_cast<uint32_t>(texHeight));
-    TransitionImageLayout(texture.image, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     vkDestroyBuffer(logicalDevice, stagingBuffer, nullptr);
     vkFreeMemory(logicalDevice, stagingBufferMemory, nullptr);
+
+    GenerateMipmaps(texture.image, VK_FORMAT_R8G8B8A8_SRGB, texWidth, texHeight, texture.mipLevels);
 
     CreateTextureImageView(texture, VK_FORMAT_R8G8B8A8_SRGB);
     CreateTextureSampler(texture);
@@ -1871,7 +2196,7 @@ void VulkanRenderer::CreateTextureImageView(Texture& texture, VkFormat format) {
     viewInfo.format = format;
     viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     viewInfo.subresourceRange.baseMipLevel = 0;
-    viewInfo.subresourceRange.levelCount = 1;
+    viewInfo.subresourceRange.levelCount = texture.mipLevels;
     viewInfo.subresourceRange.baseArrayLayer = 0;
     viewInfo.subresourceRange.layerCount = 1;
 
@@ -1898,6 +2223,9 @@ void VulkanRenderer::CreateTextureSampler(Texture& texture) {
     samplerInfo.compareEnable = VK_FALSE;
     samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
     samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    samplerInfo.minLod = 0.0f;                                 
+    samplerInfo.maxLod = static_cast<float>(texture.mipLevels); 
+    samplerInfo.mipLodBias = 0.0f;                            
 
     if (vkCreateSampler(logicalDevice, &samplerInfo, nullptr, &texture.sampler) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create texture sampler.");
@@ -1905,6 +2233,8 @@ void VulkanRenderer::CreateTextureSampler(Texture& texture) {
 }
 
 void VulkanRenderer::CreateDefaultTexture() {
+    if (!globalTextureRegistry.empty()) return;
+
     uint8_t whitePixel[4] = { 255, 255, 255, 255 };
     VkDeviceSize imageSize = 4;
 
@@ -1958,6 +2288,26 @@ void VulkanRenderer::CreateDefaultTexture() {
 
     CreateTextureImageView(defaultTexture, VK_FORMAT_R8G8B8A8_SRGB);
     CreateTextureSampler(defaultTexture);
+
+    globalTextureRegistry.clear();
+    globalTextureRegistry.push_back(defaultTexture); // copy into registry (or move)
+    textureToIdMap["default"] = 0;
+
+    VkDescriptorImageInfo descriptorInfo{};
+    descriptorInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    descriptorInfo.imageView = defaultTexture.imageView;
+    descriptorInfo.sampler = defaultTexture.sampler;
+
+    VkWriteDescriptorSet descriptorWrite{};
+    descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    descriptorWrite.dstSet = descriptorSet;
+    descriptorWrite.dstBinding = 1;
+    descriptorWrite.dstArrayElement = 0;
+    descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    descriptorWrite.descriptorCount = 1;
+    descriptorWrite.pImageInfo = &descriptorInfo;
+
+    vkUpdateDescriptorSets(logicalDevice, 1, &descriptorWrite, 0, nullptr);
 }
 
 void VulkanRenderer::UpdateFrustumPlanes(const glm::mat4& viewProj) {

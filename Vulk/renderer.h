@@ -115,6 +115,8 @@ public:
     GLFWwindow* GetWindow() const { return window; }
 
 private:
+    VkPipelineCache pipelineCache = VK_NULL_HANDLE;
+
     VkSwapchainKHR swapChain = VK_NULL_HANDLE;
     std::vector<VkImage> swapChainImages;
     VkFormat swapChainImageFormat;
@@ -128,6 +130,9 @@ private:
     // New pipeline functions to add to your setup sequence
     void CreateSwapChain();
     void CreateImageViews();
+
+    void RecreateSwapChain();
+    void CleanupSwapChain();
 
     void CreateDepthResources();
     VkFormat FindDepthFormat();
@@ -169,6 +174,18 @@ private:
     VkShaderModule CreateShaderModule(const std::vector<char>& code);
 
 private:
+    struct CopyRegion {
+        uint32_t srcVertexOffset;   // in vertices
+        uint32_t dstVertexOffset;   // in vertices (globalVertices size before this submesh)
+        uint32_t vertexCount;
+
+        uint32_t srcIndexOffset;    // in indices
+        uint32_t dstIndexOffset;    // in indices (globalIndices size before this submesh)
+        uint32_t indexCount;
+
+        uint32_t materialIndex;     // to retrieve the actual data later
+    };
+
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     VkPipeline graphicsPipeline = VK_NULL_HANDLE;
     void CreateGraphicsPipeline();
@@ -192,10 +209,6 @@ private:
     const VkDeviceSize MAX_GLOBAL_INDICES = 10'000'000;
     const VkDeviceSize MAX_GLOBAL_SUBMESHES = 1'000;
 
-    int32_t terrainVertexOffset;
-    uint32_t terrainFirstIndex;
-    uint32_t terrainIndexCount;
-
     VkDescriptorSetLayout descriptorSetLayout;
     VkDescriptorPool descriptorPool;
     VkDescriptorSet descriptorSet;
@@ -210,10 +223,11 @@ private:
     void CreateDefaultTexture();
     void CreateTextureImageView(Texture& texture, VkFormat format);
     void CreateTextureSampler(Texture& texture);
-    void TransitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout);
+    void TransitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t mipLevels = 1);
     void CopyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height);
-
+    void GenerateMipmaps(VkImage image, VkFormat imageFormat, int32_t texWidth, int32_t texHeight, uint32_t mipLevels);
     Texture& GetOrLoadTexture(const std::string& path);
+
     void ParseObjFileByMaterial(const std::string& filepath,
         std::vector<std::vector<ModelVertex>>& verticesPerMaterial,
         std::vector<std::vector<uint32_t>>& indicesPerMaterial,
@@ -233,6 +247,11 @@ private:
     void CreateGlobalBuffers();
     void CreateUniformBuffer();
 
+    void InitializeTerrainSubMesh();
+    uint32_t terrainSubMeshIndex = 0;
+    uint32_t terrainObjectIndex = 0;
+    uint32_t terrainVertexCount = 0;
+
     uint32_t drawCallCount = 0;
     std::vector<SceneObject> sceneObjects;
 
@@ -243,6 +262,16 @@ public:
 
 
 private:
+    struct DrawEntry {
+        uint32_t objectIndex;
+        uint32_t subMeshIndex; // index into globalSubMeshes
+        float distSq;
+        glm::vec3 worldCenter;
+        float worldRadius;
+    };
+
+    glm::vec3 cameraPosition = glm::vec3(0.0f);
+
     uint32_t culledCount = 0;
 
     std::array<FrustumPlane, 6> frustumPlanes;
