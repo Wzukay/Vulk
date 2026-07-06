@@ -3,11 +3,10 @@
 layout(binding = 0) uniform UniformBufferObject {
     mat4 view;
     mat4 proj;
-    vec3 cameraPos;        // NEW: camera world position for specular
-    vec3 lightDir;         // NEW: normalized light direction (towards light)
-    vec3 lightColor;       // NEW: light color (intensity)
-    float ambient;         // NEW: ambient factor (0.0–1.0)
-    float specularPower;   // NEW: specular exponent (shininess)
+    vec3 cameraPos;
+    float ambient;
+    float specularPower;
+    uint lightCount;
 } ubo;
 
 layout(push_constant) uniform Constants {
@@ -23,10 +22,9 @@ layout(location = 2) in vec2 inTexCoord;
 layout(location = 0) out vec3 fragNormal;
 layout(location = 1) out vec2 fragTexCoord;
 layout(location = 2) flat out uint fragTextureId;
-layout(location = 3) out vec3 fragWorldPos;   // NEW: world position for specular
+layout(location = 3) out vec3 fragWorldPos;
 
 void main() {
-    // Compute world position
     vec4 worldPos = push.modelMatrix * vec4(inPosition, 1.0);
     gl_Position = ubo.proj * ubo.view * worldPos;
 

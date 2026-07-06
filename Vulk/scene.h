@@ -13,13 +13,25 @@ struct MeshInstance {
 };
 
 class Scene {
+private:
+    std::vector<MeshInstance> instances;
+    std::vector<SceneLight> lights;
+
+    mutable bool hasModifiedLights = false;
+
 public:
     void AddInstance(const std::string& meshName, const glm::mat4& transform, uint32_t objectId) {
         instances.push_back({ meshName, transform, objectId });
     }
-    const std::vector<MeshInstance>& GetInstances() const { return instances; }
-    void Clear() { instances.clear(); }
 
-private:
-    std::vector<MeshInstance> instances;
+    void AddLight(const SceneLight& light) {
+        lights.push_back(light);
+        hasModifiedLights = true;
+    }
+    bool HasModifiedLights() const { return hasModifiedLights; }
+    void ClearModifiedLightsFlag() const { hasModifiedLights = false; }
+    const std::vector<SceneLight>& GetLights() const { return lights; }
+
+    const std::vector<MeshInstance>& GetInstances() const { return instances; }
+    void Clear() { instances.clear(); lights.clear(); }
 };

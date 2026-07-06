@@ -128,8 +128,5 @@
       <Filter>Shaders</Filter>
     </None>
     <None Include="shadow.vert" />
-    <None Include="shaders\shadow.vert">
-      <Filter>Shaders</Filter>
-    </None>
   </ItemGroup>
 </Project>

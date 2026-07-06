@@ -44,10 +44,9 @@ struct UniformBufferObject {
     alignas(16) glm::mat4 view;
     alignas(16) glm::mat4 proj;
     alignas(16) glm::vec3 cameraPos;
-    alignas(16) glm::vec3 lightDir;
-    alignas(16) glm::vec3 lightColor;
     float ambient;
     float specularPower;
+    uint32_t lightCount;
 };
 
 struct PushConstants {
@@ -79,6 +78,28 @@ struct CopyRegion {
     uint32_t indexCount;
 
     uint32_t materialIndex;     // to retrieve the actual data later
+};
+
+struct Light {
+    alignas(16) glm::vec4 positionOrDir; // w: 0 = directional, 1 = point
+    alignas(16) glm::vec4 color;         // rgb = color, a = intensity
+    alignas(16) glm::vec4 params;        // x = range (point lights)
+
+    static Light Directional(const glm::vec3& direction, const glm::vec3& color, float intensity = 1.0f) {
+        Light l{};
+        l.positionOrDir = glm::vec4(glm::normalize(direction), 0.0f);
+        l.color = glm::vec4(color, intensity);
+        l.params = glm::vec4(0.0f);
+        return l;
+    }
+
+    static Light Point(const glm::vec3& position, const glm::vec3& color, float intensity = 1.0f, float range = 10.0f) {
+        Light l{};
+        l.positionOrDir = glm::vec4(position, 1.0f);
+        l.color = glm::vec4(color, intensity);
+        l.params = glm::vec4(range, 0.0f, 0.0f, 0.0f);
+        return l;
+    }
 };
 
 class VulkanRenderer {
@@ -223,8 +244,14 @@ private:
     VkDescriptorSetLayout descriptorSetLayout;
     VkDescriptorPool descriptorPool;
     VkDescriptorSet descriptorSet;
+
     VkBuffer uniformBuffer;
     VkDeviceMemory uniformBufferMemory;
+
+    VkBuffer lightBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory lightBufferMemory = VK_NULL_HANDLE;
+    std::vector<Light> currentLights;
+    const uint32_t MAX_LIGHTS = 256;
 
     std::vector<SceneObject> currentSceneObjects;
     std::vector<SubMesh> currentSceneSubMeshes;
@@ -236,7 +263,6 @@ private:
 	uint32_t FindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);
     void CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory);
 
-private:
     void CreateDescriptorSetLayout();
     void CreateDescriptorPool();
     void CreateDescriptorSet();
@@ -245,9 +271,11 @@ private:
 
     void CreateGlobalBuffers();
     void CreateUniformBuffer();
+    void CreateLightBuffer();
 
 public:
     void UpdateUniformBuffer(const CameraData& cam);
+    void SetLights(const std::vector<Light>& lights);
 
 private:
     bool showSettingsPanel = false;

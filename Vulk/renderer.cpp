@@ -81,11 +81,12 @@ void VulkanRenderer::InitVulkan() {
 
 	CreateDescriptorSetLayout();
 	CreateUniformBuffer();
+	CreateLightBuffer();
 	CreateDescriptorPool();
+	CreateDescriptorSet();
+
 	CreateImGui();
 	CreateGlobalBuffers();
-
-	CreateDescriptorSet();
 
 	g_AssetManager.SetRenderer(this);
 	g_AssetManager.SetDescriptorSet(descriptorSet);
@@ -835,6 +836,19 @@ void VulkanRenderer::UpdateScene(const Scene& scene) {
 
 	UpdateTextureDescriptors(scene);
 
+	if (scene.HasModifiedLights()) {
+		std::vector<Light> lights;
+		lights.reserve(scene.GetLights().size());
+		for (const auto& sl : scene.GetLights()) {
+			lights.push_back(sl.isPoint
+				? Light::Point(sl.position, sl.color, sl.intensity, sl.range)
+				: Light::Directional(sl.direction, sl.color, sl.intensity));
+		}
+
+		SetLights(lights);
+		scene.ClearModifiedLightsFlag();
+	}
+
 	currentScene = &scene;
 }
 void VulkanRenderer::UpdateTextureDescriptors(const Scene& scene) {
@@ -882,7 +896,7 @@ void VulkanRenderer::UpdateTextureDescriptors(const Scene& scene) {
 		VkWriteDescriptorSet write{};
 		write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		write.dstSet = descriptorSet;
-		write.dstBinding = 1;
+		write.dstBinding = 2;
 		write.dstArrayElement = id;
 		write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 		write.descriptorCount = 1;
@@ -1260,19 +1274,30 @@ void VulkanRenderer::CreateDescriptorSetLayout() {
 	uboLayoutBinding.binding = 0;
 	uboLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 	uboLayoutBinding.descriptorCount = 1;
-	uboLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT; // <-- ADD fragment stage
+	uboLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 	uboLayoutBinding.pImmutableSamplers = nullptr;
 
+	VkDescriptorSetLayoutBinding lightLayoutBinding{};
+	lightLayoutBinding.binding = 1;
+	lightLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	lightLayoutBinding.descriptorCount = 1;
+	lightLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+	lightLayoutBinding.pImmutableSamplers = nullptr;
+
 	VkDescriptorSetLayoutBinding samplerLayoutBinding{};
-	samplerLayoutBinding.binding = 1;
+	samplerLayoutBinding.binding = 2;
 	samplerLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 	samplerLayoutBinding.descriptorCount = 500;
 	samplerLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 	samplerLayoutBinding.pImmutableSamplers = nullptr;
 
-	std::array<VkDescriptorSetLayoutBinding, 2> bindings = { uboLayoutBinding, samplerLayoutBinding };
+	std::array<VkDescriptorSetLayoutBinding, 3> bindings = { uboLayoutBinding, lightLayoutBinding, samplerLayoutBinding };
 
-	VkDescriptorBindingFlags bindingFlags[2] = {
+	// index 0 -> binding 0 (UBO): no flags
+	// index 1 -> binding 1 (light SSBO): no flags (fixed-size, not variable/update-after-bind)
+	// index 2 -> binding 2 (sampler array): variable count + update-after-bind, since it's LAST
+	VkDescriptorBindingFlags bindingFlags[3] = {
+		0,
 		0,
 		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
 		VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT |
@@ -1281,7 +1306,7 @@ void VulkanRenderer::CreateDescriptorSetLayout() {
 
 	VkDescriptorSetLayoutBindingFlagsCreateInfo layoutBindingFlags{};
 	layoutBindingFlags.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-	layoutBindingFlags.bindingCount = 2;
+	layoutBindingFlags.bindingCount = 3;
 	layoutBindingFlags.pBindingFlags = bindingFlags;
 
 	VkDescriptorSetLayoutCreateInfo layoutInfo{};
@@ -1296,19 +1321,22 @@ void VulkanRenderer::CreateDescriptorSetLayout() {
 	}
 }
 void VulkanRenderer::CreateDescriptorPool() {
-	VkDescriptorPoolSize poolSizes[2]{};
+	VkDescriptorPoolSize poolSizes[3]{};
 	poolSizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 	poolSizes[0].descriptorCount = 1;
 
-	poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	poolSizes[1].descriptorCount = 500;
+	poolSizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	poolSizes[1].descriptorCount = 1;
+
+	poolSizes[2].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	poolSizes[2].descriptorCount = 500;
 
 	VkDescriptorPoolCreateInfo poolInfo{};
 	poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-	poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT; // Allow binding changes on the fly
-	poolInfo.poolSizeCount = 2;
+	poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
+	poolInfo.poolSizeCount = 3;
 	poolInfo.pPoolSizes = poolSizes;
-	poolInfo.maxSets = 1; // Only need 1 global set now!
+	poolInfo.maxSets = 1;
 
 	if (vkCreateDescriptorPool(logicalDevice, &poolInfo, nullptr, &descriptorPool) != VK_SUCCESS) {
 		throw std::runtime_error("Failed to create global bindless descriptor pool.");
@@ -1348,7 +1376,23 @@ void VulkanRenderer::CreateDescriptorSet() {
 	descriptorWrite.descriptorCount = 1;
 	descriptorWrite.pBufferInfo = &bufferInfo;
 
-	vkUpdateDescriptorSets(logicalDevice, 1, &descriptorWrite, 0, nullptr);
+	VkDescriptorBufferInfo lightBufferInfo{};
+	lightBufferInfo.buffer = lightBuffer;
+	lightBufferInfo.offset = 0;
+	lightBufferInfo.range = sizeof(Light) * MAX_LIGHTS;
+
+	VkWriteDescriptorSet lightWrite{};
+	lightWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	lightWrite.dstSet = descriptorSet;
+	lightWrite.dstBinding = 1;
+	lightWrite.dstArrayElement = 0;
+	lightWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	lightWrite.descriptorCount = 1;
+	lightWrite.pBufferInfo = &lightBufferInfo;
+
+	std::array<VkWriteDescriptorSet, 2> writes = { descriptorWrite, lightWrite };
+
+	vkUpdateDescriptorSets(logicalDevice, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 }
 
 void VulkanRenderer::CreateUniformBuffer() {
@@ -1372,9 +1416,8 @@ void VulkanRenderer::UpdateUniformBuffer(const CameraData& cam) {
 	ubo.proj[1][1] *= -1;
 
 	ubo.ambient = 0.25f;                // brighter ambient
-	ubo.specularPower = 16.0f;           // softer highlights
-	ubo.lightDir = glm::normalize(glm::vec3(0.6f, 0.9f, 0.6f));
-	ubo.lightColor = glm::vec3(0.75f, 0.7f, 0.65f);
+	ubo.specularPower = 32.0f;           // softer highlights
+	ubo.lightCount = static_cast<uint32_t>(currentLights.size());
 
 	UpdateFrustumPlanes(ubo.proj * ubo.view);
 
@@ -1382,6 +1425,24 @@ void VulkanRenderer::UpdateUniformBuffer(const CameraData& cam) {
 	vkMapMemory(logicalDevice, uniformBufferMemory, 0, sizeof(ubo), 0, &data);
 	memcpy(data, &ubo, sizeof(ubo));
 	vkUnmapMemory(logicalDevice, uniformBufferMemory);
+}
+
+void VulkanRenderer::CreateLightBuffer() {
+	VkDeviceSize bufferSize = sizeof(Light) * MAX_LIGHTS;
+	CreateBuffer(bufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+		lightBuffer, lightBufferMemory);
+}
+void VulkanRenderer::SetLights(const std::vector<Light>& lights) {
+	currentLights = lights;
+	if (currentLights.size() > MAX_LIGHTS) {
+		currentLights.resize(MAX_LIGHTS); // or log a warning
+	}
+
+	void* data;
+	vkMapMemory(logicalDevice, lightBufferMemory, 0, sizeof(Light) * currentLights.size(), 0, &data);
+	memcpy(data, currentLights.data(), sizeof(Light) * currentLights.size());
+	vkUnmapMemory(logicalDevice, lightBufferMemory);
 }
 
 void VulkanRenderer::CreateImGuiDescriptorPool() {
@@ -1734,6 +1795,10 @@ void VulkanRenderer::Cleanup() {
 	// UBO
 	vkDestroyBuffer(logicalDevice, uniformBuffer, nullptr);
 	vkFreeMemory(logicalDevice, uniformBufferMemory, nullptr);
+
+	// Lights
+	vkDestroyBuffer(logicalDevice, lightBuffer, nullptr);
+	vkFreeMemory(logicalDevice, lightBufferMemory, nullptr);
 
 	// Pipelines & layout
 	if (graphicsPipeline != VK_NULL_HANDLE) vkDestroyPipeline(logicalDevice, graphicsPipeline, nullptr);

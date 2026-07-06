@@ -80,7 +80,7 @@ void AssetManager::CreateDefaultTexture() {
     VkWriteDescriptorSet descriptorWrite{};
     descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     descriptorWrite.dstSet = m_descriptorSet;   // <-- must be set before calling this!
-    descriptorWrite.dstBinding = 1;             // binding 1 is the texture array
+    descriptorWrite.dstBinding = 2;             // binding 1 is the texture array
     descriptorWrite.dstArrayElement = 0;        // index 0 = default texture
     descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     descriptorWrite.descriptorCount = 1;
@@ -113,7 +113,7 @@ void AssetManager::LoadTexture(const std::string& path) {
         VkWriteDescriptorSet descriptorWrite{};
         descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         descriptorWrite.dstSet = m_descriptorSet;
-        descriptorWrite.dstBinding = 1;
+        descriptorWrite.dstBinding = 2;
         descriptorWrite.dstArrayElement = id;
         descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         descriptorWrite.descriptorCount = 1;
