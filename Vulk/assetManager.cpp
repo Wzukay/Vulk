@@ -255,7 +255,7 @@ void AssetManager::GenerateMipmaps(VkImage image, VkFormat imageFormat, int32_t 
     vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
     EndSingleTimeCommands(commandBuffer);
 }
-void AssetManager::CreateTextureImage(const std::string& path, Texture& texture) {
+void AssetManager::CreateTextureImage(const std::string& path, Texture& texture, VkFormat format) {
     int texWidth, texHeight, texChannels;
     stbi_uc* pixels = stbi_load(path.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
     if (!pixels) {
@@ -286,7 +286,7 @@ void AssetManager::CreateTextureImage(const std::string& path, Texture& texture)
     imageInfo.extent.depth = 1;
     imageInfo.mipLevels = texture.mipLevels;
     imageInfo.arrayLayers = 1;
-    imageInfo.format = VK_FORMAT_R8G8B8A8_SRGB;
+    imageInfo.format = format;
     imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
     imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -305,13 +305,13 @@ void AssetManager::CreateTextureImage(const std::string& path, Texture& texture)
         throw std::runtime_error("Failed to allocate texture memory.");
     vkBindImageMemory(GetDevice(), texture.image, texture.imageMemory, 0);
 
-    TransitionImageLayout(texture.image, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, texture.mipLevels);
+    TransitionImageLayout(texture.image, format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, texture.mipLevels);
     CopyBufferToImage(stagingBuffer, texture.image, texWidth, texHeight);
     vkDestroyBuffer(GetDevice(), stagingBuffer, nullptr);
     vkFreeMemory(GetDevice(), stagingBufferMemory, nullptr);
 
-    GenerateMipmaps(texture.image, VK_FORMAT_R8G8B8A8_SRGB, texWidth, texHeight, texture.mipLevels);
-    CreateTextureImageView(texture, VK_FORMAT_R8G8B8A8_SRGB);
+    GenerateMipmaps(texture.image, format, texWidth, texHeight, texture.mipLevels);
+    CreateTextureImageView(texture, format);
     CreateTextureSampler(texture);
 }
 void AssetManager::CreateTextureImageView(Texture& texture, VkFormat format) {
@@ -353,10 +353,199 @@ void AssetManager::CreateTextureSampler(Texture& texture) {
         throw std::runtime_error("Failed to create texture sampler.");
 }
 
+void AssetManager::CreateDefaultNormalTexture() {
+    uint8_t flatNormalPixel[4] = { 128, 128, 255, 255 }; // tangent-space "no perturbation"
+    VkDeviceSize imageSize = 4;
+
+    VkBuffer stagingBuffer;
+    VkDeviceMemory stagingBufferMemory;
+    CreateBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        stagingBuffer, stagingBufferMemory);
+
+    void* data;
+    vkMapMemory(GetDevice(), stagingBufferMemory, 0, imageSize, 0, &data);
+    memcpy(data, flatNormalPixel, static_cast<size_t>(imageSize));
+    vkUnmapMemory(GetDevice(), stagingBufferMemory);
+
+    VkImageCreateInfo imageInfo{};
+    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.extent = { 1, 1, 1 };
+    imageInfo.mipLevels = 1;
+    imageInfo.arrayLayers = 1;
+    imageInfo.format = VK_FORMAT_R8G8B8A8_UNORM; // NOT sRGB — normal data is linear, not color
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    if (vkCreateImage(GetDevice(), &imageInfo, nullptr, &m_defaultNormalTexture.image) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create default normal texture image.");
+    }
+
+    VkMemoryRequirements memRequirements;
+    vkGetImageMemoryRequirements(GetDevice(), m_defaultNormalTexture.image, &memRequirements);
+
+    VkMemoryAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memRequirements.size;
+    allocInfo.memoryTypeIndex = FindMemoryType(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+    if (vkAllocateMemory(GetDevice(), &allocInfo, nullptr, &m_defaultNormalTexture.imageMemory) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to allocate default normal texture memory.");
+    }
+    vkBindImageMemory(GetDevice(), m_defaultNormalTexture.image, m_defaultNormalTexture.imageMemory, 0);
+
+    TransitionImageLayout(m_defaultNormalTexture.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    CopyBufferToImage(stagingBuffer, m_defaultNormalTexture.image, 1, 1);
+    TransitionImageLayout(m_defaultNormalTexture.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    vkDestroyBuffer(GetDevice(), stagingBuffer, nullptr);
+    vkFreeMemory(GetDevice(), stagingBufferMemory, nullptr);
+
+    CreateTextureImageView(m_defaultNormalTexture, VK_FORMAT_R8G8B8A8_UNORM);
+    CreateTextureSampler(m_defaultNormalTexture);
+
+    // Register as first normal texture (index 0)
+    m_normalTextureRegistry.clear();
+    m_normalTextureRegistry.push_back(m_defaultNormalTexture);
+    m_normalTextureToId["default"] = 0;
+
+    VkDescriptorImageInfo descriptorInfo{};
+    descriptorInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    descriptorInfo.imageView = m_defaultNormalTexture.imageView;
+    descriptorInfo.sampler = m_defaultNormalTexture.sampler;
+
+    VkWriteDescriptorSet descriptorWrite{};
+    descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    descriptorWrite.dstSet = m_descriptorSet;
+    descriptorWrite.dstBinding = 3;        // normal map array
+    descriptorWrite.dstArrayElement = 0;   // index 0 = default flat normal
+    descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    descriptorWrite.descriptorCount = 1;
+    descriptorWrite.pImageInfo = &descriptorInfo;
+
+    vkUpdateDescriptorSets(GetDevice(), 1, &descriptorWrite, 0, nullptr);
+}
+void AssetManager::LoadNormalTexture(const std::string& path) {
+    if (m_descriptorSet == VK_NULL_HANDLE) {
+        std::cerr << "[AssetManager] ERROR: m_descriptorSet is null in LoadNormalTexture!\n";
+        return;
+    }
+    if (path.empty()) return;
+    if (m_normalTextures.find(path) != m_normalTextures.end()) return;
+
+    try {
+        Texture tex;
+        CreateTextureImage(path, tex, VK_FORMAT_R8G8B8A8_UNORM); // reuses existing loader; format concern noted below
+        m_normalTextures[path] = tex;
+        m_normalTextureRegistry.push_back(tex);
+        uint32_t id = static_cast<uint32_t>(m_normalTextureRegistry.size()); // +1 offset, since slot 0 is default
+        m_normalTextureToId[path] = id;
+
+        VkDescriptorImageInfo descriptorInfo{};
+        descriptorInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        descriptorInfo.imageView = tex.imageView;
+        descriptorInfo.sampler = tex.sampler;
+
+        VkWriteDescriptorSet descriptorWrite{};
+        descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        descriptorWrite.dstSet = m_descriptorSet;
+        descriptorWrite.dstBinding = 3;
+        descriptorWrite.dstArrayElement = id;
+        descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        descriptorWrite.descriptorCount = 1;
+        descriptorWrite.pImageInfo = &descriptorInfo;
+
+        vkUpdateDescriptorSets(GetDevice(), 1, &descriptorWrite, 0, nullptr);
+        std::cout << "[AssetManager] Loaded normal map: " << path << " (ID: " << id << ")\n";
+    }
+    catch (const std::exception& e) {
+        std::cerr << "[AssetManager] Exception loading normal map '" << path << "': " << e.what() << "\n";
+    }
+}
+Texture* AssetManager::GetNormalTexture(const std::string& path) {
+    if (path.empty()) return &m_defaultNormalTexture;
+    auto it = m_normalTextures.find(path);
+    if (it != m_normalTextures.end()) return &it->second;
+    LoadNormalTexture(path);
+    return &m_normalTextures[path];
+}
+uint32_t AssetManager::GetNormalTextureId(const std::string& path) {
+    if (path.empty()) return 0; // slot 0 reserved for default flat normal
+    auto it = m_normalTextureToId.find(path);
+    if (it != m_normalTextureToId.end()) return it->second;
+    LoadNormalTexture(path);
+    return m_normalTextureToId[path];
+}
+
+static void ComputeTangents(std::vector<ModelVertex>& verts, const std::vector<uint32_t>& idxs) {
+    std::vector<glm::vec3> tanAccum(verts.size(), glm::vec3(0.0f));
+    std::vector<glm::vec3> bitanAccum(verts.size(), glm::vec3(0.0f));
+
+    for (size_t i = 0; i + 2 < idxs.size(); i += 3) {
+        uint32_t i0 = idxs[i], i1 = idxs[i + 1], i2 = idxs[i + 2];
+        ModelVertex& v0 = verts[i0];
+        ModelVertex& v1 = verts[i1];
+        ModelVertex& v2 = verts[i2];
+
+        glm::vec3 edge1 = v1.pos - v0.pos;
+        glm::vec3 edge2 = v2.pos - v0.pos;
+        glm::vec2 deltaUV1 = v1.texCoord - v0.texCoord;
+        glm::vec2 deltaUV2 = v2.texCoord - v0.texCoord;
+
+        float denom = (deltaUV1.x * deltaUV2.y - deltaUV2.x * deltaUV1.y);
+        if (std::abs(denom) < 1e-8f) continue; // degenerate UVs, skip this triangle
+        float f = 1.0f / denom;
+
+        glm::vec3 tangent = f * (deltaUV2.y * edge1 - deltaUV1.y * edge2);
+        glm::vec3 bitangent = f * (deltaUV1.x * edge2 - deltaUV2.x * edge1);
+
+        tanAccum[i0] += tangent; tanAccum[i1] += tangent; tanAccum[i2] += tangent;
+        bitanAccum[i0] += bitangent; bitanAccum[i1] += bitangent; bitanAccum[i2] += bitangent;
+    }
+
+    for (size_t i = 0; i < verts.size(); ++i) {
+        glm::vec3 n = verts[i].normal;
+        glm::vec3 t = tanAccum[i];
+
+        // Gram-Schmidt orthogonalize against the normal
+        t = t - n * glm::dot(n, t);
+        float len = glm::length(t);
+        if (len < 1e-8f) {
+            // Degenerate/no UV data - pick an arbitrary perpendicular vector
+            glm::vec3 fallback = std::abs(n.x) < 0.9f ? glm::vec3(1, 0, 0) : glm::vec3(0, 1, 0);
+            t = glm::normalize(glm::cross(n, fallback));
+        }
+        else {
+            t /= len;
+        }
+
+        // Handedness: does bitangent point the "expected" way relative to n x t?
+        float handedness = (glm::dot(glm::cross(n, t), bitanAccum[i]) < 0.0f) ? -1.0f : 1.0f;
+
+        verts[i].tangent = glm::vec4(t, handedness);
+    }
+}
+static std::string GuessNormalMapPath(const std::string& diffusePath) {
+    if (diffusePath.empty()) return "";
+
+    std::string candidate = diffusePath;
+    size_t pos = candidate.rfind("_diff");
+    if (pos != std::string::npos) {
+        candidate.replace(pos, 5, "_ddn"); // "_diff.tga" -> "_ddn.tga"
+        std::ifstream test(candidate);
+        if (test.good()) return candidate;
+    }
+    return "";
+}
 void AssetManager::ParseObjFileByMaterial(const std::string& filepath,
     std::vector<std::vector<ModelVertex>>& verticesPerMaterial,
     std::vector<std::vector<uint32_t>>& indicesPerMaterial,
-    std::vector<std::string>& textureFilenames) {
+    std::vector<std::string>& textureFilenames,
+    std::vector<std::string>& normalMapFilenames) {
 
     tinyobj::attrib_t attrib;
     std::vector<tinyobj::shape_t> shapes;
@@ -382,11 +571,19 @@ void AssetManager::ParseObjFileByMaterial(const std::string& filepath,
     verticesPerMaterial.resize(materialCount + 1);
     indicesPerMaterial.resize(materialCount + 1);
     textureFilenames.resize(materialCount + 1, "");
+    normalMapFilenames.resize(materialCount + 1, "");
 
     for (size_t m = 0; m < materialCount; m++) {
         textureFilenames[m] = materials[m].diffuse_texname.empty()
             ? ""
             : baseDir + materials[m].diffuse_texname;
+
+        normalMapFilenames[m] = materials[m].bump_texname.empty()  // NEW
+            ? "" : baseDir + materials[m].bump_texname;
+
+        if (normalMapFilenames[m].empty()) {
+            normalMapFilenames[m] = GuessNormalMapPath(textureFilenames[m]);
+        }
     }
 
     std::vector<std::unordered_map<ModelVertex, uint32_t>> uniqueVerticesPerMaterial(materialCount + 1);
@@ -443,8 +640,9 @@ void AssetManager::LoadMesh(const std::string& path) {
     std::vector<std::vector<ModelVertex>> verticesPerMaterial;
     std::vector<std::vector<uint32_t>> indicesPerMaterial;
     std::vector<std::string> textureFilenames;
+    std::vector<std::string> normalMapFilenames;
 
-    ParseObjFileByMaterial(path, verticesPerMaterial, indicesPerMaterial, textureFilenames);
+    ParseObjFileByMaterial(path, verticesPerMaterial, indicesPerMaterial, textureFilenames, normalMapFilenames);
 
     // Flip winding to match Vulkan's clockwise front face
     for (auto& idxs : indicesPerMaterial) {
@@ -453,9 +651,12 @@ void AssetManager::LoadMesh(const std::string& path) {
         }
     }
 
+    for (size_t m = 0; m < verticesPerMaterial.size(); ++m) {
+        if (indicesPerMaterial[m].empty()) continue;
+        ComputeTangents(verticesPerMaterial[m], indicesPerMaterial[m]);
+    }
+
     MeshAsset mesh;
-    // Combine all materials into one continuous mesh (if you want to keep per-material submeshes)
-    // We'll keep submeshes per material.
     uint32_t vertexOffset = 0;
     uint32_t indexOffset = 0;
 
@@ -485,7 +686,9 @@ void AssetManager::LoadMesh(const std::string& path) {
         mesh.vertices.insert(mesh.vertices.end(), verts.begin(), verts.end());
         mesh.indices.insert(mesh.indices.end(), idxs.begin(), idxs.end());
         mesh.subMeshes.push_back(sub);
+
         mesh.materialTextures.push_back(textureFilenames[m]);
+        mesh.normalMapTextures.push_back(normalMapFilenames[m]);
 
         vertexOffset += static_cast<uint32_t>(verts.size());
         indexOffset += static_cast<uint32_t>(idxs.size());
@@ -627,5 +830,17 @@ void AssetManager::Cleanup(VkDevice device) {
     m_textureRegistry.clear();
     m_textures.clear();
     m_textureToId.clear();
+
+    // NEW: mirror cleanup for normal map registry
+    for (auto& tex : m_normalTextureRegistry) {
+        if (tex.sampler != VK_NULL_HANDLE) vkDestroySampler(device, tex.sampler, nullptr);
+        if (tex.imageView != VK_NULL_HANDLE) vkDestroyImageView(device, tex.imageView, nullptr);
+        if (tex.image != VK_NULL_HANDLE) vkDestroyImage(device, tex.image, nullptr);
+        if (tex.imageMemory != VK_NULL_HANDLE) vkFreeMemory(device, tex.imageMemory, nullptr);
+    }
+    m_normalTextureRegistry.clear();
+    m_normalTextures.clear();
+    m_normalTextureToId.clear();
+
     m_meshes.clear();
 }

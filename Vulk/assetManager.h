@@ -15,6 +15,7 @@ struct MeshAsset {
     std::vector<uint32_t> indices;
     std::vector<SubMesh> subMeshes;
     std::vector<std::string> materialTextures; // per submesh
+    std::vector<std::string> normalMapTextures;
 };
 
 class AssetManager {
@@ -27,13 +28,17 @@ private:
     std::unordered_map<std::string, uint32_t> m_textureToId;
     std::vector<Texture> m_textureRegistry;
 
+    std::unordered_map<std::string, Texture> m_normalTextures;       
+    std::unordered_map<std::string, uint32_t> m_normalTextureToId;    
+    std::vector<Texture> m_normalTextureRegistry;                   
+
+    Texture m_defaultNormalTexture;
     Texture m_defaultTexture;
 
 public:
     void Cleanup(VkDevice device);
     void SetRenderer(VulkanRenderer* renderer) { m_renderer = renderer; }
 
-public:
     void LoadMesh(const std::string& path);
     void RegisterMesh(const std::string& name, const std::vector<ModelVertex>& vertices,
         const std::vector<uint32_t>& indices,
@@ -43,25 +48,34 @@ public:
     void ParseObjFileByMaterial(const std::string& filepath,
         std::vector<std::vector<ModelVertex>>& verticesPerMaterial,
         std::vector<std::vector<uint32_t>>& indicesPerMaterial,
-        std::vector<std::string>& textureFilenames);
+        std::vector<std::string>& textureFilenames,
+        std::vector<std::string>& normalMapFilenames);
     void SetDescriptorSet(VkDescriptorSet set) { m_descriptorSet = set; }
 
 public:
-    void CreateTextureImage(const std::string& path, Texture& tex);
+    void CreateTextureImage(const std::string& path, Texture& tex, VkFormat format = VK_FORMAT_R8G8B8A8_SRGB);
     void CreateTextureImageView(Texture& tex, VkFormat format);
     void CreateTextureSampler(Texture& tex);
     void TransitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t mipLevels = 1);
     void CopyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height);
     void GenerateMipmaps(VkImage image, VkFormat imageFormat, int32_t texWidth, int32_t texHeight, uint32_t mipLevels);
+    
     Texture* GetTexture(const std::string& path);
     uint32_t GetTextureId(const std::string& path);
+    
+    Texture* GetNormalTexture(const std::string& path);     
+    uint32_t GetNormalTextureId(const std::string& path);   
+
     void LoadTexture(const std::string& path);
+    void LoadNormalTexture(const std::string& path);        
+
+    void CreateDefaultTexture();
+    void CreateDefaultNormalTexture();
 
     const std::vector<Texture>& GetTextureRegistry() const { return m_textureRegistry; }
     const std::unordered_map<std::string, uint32_t>& GetTextureMap() const { return m_textureToId; }
 
     Texture& GetDefaultTexture() { return m_defaultTexture; }
-    void CreateDefaultTexture();
 
 private:
     VkDevice GetDevice() const;

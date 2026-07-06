@@ -50,9 +50,10 @@ struct UniformBufferObject {
 };
 
 struct PushConstants {
-    glm::mat4 modelMatrix; // 64 bytes
-    uint32_t textureId;     // 4 bytes
-    uint32_t objectId;      // 4 bytes
+    glm::mat4 modelMatrix;      // 64 bytes
+    uint32_t textureId;         // 4 bytes
+    uint32_t normalTextureId;   // 4 bytes
+    uint32_t objectId;          // 4 bytes
 };
 
 struct DrawEntry {

@@ -16,11 +16,11 @@ void Game::Init()
 
     glm::mat4 sponzaTransform = glm::mat4(1.0f);
     sponzaTransform = glm::rotate(sponzaTransform, glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-    sponzaTransform = glm::scale(sponzaTransform, glm::vec3(0.5f));
+    sponzaTransform = glm::scale(sponzaTransform, glm::vec3(0.3f));
     scene.AddInstance("assets/models/sponza/sponza.obj", sponzaTransform, 1);
 
     scene.AddLight(MakeDirectional(glm::vec3(0.6f, 0.9f, 0.6f), glm::vec3(0.75f, 0.7f, 0.65f), 1.0f));
-    scene.AddLight(MakePoint(glm::vec3(2.0f, 10.0f, -1.0f), glm::vec3(1.0f, 0.4f, 0.2f), 40.0f, 8.0f));
+    //scene.AddLight(MakePoint(glm::vec3(2.0f, 10.0f, -1.0f), glm::vec3(1.0f, 0.4f, 0.2f), 1.0f, 15.0f));
 
     glfwSetWindowUserPointer(window, &input);
     glfwSetCursorPosCallback(window, [](GLFWwindow* window, double xpos, double ypos) {

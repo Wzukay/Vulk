@@ -91,6 +91,7 @@ void VulkanRenderer::InitVulkan() {
 	g_AssetManager.SetRenderer(this);
 	g_AssetManager.SetDescriptorSet(descriptorSet);
 	g_AssetManager.CreateDefaultTexture();
+	g_AssetManager.CreateDefaultNormalTexture();
 
 	CreateGraphicsPipeline(g_Settings.wireframe ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL);
 }
@@ -743,6 +744,7 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 				constants.modelMatrix = obj.modelMatrix;
 				constants.objectId = obj.objectId;
 				constants.textureId = sub.textureId;
+				constants.normalTextureId = sub.normalTextureId;
 
 				vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
 					0, sizeof(PushConstants), &constants);
@@ -817,6 +819,9 @@ void VulkanRenderer::UpdateScene(const Scene& scene) {
 			const std::string& texPath = mesh->materialTextures[subIdx];
 			uint32_t texId = g_AssetManager.GetTextureId(texPath);
 			newSub.textureId = texId;
+
+			const std::string& normalPath = mesh->normalMapTextures[subIdx];
+			newSub.normalTextureId = g_AssetManager.GetNormalTextureId(normalPath);
 
 			allSubMeshes.push_back(newSub);
 		}
@@ -1080,8 +1085,8 @@ void VulkanRenderer::CreateGraphicsPipeline(VkPolygonMode polygonMode) {
 	VkPipelineShaderStageCreateInfo shaderStages[] = { vertShaderStageInfo, fragShaderStageInfo };
 
 	// 3. Fixed Function: Vertex Input State
-	auto bindingDescription = Vertex::getBindingDescription();
-	auto attributeDescriptions = Vertex::getAttributeDescriptions();
+	auto bindingDescription = ModelVertex::getBindingDescription();
+	auto attributeDescriptions = ModelVertex::getAttributeDescriptions();
 
 	VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
 	vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -1291,22 +1296,30 @@ void VulkanRenderer::CreateDescriptorSetLayout() {
 	samplerLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 	samplerLayoutBinding.pImmutableSamplers = nullptr;
 
-	std::array<VkDescriptorSetLayoutBinding, 3> bindings = { uboLayoutBinding, lightLayoutBinding, samplerLayoutBinding };
+	VkDescriptorSetLayoutBinding normalSamplerBinding{};
+	normalSamplerBinding.binding = 3;
+	normalSamplerBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	normalSamplerBinding.descriptorCount = 500;
+	normalSamplerBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+	normalSamplerBinding.pImmutableSamplers = nullptr;
+
+	std::array<VkDescriptorSetLayoutBinding, 4> bindings = {
+		uboLayoutBinding, lightLayoutBinding, samplerLayoutBinding, normalSamplerBinding
+	};
 
 	// index 0 -> binding 0 (UBO): no flags
 	// index 1 -> binding 1 (light SSBO): no flags (fixed-size, not variable/update-after-bind)
 	// index 2 -> binding 2 (sampler array): variable count + update-after-bind, since it's LAST
-	VkDescriptorBindingFlags bindingFlags[3] = {
-		0,
-		0,
-		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT |
-		VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT |
-		VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT
+	VkDescriptorBindingFlags bindingFlags[4] = {
+	0,
+	0,
+	VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,
+	VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT
 	};
 
 	VkDescriptorSetLayoutBindingFlagsCreateInfo layoutBindingFlags{};
 	layoutBindingFlags.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-	layoutBindingFlags.bindingCount = 3;
+	layoutBindingFlags.bindingCount = 4;
 	layoutBindingFlags.pBindingFlags = bindingFlags;
 
 	VkDescriptorSetLayoutCreateInfo layoutInfo{};
@@ -1329,7 +1342,7 @@ void VulkanRenderer::CreateDescriptorPool() {
 	poolSizes[1].descriptorCount = 1;
 
 	poolSizes[2].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	poolSizes[2].descriptorCount = 500;
+	poolSizes[2].descriptorCount = 1000;
 
 	VkDescriptorPoolCreateInfo poolInfo{};
 	poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -1348,14 +1361,6 @@ void VulkanRenderer::CreateDescriptorSet() {
 	allocInfo.descriptorPool = descriptorPool;
 	allocInfo.descriptorSetCount = 1;
 	allocInfo.pSetLayouts = &descriptorSetLayout;
-
-	// Configure variable descriptor size limitations
-	VkDescriptorSetVariableDescriptorCountAllocateInfo countInfo{};
-	countInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO;
-	countInfo.descriptorSetCount = 1;
-	uint32_t maxBindingCounts = 500;
-	countInfo.pDescriptorCounts = &maxBindingCounts;
-	allocInfo.pNext = &countInfo;
 
 	if (vkAllocateDescriptorSets(logicalDevice, &allocInfo, &descriptorSet) != VK_SUCCESS) {
 		throw std::runtime_error("Failed to allocate global bindless descriptor set.");
@@ -1435,6 +1440,7 @@ void VulkanRenderer::CreateLightBuffer() {
 }
 void VulkanRenderer::SetLights(const std::vector<Light>& lights) {
 	currentLights = lights;
+
 	if (currentLights.size() > MAX_LIGHTS) {
 		currentLights.resize(MAX_LIGHTS); // or log a warning
 	}

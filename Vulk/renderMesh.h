@@ -13,9 +13,11 @@ struct ModelVertex {
     glm::vec3 pos;
     glm::vec3 normal;
     glm::vec2 texCoord;
+    glm::vec4 tangent;
 
     bool operator==(const ModelVertex& other) const {
-        return pos == other.pos && normal == other.normal && texCoord == other.texCoord;
+        return pos == other.pos && normal == other.normal &&
+            texCoord == other.texCoord && tangent == other.tangent;
     }
 
     static VkVertexInputBindingDescription getBindingDescription() {
@@ -26,8 +28,8 @@ struct ModelVertex {
         return bindingDescription;
     }
 
-    static std::array<VkVertexInputAttributeDescription, 3> getAttributeDescriptions() {
-        std::array<VkVertexInputAttributeDescription, 3> attributeDescriptions{};
+    static std::array<VkVertexInputAttributeDescription, 4> getAttributeDescriptions() {
+        std::array<VkVertexInputAttributeDescription, 4> attributeDescriptions{};
 
         attributeDescriptions[0].binding = 0;
         attributeDescriptions[0].location = 0;
@@ -43,6 +45,11 @@ struct ModelVertex {
         attributeDescriptions[2].location = 2;
         attributeDescriptions[2].format = VK_FORMAT_R32G32_SFLOAT;
         attributeDescriptions[2].offset = offsetof(ModelVertex, texCoord);
+
+        attributeDescriptions[3].binding = 0;
+        attributeDescriptions[3].location = 3;
+        attributeDescriptions[3].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+        attributeDescriptions[3].offset = offsetof(ModelVertex, tangent);
 
         return attributeDescriptions;
     }
@@ -84,9 +91,11 @@ struct RenderMesh {
 namespace std {
     template<> struct hash<ModelVertex> {
         size_t operator()(ModelVertex const& vertex) const {
-            return ((hash<glm::vec3>()(vertex.pos) ^
+            size_t h = ((hash<glm::vec3>()(vertex.pos) ^
                 (hash<glm::vec3>()(vertex.normal) << 1)) >> 1) ^
                 (hash<glm::vec2>()(vertex.texCoord) << 1);
+            h ^= hash<float>()(vertex.tangent.x) + 0x9e3779b9 + (h << 6) + (h >> 2);
+            return h;
         }
     };
 }
