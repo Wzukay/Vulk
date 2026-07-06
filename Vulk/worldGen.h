@@ -1,7 +1,8 @@
 #pragma once
 
 #include "terrain.h"
-#include "renderer.h"
+#include "assetManager.h"
+#include "scene.h"
 
 #include <iostream>
 
@@ -17,12 +18,25 @@ public:
     void SetSeed(int newSeed) { seed = newSeed; }
 	int GetSeed() const { return seed; }
 
-    void InitializeWorld(VulkanRenderer& renderer, int width, int depth) {
+    void InitializeWorld(VulkanRenderer& renderer, Scene& scene, int width, int depth) {
         Terrain terrain;
         terrain.GenerateTerrain(width, depth, seed); // Generate 100x100 grid
 
-        // Send data to renderer
-        renderer.UpdateGeometry(terrain.vertices, terrain.indices);
+        std::vector<ModelVertex> modelVerts;
+        modelVerts.reserve(terrain.vertices.size());
+        for (const auto& v : terrain.vertices) {
+            ModelVertex mv;
+            mv.pos = v.pos;
+            mv.normal = glm::vec3(0.0f, 1.0f, 0.0f); // default normal
+            mv.texCoord = v.texCoord;
+            modelVerts.push_back(mv);
+        }
+
+        // Register the terrain mesh
+        //g_AssetManager.RegisterMesh("terrain", modelVerts, terrain.indices);
+
+        // Add terrain instance to the scene (identity transform, objectId = 0)
+        //scene.AddInstance("terrain", glm::mat4(1.0f), 0);
     }
 };
 

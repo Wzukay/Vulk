@@ -26,6 +26,8 @@ private:
 
 	GLFWwindow* window;
 
+	Scene scene;
+
 	NetworkManager netManager;
 	WorldGen worldGenerator;
 	VulkanRenderer renderer;

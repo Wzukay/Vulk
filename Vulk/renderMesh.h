@@ -1,8 +1,13 @@
 #pragma once
+
+#define GLM_ENABLE_EXPERIMENTAL   // <-- MUST be first
+
 #include <vulkan/vulkan.h>
 #include <vector>
 #include <array>
 #include <glm/glm.hpp>
+#include <glm/gtx/hash.hpp>
+#include <functional>
 
 struct ModelVertex {
     glm::vec3 pos;
@@ -46,7 +51,7 @@ struct ModelVertex {
 struct RenderMesh {
     VkBuffer vertexBuffer = VK_NULL_HANDLE;
     VkDeviceMemory vertexBufferMemory = VK_NULL_HANDLE;
-	uint32_t vertexCount = 0;
+    uint32_t vertexCount = 0;
     VkBuffer indexBuffer = VK_NULL_HANDLE;
     VkDeviceMemory indexBufferMemory = VK_NULL_HANDLE;
     uint32_t indexCount = 0;
@@ -69,6 +74,19 @@ struct RenderMesh {
             vertexBufferMemory = VK_NULL_HANDLE;
         }
         indexCount = 0;
-		vertexCount = 0;
+        vertexCount = 0;
     }
 };
+
+// ============================================================
+// Hash specialization for ModelVertex – needed for unordered_map
+// ============================================================
+namespace std {
+    template<> struct hash<ModelVertex> {
+        size_t operator()(ModelVertex const& vertex) const {
+            return ((hash<glm::vec3>()(vertex.pos) ^
+                (hash<glm::vec3>()(vertex.normal) << 1)) >> 1) ^
+                (hash<glm::vec2>()(vertex.texCoord) << 1);
+        }
+    };
+}

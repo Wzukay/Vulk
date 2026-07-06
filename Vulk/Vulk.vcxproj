@@ -159,6 +159,7 @@
     </Manifest>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="assetManager.cpp" />
     <ClCompile Include="game.cpp" />
     <ClCompile Include="include\imgui\imgui.cpp" />
     <ClCompile Include="include\imgui\imgui_draw.cpp" />
@@ -171,11 +172,12 @@
     <ClCompile Include="main.cpp" />
     <ClCompile Include="networkManager.cpp" />
     <ClCompile Include="renderer.cpp" />
+    <ClCompile Include="settings.cpp" />
     <ClCompile Include="terrain.cpp" />
     <ClCompile Include="vertex.cpp" />
-    <ClCompile Include="worldGen.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="assetManager.h" />
     <ClInclude Include="FastNoiseLite.h" />
     <ClInclude Include="game.h" />
     <ClInclude Include="input.h" />
@@ -183,6 +185,9 @@
     <ClInclude Include="renderMesh.h" />
     <ClInclude Include="networkManager.h" />
     <ClInclude Include="renderer.h" />
+    <ClInclude Include="scene.h" />
+    <ClInclude Include="scene_types.h" />
+    <ClInclude Include="settings.h" />
     <ClInclude Include="stb_image.h" />
     <ClInclude Include="terrain.h" />
     <ClInclude Include="texture.h" />
@@ -193,6 +198,8 @@
   <ItemGroup>
     <None Include="shaders\shader.frag" />
     <None Include="shaders\shader.vert" />
+    <None Include="shaders\shadow.vert" />
+    <None Include="shadow.vert" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

@@ -6,29 +6,24 @@ bool isReadyToDraw = false;
 void Game::Init()
 { 
     std::cout << "Starting Base Vulkan Setup...\n";
-    renderer.Initialize(1280, 720, "Vulk");
 
-    renderer.LoadModelAsset("assets/models/cucumber.obj", glm::vec3(0.0f, 5.0f, -5.0f), 1.0f, "assets/models/cucumber.png");
-    renderer.LoadModelAsset("assets/models/IronMan.obj", glm::vec3(10.0f, 0.0f, 3.0f), .01f);
+    g_Settings.LoadFromFile();
 
-    try {
-        renderer.LoadModelAsset("assets/models/sponza/sponza.obj", glm::vec3(10.0f, 0.0f, 0.0f), .5f);
-    }
-    catch (const std::exception& e) {
-        std::cerr << "[FATAL] Failed to load Sponza: " << e.what() << "\n";
-    }
-
+    renderer.Initialize(g_Settings.windowWidth, g_Settings.windowHeight, "Vulk");
     window = renderer.GetWindow();
 
-    glfwSetWindowUserPointer(window, &input);
+    g_AssetManager.LoadMesh("assets/models/sponza/sponza.obj");
 
-    // Define the static callback that calls the Input class method
+    glm::mat4 sponzaTransform = glm::mat4(1.0f);
+    sponzaTransform = glm::rotate(sponzaTransform, glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+    sponzaTransform = glm::scale(sponzaTransform, glm::vec3(0.5f));
+    scene.AddInstance("assets/models/sponza/sponza.obj", sponzaTransform, 1);
+
+    glfwSetWindowUserPointer(window, &input);
     glfwSetCursorPosCallback(window, [](GLFWwindow* window, double xpos, double ypos) {
         Input* inputPtr = reinterpret_cast<Input*>(glfwGetWindowUserPointer(window));
         inputPtr->ProcessMouse(window, xpos, ypos);
         });
-
-    // Hide cursor for FPS feel
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
     std::cout << "Setup complete! Running base frame check window loop...\n";
@@ -45,9 +40,11 @@ void Game::Init()
     }
     else {
         worldGenerator.GetRandomSeed();
-        worldGenerator.InitializeWorld(renderer, 200, 200);
+        worldGenerator.InitializeWorld(renderer, scene, 200, 200);
         isReadyToDraw = true;
     }
+
+    renderer.UpdateScene(scene);
 
     isRunning = true;
 }
@@ -78,6 +75,9 @@ void Game::Loop()
     }
 
     std::cout << "Closing and dropping pipelines...\n";
+
+    g_Settings.SaveToFile();
+
     renderer.Cleanup();
     ShutdownCleanly();
 }
@@ -91,7 +91,7 @@ void Game::ShutdownCleanly() {
 }
 
 void Game::ProcessNetworkPackets() {
-    isHost = netManager.IsHost();
+    isHost = netManager.IsHost();   
 
     if (isHost && !isReadyToDraw) {
         // Double check if we are truly ready (meaning we have received our manifest response)
@@ -99,7 +99,8 @@ void Game::ProcessNetworkPackets() {
             debugLog.AddLog("[Lobby] Async role resolved: You are HOST. Generating world...");
 
             worldGenerator.GetRandomSeed();
-            worldGenerator.InitializeWorld(renderer, 200, 200);
+            worldGenerator.InitializeWorld(renderer, scene, 200, 200);
+            renderer.UpdateScene(scene);
             isReadyToDraw = true;
         }
     }
@@ -131,7 +132,7 @@ void Game::ProcessNetworkPackets() {
                 int seed = std::stoi(seedStr);
 
                 worldGenerator.SetSeed(seed);
-                worldGenerator.InitializeWorld(renderer, 200, 200);
+                worldGenerator.InitializeWorld(renderer, scene, 200, 200);
                 isReadyToDraw = true;
 
                 std::cout << "[Network Test] SUCCESS! World buffers built for client.\n";
