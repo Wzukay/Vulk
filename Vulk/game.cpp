@@ -1,4 +1,5 @@
 #include "game.h"
+#include "assetManager.h"
 
 GameLogger debugLog;
 bool isReadyToDraw = false;
@@ -18,6 +19,14 @@ void Game::Init()
     //sponzaTransform = glm::rotate(sponzaTransform, glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
     //sponzaTransform = glm::scale(sponzaTransform, glm::vec3(0.3f));
     //scene.AddInstance("assets/models/sponza/sponza.obj", sponzaTransform, 1);
+
+    uint32_t sandId = g_AssetManager.LoadTextureFromFile("assets/textures/sand_albedo.png");   // Index 0
+    uint32_t grassId = g_AssetManager.LoadTextureFromFile("assets/textures/grass_albedo.png");  // Index 1
+    uint32_t rockId = g_AssetManager.LoadTextureFromFile("assets/textures/rock_albedo.png");   // Index 2
+
+    uint32_t sandNormalId = g_AssetManager.LoadTextureFromFile("assets/textures/sand_normal.png");
+    uint32_t grassNormalId = g_AssetManager.LoadTextureFromFile("assets/textures/grass_normal.png");
+    uint32_t rockNormalId = g_AssetManager.LoadTextureFromFile("assets/textures/rock_normal.png");
 
     scene.AddLight(MakeDirectional(glm::vec3(0.6f, 0.9f, 0.6f), glm::vec3(0.75f, 0.7f, 0.65f), 1.0f));
     //scene.AddLight(MakePoint(glm::vec3(2.0f, 10.0f, -1.0f), glm::vec3(1.0f, 0.4f, 0.2f), 1.0f, 15.0f));
@@ -80,6 +89,7 @@ void Game::Loop()
             renderer.UpdateUniformBuffer({ cam.pos, cam.front, cam.up });
 
             chunk.Update(cam.pos, scene, renderer);
+            chunk.PreGenerateChunks(cam.pos, scene, renderer);
         }
 
         renderer.DrawFrame();

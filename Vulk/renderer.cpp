@@ -294,13 +294,16 @@ void VulkanRenderer::InitVulkan() {
 	CreateSyncObjects();
 
 	CreateDescriptorSetLayout();
-	CreateUniformBuffer();
-	CreateLightBuffer();
-	CreateDescriptorPool();
-	CreateDescriptorSet();
 
-	CreateImGui();
+	CreateUniformBuffer();     
+	CreateLightBuffer();     
+
+	CreateDescriptorPool();
+	CreateDescriptorSet();  
+
 	CreateGlobalBuffers();
+	CreateImGui();
+	CreateTerrainBuffers();
 
 	g_AssetManager.SetRenderer(this);
 	g_AssetManager.SetDescriptorSet(descriptorSet);
@@ -667,9 +670,16 @@ void VulkanRenderer::CreateCommandPool() {
 	poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
 	poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
 	poolInfo.queueFamilyIndex = queueFamilyIndices.graphicsFamily.value();
-
 	if (vkCreateCommandPool(logicalDevice, &poolInfo, nullptr, &commandPool) != VK_SUCCESS) {
-		throw std::runtime_error("Failed to allocate graphics command allocation pool.");
+		throw std::runtime_error("Failed to create command pool");
+	}
+
+	VkCommandPoolCreateInfo uploadPoolInfo{};
+	uploadPoolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+	uploadPoolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+	uploadPoolInfo.queueFamilyIndex = queueFamilyIndices.graphicsFamily.value();
+	if (vkCreateCommandPool(logicalDevice, &uploadPoolInfo, nullptr, &uploadCommandPool) != VK_SUCCESS) {
+		throw std::runtime_error("Failed to create upload command pool");
 	}
 }
 void VulkanRenderer::CreateCommandBuffers() {
@@ -729,6 +739,8 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 	}
 
 	drawCallCount = 0;
+	sceneTotalVertices = 0;
+	sceneTotalIndices = 0;
 
 	VkCommandBufferBeginInfo beginInfo{};
 	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -808,10 +820,6 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 
 				visibleStaticDrawList.push_back(entry);
 			}
-			
-			std::sort(visibleStaticDrawList.begin(), visibleStaticDrawList.end(), [](const DrawEntry& a, const DrawEntry& b) {
-				return a.distSq < b.distSq;
-				});
 
 			DrawStaticMeshes(commandBuffer);
 
@@ -853,67 +861,45 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 
 void VulkanRenderer::DrawTerrain(VkCommandBuffer commandBuffer)
 {
-	for (auto& [key, chunk] : terrainChunks)
-	{
-		if (!IsSphereInFrustum(
-			chunk.center,
-			chunk.radius))
-		{
+	if (terrainChunks.empty())
+		return;
+
+	if (globalTerrainVertexBuffer == VK_NULL_HANDLE || globalTerrainIndexBuffer == VK_NULL_HANDLE) {
+		std::cerr << "Global terrain buffers are null!\n";
+		return;
+	}
+
+	VkBuffer vertexBuffers[] = { globalTerrainVertexBuffer };
+	VkDeviceSize offsets[] = { 0 };
+	vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+	vkCmdBindIndexBuffer(commandBuffer, globalTerrainIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+	static int frameCount = 0;
+
+	for (auto& [key, chunk] : terrainChunks) {
+		if (!chunk.ready) continue;
+
+		if (!IsSphereInFrustum(chunk.center, chunk.radius)) {
+			culledCount++;
 			continue;
 		}
 
-
-		VkBuffer vertexBuffers[] =
-		{
-			chunk.vertexBuffer
-		};
-
-		VkDeviceSize offsets[] =
-		{
-			0
-		};
-
-
-		vkCmdBindVertexBuffers(
-			commandBuffer,
-			0,
-			1,
-			vertexBuffers,
-			offsets);
-
-
-		vkCmdBindIndexBuffer(
-			commandBuffer,
-			chunk.indexBuffer,
-			0,
-			VK_INDEX_TYPE_UINT32);
-
-
+		sceneTotalVertices += chunk.vertexCount;
+		sceneTotalIndices += chunk.indexCount;
 
 		PushConstants constants{};
+		constants.modelMatrix = glm::mat4(1.0f);
+		// (If you have per‑chunk textures, push them here)
+		vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
+			0, sizeof(PushConstants), &constants);
 
-		constants.modelMatrix =
-			glm::mat4(1.0f);
-
-
-		vkCmdPushConstants(
-			commandBuffer,
-			pipelineLayout,
-			VK_SHADER_STAGE_VERTEX_BIT,
-			0,
-			sizeof(PushConstants),
-			&constants);
-
-
-
-		vkCmdDrawIndexed(
-			commandBuffer,
-			chunk.indexCount,
-			1,
-			0,
-			0,
-			0);
-
+		// 5. Fire high-speed indexed offset draw directly against the global memory allocation
+		vkCmdDrawIndexed(commandBuffer,
+			chunk.indexCount,       // number of indices
+			1,                      // instance count
+			chunk.indexOffset,      // first index placement within the monolithic buffer
+			chunk.vertexOffset,     // vertex offset structural scalar scalar
+			0);                     // first instance
 
 		drawCallCount++;
 	}
@@ -1022,12 +1008,8 @@ void VulkanRenderer::UpdateScene(const Scene& scene) {
 			sub++)
 		{
 			DrawEntry entry{};
-
-			entry.objectIndex =
-				static_cast<uint32_t>(objects.size());
-
+			entry.objectIndex = static_cast<uint32_t>(objects.size()) - 1;
 			entry.subMeshIndex = sub;
-
 			staticDrawList.push_back(entry);
 		}
 
@@ -1040,7 +1022,10 @@ void VulkanRenderer::UpdateScene(const Scene& scene) {
 	currentSceneObjects = std::move(objects);
 	currentSceneSubMeshes = std::move(allSubMeshes);
 
-	UpdateTextureDescriptors(scene);
+	if (g_AssetManager.IsTextureDirty()) {
+		UpdateTextureDescriptors(scene);
+		g_AssetManager.ClearTextureDirty();
+	}
 
 	if (scene.HasModifiedLights()) {
 		std::vector<Light> lights;
@@ -1112,119 +1097,6 @@ void VulkanRenderer::UpdateTextureDescriptors(const Scene& scene) {
 
 	if (!writes.empty()) {
 		vkUpdateDescriptorSets(logicalDevice, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
-	}
-}
-
-void VulkanRenderer::DrawFrame() {
-	using clock = std::chrono::high_resolution_clock;
-	auto t0 = clock::now();
-
-	if (globalVertexBuffer == VK_NULL_HANDLE) {
-		std::cout << "CRITICAL: vertexBuffer is still null when drawing!" << std::endl;
-	}
-
-	ApplySettings();
-	auto t1 = clock::now();
-
-	DrawGUI();
-	auto t2 = clock::now();
-
-	vkWaitForFences(logicalDevice, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
-	auto t3 = clock::now();
-
-	auto& pending = pendingDeletions[currentFrame];
-	for (auto buf : pending.buffers) {
-		if (buf != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, buf, nullptr);
-	}
-	for (auto mem : pending.memories) {
-		if (mem != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, mem, nullptr);
-	}
-	pending.buffers.clear();
-	pending.memories.clear();
-
-	uint32_t imageIndex;
-	VkResult acquireResult = vkAcquireNextImageKHR(logicalDevice, swapChain, UINT64_MAX,
-		imageAvailableSemaphores[currentFrame],
-		VK_NULL_HANDLE, &imageIndex);
-	auto t4 = clock::now();
-
-	if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR || acquireResult == VK_SUBOPTIMAL_KHR) {
-		RecreateSwapChain();
-		return; // skip this frame
-	}
-	else if (acquireResult != VK_SUCCESS) {
-		throw std::runtime_error("Failed to acquire swapchain image.");
-	}
-
-	if (imagesInFlight[imageIndex] != VK_NULL_HANDLE) {
-		vkWaitForFences(logicalDevice, 1, &imagesInFlight[imageIndex], VK_TRUE, UINT64_MAX);
-	}
-
-	imagesInFlight[imageIndex] = inFlightFences[currentFrame];
-	auto t5 = clock::now();
-
-	vkResetFences(logicalDevice, 1, &inFlightFences[currentFrame]);
-
-	vkResetCommandBuffer(commandBuffers[imageIndex], 0);
-	RecordCommandBuffer(commandBuffers[imageIndex], imageIndex);
-	auto t6 = clock::now();
-
-	VkSubmitInfo submitInfo{};
-	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-	VkSemaphore waitSemaphores[] = { imageAvailableSemaphores[currentFrame] };
-	VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
-	submitInfo.waitSemaphoreCount = 1;
-	submitInfo.pWaitSemaphores = waitSemaphores;
-	submitInfo.pWaitDstStageMask = waitStages;
-	submitInfo.commandBufferCount = 1;
-	submitInfo.pCommandBuffers = &commandBuffers[imageIndex];
-	VkSemaphore signalSemaphores[] = { renderFinishedSemaphores[currentFrame] };
-	submitInfo.signalSemaphoreCount = 1;
-	submitInfo.pSignalSemaphores = signalSemaphores;
-
-	if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrame]) != VK_SUCCESS) {
-		throw std::runtime_error("Failed to submit draw command buffer.");
-	}
-	auto t7 = clock::now();
-
-	VkPresentInfoKHR presentInfo{};
-	presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-	presentInfo.waitSemaphoreCount = 1;
-	presentInfo.pWaitSemaphores = signalSemaphores;
-	VkSwapchainKHR swapChains[] = { swapChain };
-	presentInfo.swapchainCount = 1;
-	presentInfo.pSwapchains = swapChains;
-	presentInfo.pImageIndices = &imageIndex;
-
-	VkResult presentResult = vkQueuePresentKHR(presentQueue, &presentInfo);
-	auto t8 = clock::now();
-
-	if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR) {
-		RecreateSwapChain();
-		return; // skip advancing frame
-	}
-	else if (presentResult != VK_SUCCESS) {
-		throw std::runtime_error("Failed to present swapchain image.");
-	}
-
-	// Advance to next frame
-	currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
-
-	static int frameCounter = 0;
-	if (++frameCounter % 60 == 0) { // print roughly once a second at 60fps
-		auto ms = [](auto a, auto b) {
-			return std::chrono::duration<double, std::milli>(b - a).count();
-			};
-		std::cout << std::fixed << std::setprecision(3)
-			<< "[DrawFrame] ApplySettings=" << ms(t0, t1)
-			<< " DrawGUI=" << ms(t1, t2)
-			<< " WaitFence(currentFrame)=" << ms(t2, t3)
-			<< " Acquire=" << ms(t3, t4)
-			<< " WaitFence(imageInFlight)=" << ms(t4, t5)
-			<< " RecordCmdBuf=" << ms(t5, t6)
-			<< " Submit=" << ms(t6, t7)
-			<< " Present=" << ms(t7, t8)
-			<< " TOTAL=" << ms(t0, t8) << " ms" << std::endl;
 	}
 }
 
@@ -1654,6 +1526,62 @@ void VulkanRenderer::SetLights(const std::vector<Light>& lights) {
 	}
 }
 
+void VulkanRenderer::CreateTerrainBuffers() {
+	const VkDeviceSize maxTerrainVertices = 10'000'000;  // adjust to your needs
+	const VkDeviceSize maxTerrainIndices = 10'000'000;
+
+	VkDeviceSize vertexBufferSize = sizeof(ModelVertex) * maxTerrainVertices;
+	VkDeviceSize indexBufferSize = sizeof(uint32_t) * maxTerrainIndices;
+
+	VkBufferCreateInfo stagingInfo{};
+	stagingInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+	stagingInfo.size = STAGING_BUFFER_SIZE;
+	stagingInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+	stagingInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+	if (vkCreateBuffer(logicalDevice, &stagingInfo, nullptr, &m_globalStagingBuffer) != VK_SUCCESS) {
+		throw std::runtime_error("Failed to create unified staging buffer!");
+	}
+
+	// 2. Query structural size requirements
+	VkMemoryRequirements memReqs;
+	vkGetBufferMemoryRequirements(logicalDevice, m_globalStagingBuffer, &memReqs);
+
+	// 3. Find correct memory type for Host-Visible & Host-Coherent RAM
+	VkMemoryAllocateInfo allocInfo{};
+	allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	allocInfo.allocationSize = memReqs.size;
+	allocInfo.memoryTypeIndex = FindMemoryType(memReqs.memoryTypeBits,
+		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+	if (vkAllocateMemory(logicalDevice, &allocInfo, nullptr, &m_globalStagingMemory) != VK_SUCCESS) {
+		throw std::runtime_error("Failed to allocate unified staging memory!");
+	}
+
+	// 4. Bind driver memory to our buffer handle
+	vkBindBufferMemory(logicalDevice, m_globalStagingBuffer, m_globalStagingMemory, 0);
+
+	// 5. 🚀 THE CRITICAL OPTIMIZATION: Map the memory handle ONCE for the lifetime of the application
+	if (vkMapMemory(logicalDevice, m_globalStagingMemory, 0, STAGING_BUFFER_SIZE, 0, &m_stagingBufferMapped) != VK_SUCCESS) {
+		throw std::runtime_error("Failed to persistently map global staging buffer!");
+	}
+
+	// Clear the ring index offset
+	m_stagingRingOffset = 0;
+
+	CreateBuffer(vertexBufferSize,
+		VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		globalTerrainVertexBuffer, globalTerrainVertexMemory);
+
+	CreateBuffer(indexBufferSize,
+		VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		globalTerrainIndexBuffer, globalTerrainIndexMemory);
+
+	std::cout << "[Memory Manager] Pre-allocated global terrain buffers.\n";
+}
+
 void VulkanRenderer::CreateImGuiDescriptorPool() {
 	VkDescriptorPoolSize pool_sizes[] = {
 		{ VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, IMGUI_IMPL_VULKAN_MINIMUM_SAMPLED_IMAGE_POOL_SIZE },
@@ -1905,106 +1833,6 @@ void VulkanRenderer::UploadStaticSceneData(const std::vector<ModelVertex>& verts
 		throw; // rethrow the exception
 	}
 }
-void VulkanRenderer::UploadTerrainChunk(
-	TerrainChunkGPU& chunk,
-	const std::vector<ModelVertex>& verts,
-	const std::vector<uint32_t>& indices)
-{
-	VkDeviceSize vertexSize = sizeof(ModelVertex) * verts.size();
-
-	VkDeviceSize indexSize = sizeof(uint32_t) * indices.size();
-
-	VkBuffer stagingVert = VK_NULL_HANDLE;
-	VkDeviceMemory stagingVertMem = VK_NULL_HANDLE;
-	VkBuffer stagingIndex = VK_NULL_HANDLE;
-	VkDeviceMemory stagingIndexMem = VK_NULL_HANDLE;
-
-	bool deviceBuffersCreated = false;
-
-	try {
-		// 1. Create staging vertex buffer
-		CreateBuffer(vertexSize,
-			VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-			stagingVert, stagingVertMem);
-		void* data;
-		vkMapMemory(logicalDevice, stagingVertMem, 0, vertexSize, 0, &data);
-		memcpy(data, verts.data(), vertexSize);
-		vkUnmapMemory(logicalDevice, stagingVertMem);
-
-		// 2. Create staging index buffer
-		CreateBuffer(indexSize,
-			VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-			stagingIndex, stagingIndexMem);
-		vkMapMemory(logicalDevice, stagingIndexMem, 0, indexSize, 0, &data);
-		memcpy(data, indices.data(), indexSize);
-		vkUnmapMemory(logicalDevice, stagingIndexMem);
-
-		// 3. Create device-local buffers
-		CreateBuffer(vertexSize,
-			VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-			chunk.vertexBuffer, chunk.vertexMemory);
-		m_allocatedTerrainBuffers.insert(chunk.vertexBuffer);
-		m_allocatedTerrainMemory.insert(chunk.vertexMemory);
-
-		CreateBuffer(indexSize,
-			VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-			chunk.indexBuffer, chunk.indexMemory);
-		m_allocatedTerrainBuffers.insert(chunk.indexBuffer);
-		m_allocatedTerrainMemory.insert(chunk.indexMemory);
-
-		deviceBuffersCreated = true;
-
-		// 4. Copy data
-		VkCommandBuffer cmd = BeginSingleTimeCommands();
-		VkBufferCopy copy{};
-		copy.size = vertexSize;
-		vkCmdCopyBuffer(cmd, stagingVert, chunk.vertexBuffer, 1, &copy);
-		copy.size = indexSize;
-		vkCmdCopyBuffer(cmd, stagingIndex, chunk.indexBuffer, 1, &copy);
-		EndSingleTimeCommands(cmd);
-
-		// 5. Destroy staging buffers
-		vkDestroyBuffer(logicalDevice, stagingVert, nullptr);
-		vkFreeMemory(logicalDevice, stagingVertMem, nullptr);
-		vkDestroyBuffer(logicalDevice, stagingIndex, nullptr);
-		vkFreeMemory(logicalDevice, stagingIndexMem, nullptr);
-
-		chunk.indexCount = static_cast<uint32_t>(indices.size());
-	}
-	catch (...) {
-		// Clean up staging buffers if any exception occurred
-		if (stagingVert)   vkDestroyBuffer(logicalDevice, stagingVert, nullptr);
-		if (stagingVertMem) vkFreeMemory(logicalDevice, stagingVertMem, nullptr);
-		if (stagingIndex)  vkDestroyBuffer(logicalDevice, stagingIndex, nullptr);
-		if (stagingIndexMem) vkFreeMemory(logicalDevice, stagingIndexMem, nullptr);
-
-		// **CRITICAL: destroy device-local buffers if they were created**
-		if (deviceBuffersCreated) {
-			if (chunk.vertexBuffer) {
-				m_allocatedTerrainBuffers.erase(chunk.vertexBuffer);
-				m_allocatedTerrainMemory.erase(chunk.vertexMemory);
-				vkDestroyBuffer(logicalDevice, chunk.vertexBuffer, nullptr);
-				vkFreeMemory(logicalDevice, chunk.vertexMemory, nullptr);
-			}
-			if (chunk.indexBuffer) {
-				m_allocatedTerrainBuffers.erase(chunk.indexBuffer);
-				m_allocatedTerrainMemory.erase(chunk.indexMemory);
-				vkDestroyBuffer(logicalDevice, chunk.indexBuffer, nullptr);
-				vkFreeMemory(logicalDevice, chunk.indexMemory, nullptr);
-			}
-			// Reset to avoid double destruction
-			chunk.vertexBuffer = VK_NULL_HANDLE;
-			chunk.vertexMemory = VK_NULL_HANDLE;
-			chunk.indexBuffer = VK_NULL_HANDLE;
-			chunk.indexMemory = VK_NULL_HANDLE;
-		}
-		throw;
-	}
-}
 void VulkanRenderer::AddTerrainChunk(
 	int64_t key,
 	int cx,
@@ -2020,55 +1848,148 @@ void VulkanRenderer::AddTerrainChunk(
 	TerrainChunkGPU chunk{};
 
 	chunk.key = key;
-
-	chunk.center =
-		glm::vec3(
-			cx * 128.0f + 64.0f,
-			0.0f,
-			cz * 128.0f + 64.0f);
+	chunk.center = glm::vec3( cx * 128.0f + 64.0f, 0.0f, cz * 128.0f + 64.0f);
 
 	float radius = 0.0f;
 	glm::vec3 center(cx * 128.0f + 64.0f, 0.0f, cz * 128.0f + 64.0f);
 	for (auto& v : vertices) {
 		radius = glm::max(radius, glm::length(v.pos - center));
 	}
+
 	chunk.radius = radius + 10.0f; // add margin
 
-	UploadTerrainChunk(
-		chunk,
-		vertices,
-		indices);
-
-
-	terrainChunks[key] =
-		std::move(chunk);
+	UploadTerrainChunkAsync(chunk, vertices, indices);
 }
-void VulkanRenderer::RemoveTerrainChunk(int64_t key)
+void VulkanRenderer::UploadTerrainChunkAsync(
+	TerrainChunkGPU& chunk,
+	const std::vector<ModelVertex>& verts,
+	const std::vector<uint32_t>& indices)
 {
+	VkDeviceSize vertexSize = sizeof(ModelVertex) * verts.size();
+	VkDeviceSize indexSize = sizeof(uint32_t) * indices.size();
+
+	if (vertexSize == 0 || indexSize == 0) return;
+
+	// Allocate space in the global discrete GPU buffers (Your un-altered memory strategy)
+	uint32_t vertexOffset, indexOffset;
+	{
+		std::lock_guard<std::mutex> lock(terrainAllocMutex);
+
+		auto vIt = std::find_if(freeVertexSpans.begin(), freeVertexSpans.end(),
+			[&](const FreeSpan& s) { return s.count >= verts.size(); });
+		if (vIt != freeVertexSpans.end()) {
+			vertexOffset = vIt->offset;
+			freeVertexSpans.erase(vIt);
+		}
+		else {
+			vertexOffset = nextTerrainVertexOffset.fetch_add(static_cast<uint32_t>(verts.size()));
+		}
+
+		auto iIt = std::find_if(freeIndexSpans.begin(), freeIndexSpans.end(),
+			[&](const FreeSpan& s) { return s.count >= indices.size(); });
+		if (iIt != freeIndexSpans.end()) {
+			indexOffset = iIt->offset;
+			freeIndexSpans.erase(iIt);
+		}
+		else {
+			indexOffset = nextTerrainIndexOffset.fetch_add(static_cast<uint32_t>(indices.size()));
+		}
+	}
+
+	chunk.vertexOffset = vertexOffset;
+	chunk.indexOffset = indexOffset;
+	chunk.vertexCount = static_cast<uint32_t>(verts.size());
+	chunk.indexCount = static_cast<uint32_t>(indices.size());
+
+	// 🚀 OPTIMIZED RING PASS: Instead of allocations, roll the cursor inside the mapped 32MB pointer
+	uint32_t localStagingVertexOffset = 0;
+	uint32_t localStagingIndexOffset = 0;
+
+	{
+		std::lock_guard<std::mutex> lock(m_stagingBufferMutex);
+
+		// If the arriving sizes exceed remaining pool capacity, wrap back around to zero
+		if (m_stagingRingOffset + vertexSize + indexSize >= STAGING_BUFFER_SIZE) {
+			m_stagingRingOffset = 0;
+		}
+
+		// Write vertices straight to RAM via offset
+		localStagingVertexOffset = m_stagingRingOffset;
+		std::memcpy(static_cast<uint8_t*>(m_stagingBufferMapped) + localStagingVertexOffset, verts.data(), vertexSize);
+		m_stagingRingOffset += static_cast<uint32_t>(vertexSize);
+
+		// Write indices straight to RAM via offset
+		localStagingIndexOffset = m_stagingRingOffset;
+		std::memcpy(static_cast<uint8_t*>(m_stagingBufferMapped) + localStagingIndexOffset, indices.data(), indexSize);
+		m_stagingRingOffset += static_cast<uint32_t>(indexSize);
+	}
+
+	// --- Allocate a command buffer out of your existing pool ---
+	VkCommandBufferAllocateInfo allocInfo{};
+	allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+	allocInfo.commandPool = uploadCommandPool;
+	allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	allocInfo.commandBufferCount = 1;
+	VkCommandBuffer cmdBuf;
+	if (vkAllocateCommandBuffers(logicalDevice, &allocInfo, &cmdBuf) != VK_SUCCESS)
+		throw std::runtime_error("Failed to allocate upload command buffer");
+
+	VkCommandBufferBeginInfo beginInfo{};
+	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	vkBeginCommandBuffer(cmdBuf, &beginInfo);
+
+	// 🚀 UNIFIED COPIES: Pull from m_globalStagingBuffer via unique staging offset keys
+	VkBufferCopy vertCopy{ localStagingVertexOffset, vertexOffset * sizeof(ModelVertex), vertexSize };
+	vkCmdCopyBuffer(cmdBuf, m_globalStagingBuffer, globalTerrainVertexBuffer, 1, &vertCopy);
+
+	VkBufferCopy indexCopy{ localStagingIndexOffset, indexOffset * sizeof(uint32_t), indexSize };
+	vkCmdCopyBuffer(cmdBuf, m_globalStagingBuffer, globalTerrainIndexBuffer, 1, &indexCopy);
+
+	vkEndCommandBuffer(cmdBuf);
+
+	VkFenceCreateInfo fenceInfo{};
+	fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+	VkFence fence;
+	vkCreateFence(logicalDevice, &fenceInfo, nullptr, &fence);
+
+	VkSubmitInfo submitInfo{};
+	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	submitInfo.commandBufferCount = 1;
+	submitInfo.pCommandBuffers = &cmdBuf;
+	if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, fence) != VK_SUCCESS)
+		throw std::runtime_error("Failed to submit upload command buffer");
+
+	// --- Store pending upload for tracking ---
+	chunk.ready = false;
+	PendingUpload upload;
+	upload.fence = fence;
+	upload.commandBuffer = cmdBuf;
+
+	// 🚀 ZERO ALLOCATION: Set these to VK_NULL_HANDLE so your cleanup loop skips destroying them!
+	upload.stagingVertexBuffer = VK_NULL_HANDLE;
+	upload.stagingVertexMemory = VK_NULL_HANDLE;
+	upload.stagingIndexBuffer = VK_NULL_HANDLE;
+	upload.stagingIndexMemory = VK_NULL_HANDLE;
+
+	upload.chunkKey = chunk.key;
+	upload.chunk = chunk;
+	pendingUploads.push_back(upload);
+}
+void VulkanRenderer::RemoveTerrainChunk(int64_t key) {
 	auto it = terrainChunks.find(key);
-    if (it == terrainChunks.end()) return;
-    TerrainChunkGPU& chunk = it->second;
+	if (it == terrainChunks.end()) return;
 
-	auto& pending = pendingDeletions[currentFrame];
-	if (chunk.vertexBuffer != VK_NULL_HANDLE) {
-		pending.buffers.push_back(chunk.vertexBuffer);
-		pending.memories.push_back(chunk.vertexMemory);
-		// Remove from tracking sets (if you still use them)
-		m_allocatedTerrainBuffers.erase(chunk.vertexBuffer);
-		m_allocatedTerrainMemory.erase(chunk.vertexMemory);
-	}
-	if (chunk.indexBuffer != VK_NULL_HANDLE) {
-		pending.buffers.push_back(chunk.indexBuffer);
-		pending.memories.push_back(chunk.indexMemory);
-		m_allocatedTerrainBuffers.erase(chunk.indexBuffer);
-		m_allocatedTerrainMemory.erase(chunk.indexMemory);
+	TerrainChunkGPU& chunk = it->second;
+
+	// Return the offsets to the free lists
+	{
+		std::lock_guard<std::mutex> lock(terrainAllocMutex);
+		freeVertexSpans.push_back({ chunk.vertexOffset, chunk.vertexCount });
+		freeIndexSpans.push_back({ chunk.indexOffset, chunk.indexCount });
 	}
 
-	chunk.vertexBuffer = VK_NULL_HANDLE;
-	chunk.vertexMemory = VK_NULL_HANDLE;
-	chunk.indexBuffer = VK_NULL_HANDLE;
-	chunk.indexMemory = VK_NULL_HANDLE;
-
+	// Remove from the map
 	terrainChunks.erase(it);
 }
 
@@ -2133,6 +2054,123 @@ void VulkanRenderer::ToggleFullscreen() {
 	}
 }
 
+void VulkanRenderer::DrawFrame() {
+	if (globalVertexBuffer == VK_NULL_HANDLE) {
+		std::cout << "CRITICAL: vertexBuffer is still null when drawing!" << std::endl;
+	}
+
+	ApplySettings();
+
+	DrawGUI();
+
+	vkWaitForFences(logicalDevice, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
+
+	// --- Process pending deletions (already present) ---
+	auto& pending = pendingDeletions[currentFrame];
+	for (auto buf : pending.buffers) {
+		if (buf != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, buf, nullptr);
+	}
+	for (auto mem : pending.memories) {
+		if (mem != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, mem, nullptr);
+	}
+	pending.buffers.clear();
+	pending.memories.clear();
+
+	// --- Process completed asynchronous uploads (NEW) ---
+	for (auto it = pendingUploads.begin(); it != pendingUploads.end(); ) {
+		VkResult status = vkGetFenceStatus(logicalDevice, it->fence);
+		if (status == VK_SUCCESS) {
+			auto existingIt = terrainChunks.find(it->chunkKey);
+			if (existingIt != terrainChunks.end()) {
+				std::lock_guard<std::mutex> lock(terrainAllocMutex);
+				freeVertexSpans.push_back({ existingIt->second.vertexOffset, existingIt->second.vertexCount });
+				freeIndexSpans.push_back({ existingIt->second.indexOffset, existingIt->second.indexCount });
+			}
+
+			it->chunk.ready = true;
+			terrainChunks[it->chunkKey] = it->chunk;
+
+			// Upload finished – destroy staging buffers and free command buffer
+			vkDestroyBuffer(logicalDevice, it->stagingVertexBuffer, nullptr);
+			vkFreeMemory(logicalDevice, it->stagingVertexMemory, nullptr);
+			vkDestroyBuffer(logicalDevice, it->stagingIndexBuffer, nullptr);
+			vkFreeMemory(logicalDevice, it->stagingIndexMemory, nullptr);
+			vkDestroyFence(logicalDevice, it->fence, nullptr);
+			vkFreeCommandBuffers(logicalDevice, uploadCommandPool, 1, &it->commandBuffer);
+			it = pendingUploads.erase(it);
+		}
+		else if (status == VK_NOT_READY) {
+			++it;   // Not finished yet, keep it
+		}
+		else {
+			throw std::runtime_error("vkGetFenceStatus failed for upload");
+		}
+	}
+
+	uint32_t imageIndex;
+	VkResult acquireResult = vkAcquireNextImageKHR(logicalDevice, swapChain, UINT64_MAX,
+		imageAvailableSemaphores[currentFrame],
+		VK_NULL_HANDLE, &imageIndex);
+
+	if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR || acquireResult == VK_SUBOPTIMAL_KHR) {
+		RecreateSwapChain();
+		return; // skip this frame
+	}
+	else if (acquireResult != VK_SUCCESS) {
+		throw std::runtime_error("Failed to acquire swapchain image.");
+	}
+
+	if (imagesInFlight[imageIndex] != VK_NULL_HANDLE) {
+		vkWaitForFences(logicalDevice, 1, &imagesInFlight[imageIndex], VK_TRUE, UINT64_MAX);
+	}
+
+	imagesInFlight[imageIndex] = inFlightFences[currentFrame];
+
+	vkResetFences(logicalDevice, 1, &inFlightFences[currentFrame]);
+
+	vkResetCommandBuffer(commandBuffers[imageIndex], 0);
+	RecordCommandBuffer(commandBuffers[imageIndex], imageIndex);
+
+	VkSubmitInfo submitInfo{};
+	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	VkSemaphore waitSemaphores[] = { imageAvailableSemaphores[currentFrame] };
+	VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
+	submitInfo.waitSemaphoreCount = 1;
+	submitInfo.pWaitSemaphores = waitSemaphores;
+	submitInfo.pWaitDstStageMask = waitStages;
+	submitInfo.commandBufferCount = 1;
+	submitInfo.pCommandBuffers = &commandBuffers[imageIndex];
+	VkSemaphore signalSemaphores[] = { renderFinishedSemaphores[currentFrame] };
+	submitInfo.signalSemaphoreCount = 1;
+	submitInfo.pSignalSemaphores = signalSemaphores;
+
+	if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrame]) != VK_SUCCESS) {
+		throw std::runtime_error("Failed to submit draw command buffer.");
+	}
+
+	VkPresentInfoKHR presentInfo{};
+	presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+	presentInfo.waitSemaphoreCount = 1;
+	presentInfo.pWaitSemaphores = signalSemaphores;
+	VkSwapchainKHR swapChains[] = { swapChain };
+	presentInfo.swapchainCount = 1;
+	presentInfo.pSwapchains = swapChains;
+	presentInfo.pImageIndices = &imageIndex;
+
+	VkResult presentResult = vkQueuePresentKHR(presentQueue, &presentInfo);
+
+	if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR) {
+		RecreateSwapChain();
+		return; // skip advancing frame
+	}
+	else if (presentResult != VK_SUCCESS) {
+		throw std::runtime_error("Failed to present swapchain image.");
+	}
+
+	// Advance to next frame
+	currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
+}
+
 void VulkanRenderer::Cleanup() {
 	vkDeviceWaitIdle(logicalDevice);
 
@@ -2157,18 +2195,34 @@ void VulkanRenderer::Cleanup() {
 		pending.memories.clear();
 	}
 
-	for (auto buf : m_allocatedTerrainBuffers) {
-		if (buf) vkDestroyBuffer(logicalDevice, buf, nullptr);
-	}
-	m_allocatedTerrainBuffers.clear();
-
-	for (auto mem : m_allocatedTerrainMemory) {
-		if (mem) vkFreeMemory(logicalDevice, mem, nullptr);
-	}
-	m_allocatedTerrainMemory.clear();
-
-	// Clear the map (the resources are already destroyed)
 	terrainChunks.clear();
+
+	for (auto& upload : pendingUploads) {
+		vkDestroyBuffer(logicalDevice, upload.stagingVertexBuffer, nullptr);
+		vkFreeMemory(logicalDevice, upload.stagingVertexMemory, nullptr);
+		vkDestroyBuffer(logicalDevice, upload.stagingIndexBuffer, nullptr);
+		vkFreeMemory(logicalDevice, upload.stagingIndexMemory, nullptr);
+		vkDestroyFence(logicalDevice, upload.fence, nullptr);
+		vkFreeCommandBuffers(logicalDevice, uploadCommandPool, 1, &upload.commandBuffer);
+	}
+	pendingUploads.clear();
+
+	if (m_stagingBufferMapped != nullptr) {
+		vkUnmapMemory(logicalDevice, m_globalStagingMemory);
+		m_stagingBufferMapped = nullptr;
+	}
+
+	// Destroy structural buffer wrapper
+	if (m_globalStagingBuffer != VK_NULL_HANDLE) {
+		vkDestroyBuffer(logicalDevice, m_globalStagingBuffer, nullptr);
+		m_globalStagingBuffer = VK_NULL_HANDLE;
+	}
+
+	// Free underlying driver memory block
+	if (m_globalStagingMemory != VK_NULL_HANDLE) {
+		vkFreeMemory(logicalDevice, m_globalStagingMemory, nullptr);
+		m_globalStagingMemory = VK_NULL_HANDLE;
+	}
 
 	if (globalVertexBuffer) {
 		vkDestroyBuffer(logicalDevice, globalVertexBuffer, nullptr);
@@ -2185,6 +2239,23 @@ void VulkanRenderer::Cleanup() {
 	if (globalIndexBufferMemory) {
 		vkFreeMemory(logicalDevice, globalIndexBufferMemory, nullptr);
 		globalIndexBufferMemory = VK_NULL_HANDLE;
+	}
+
+	if (globalTerrainVertexBuffer) {
+		vkDestroyBuffer(logicalDevice, globalTerrainVertexBuffer, nullptr);
+		globalTerrainVertexBuffer = VK_NULL_HANDLE;
+	}
+	if (globalTerrainVertexMemory) {
+		vkFreeMemory(logicalDevice, globalTerrainVertexMemory, nullptr);
+		globalTerrainVertexMemory = VK_NULL_HANDLE;
+	}
+	if (globalTerrainIndexBuffer) {
+		vkDestroyBuffer(logicalDevice, globalTerrainIndexBuffer, nullptr);
+		globalTerrainIndexBuffer = VK_NULL_HANDLE;
+	}
+	if (globalTerrainIndexMemory) {
+		vkFreeMemory(logicalDevice, globalTerrainIndexMemory, nullptr);
+		globalTerrainIndexMemory = VK_NULL_HANDLE;
 	}
 
 	g_AssetManager.Cleanup(logicalDevice);
@@ -2277,7 +2348,10 @@ void VulkanRenderer::Cleanup() {
 		vkDestroyCommandPool(logicalDevice, commandPool, nullptr);
 		commandPool = VK_NULL_HANDLE;
 	}
-
+	if (uploadCommandPool) {
+		vkDestroyCommandPool(logicalDevice, uploadCommandPool, nullptr);
+		uploadCommandPool = VK_NULL_HANDLE;
+	}
 	for (auto framebuffer : swapChainFramebuffers) {
 		if (framebuffer) vkDestroyFramebuffer(logicalDevice, framebuffer, nullptr);
 	}

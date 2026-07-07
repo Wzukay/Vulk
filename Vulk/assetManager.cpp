@@ -127,12 +127,73 @@ void AssetManager::LoadTexture(const std::string& path) {
         // Do not re-throw; we'll fall back to default texture later.
     }
 }
+uint32_t AssetManager::LoadTextureFromFile(const std::string& filePath) {
+    // 1. If the texture is already loaded, immediately return its existing index
+    auto it = m_textureToId.find(filePath);
+    if (it != m_textureToId.end()) {
+        return it->second;
+    }
+
+    // 2. Initialize a fresh engine Texture structure
+    Texture tex{};
+
+    // 🚀 REUSE YOUR EXISITING ENGINE CODE: 
+    // This creates the VkImage, allocates memory, maps it, transitions its layout,
+    // copies pixel arrays internally, and builds optional mipmaps.
+    CreateTextureImage(filePath, tex, VK_FORMAT_R8G8B8A8_SRGB);
+
+    // Build its corresponding shader view wrapper
+    CreateTextureImageView(tex, VK_FORMAT_R8G8B8A8_SRGB);
+
+    // Create its unique linear filter configuration sampler
+    CreateTextureSampler(tex);
+
+    // 3. Register the newly built texture into your bindless storage arrays
+    uint32_t newTextureId = static_cast<uint32_t>(m_textureRegistry.size());
+
+    m_textures[filePath] = tex;
+    m_textureToId[filePath] = newTextureId;
+    m_textureRegistry.push_back(tex);
+
+    // 4. Signal your pipeline to update the descriptor sets on the next frame
+    m_textureDirty = true;
+
+    std::cout << "[AssetManager] Successfully loaded and registered: " << filePath
+        << " into ID slot: " << newTextureId << "\n";
+
+    return newTextureId;
+}
+uint32_t AssetManager::LoadNormalTextureFromFile(const std::string& filePath) {
+    auto it = m_normalTextureToId.find(filePath);
+    if (it != m_normalTextureToId.end()) {
+        return it->second;
+    }
+
+    Texture tex{};
+
+    // Normal maps should typically be loaded with UNORM format instead of SRGB 
+    // so colors aren't altered by gamma curves before vector calculations!
+    CreateTextureImage(filePath, tex, VK_FORMAT_R8G8B8A8_UNORM);
+    CreateTextureImageView(tex, VK_FORMAT_R8G8B8A8_UNORM);
+    CreateTextureSampler(tex);
+
+    uint32_t newNormalId = static_cast<uint32_t>(m_normalTextureRegistry.size());
+
+    m_normalTextures[filePath] = tex;
+    m_normalTextureToId[filePath] = newNormalId;
+    m_normalTextureRegistry.push_back(tex);
+
+    m_textureDirty = true; // Tell renderer to update descriptor pools
+
+    return newNormalId;
+}
 Texture* AssetManager::GetTexture(const std::string& path) {
     // Return default texture for empty path or "default"
     if (path.empty() || path == "default") return &m_defaultTexture;
     auto it = m_textures.find(path);
     if (it != m_textures.end()) return &it->second;
     LoadTexture(path);
+    m_textureDirty = true;
     return &m_textures[path];
 }
 uint32_t AssetManager::GetTextureId(const std::string& path) {

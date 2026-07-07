@@ -14,10 +14,12 @@ struct ModelVertex {
     glm::vec3 normal;
     glm::vec2 texCoord;
     glm::vec4 tangent;
+    glm::vec3 color;
 
     bool operator==(const ModelVertex& other) const {
         return pos == other.pos && normal == other.normal &&
-            texCoord == other.texCoord && tangent == other.tangent;
+            texCoord == other.texCoord && tangent == other.tangent &&
+            color == other.color;
     }
 
     static VkVertexInputBindingDescription getBindingDescription() {
@@ -28,8 +30,8 @@ struct ModelVertex {
         return bindingDescription;
     }
 
-    static std::array<VkVertexInputAttributeDescription, 4> getAttributeDescriptions() {
-        std::array<VkVertexInputAttributeDescription, 4> attributeDescriptions{};
+    static std::array<VkVertexInputAttributeDescription, 5> getAttributeDescriptions() {
+        std::array<VkVertexInputAttributeDescription, 5> attributeDescriptions{};
 
         attributeDescriptions[0].binding = 0;
         attributeDescriptions[0].location = 0;
@@ -51,6 +53,11 @@ struct ModelVertex {
         attributeDescriptions[3].format = VK_FORMAT_R32G32B32A32_SFLOAT;
         attributeDescriptions[3].offset = offsetof(ModelVertex, tangent);
 
+        attributeDescriptions[4].binding = 0;
+        attributeDescriptions[4].location = 4; // Matches layout(location = 4) in your GLSL Vertex Shader
+        attributeDescriptions[4].format = VK_FORMAT_R32G32B32_SFLOAT; // RGB is 3 floats
+        attributeDescriptions[4].offset = offsetof(ModelVertex, color);
+
         return attributeDescriptions;
     }
 };
@@ -59,6 +66,7 @@ struct RenderMesh {
     VkBuffer vertexBuffer = VK_NULL_HANDLE;
     VkDeviceMemory vertexBufferMemory = VK_NULL_HANDLE;
     uint32_t vertexCount = 0;
+
     VkBuffer indexBuffer = VK_NULL_HANDLE;
     VkDeviceMemory indexBufferMemory = VK_NULL_HANDLE;
     uint32_t indexCount = 0;
@@ -92,6 +100,8 @@ namespace std {
                 (hash<glm::vec3>()(vertex.normal) << 1)) >> 1) ^
                 (hash<glm::vec2>()(vertex.texCoord) << 1);
             h ^= hash<float>()(vertex.tangent.x) + 0x9e3779b9 + (h << 6) + (h >> 2);
+
+            h ^= hash<glm::vec3>()(vertex.color) + 0x9e3779b9 + (h << 6) + (h >> 2);
             return h;
         }
     };

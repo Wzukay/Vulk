@@ -74,10 +74,10 @@
     <IncludePath>D:\repos\Vulk\Vulk\include\glfw-3.4.bin.WIN64\include;C:\VulkanSDK\1.4.350.0\Include;D:\repos\Vulk\Vulk\include\asio\include;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <IncludePath>D:\repos\Vulk\Vulk\include\imgui;D:\repos\Vulk\Vulk\include\glm-1.0.3;D:\repos\Vulk\Vulk\include\glfw-3.4.bin.WIN64\include;C:\VulkanSDK\1.4.350.0\Include;D:\repos\Vulk\Vulk\include\asio\include;$(IncludePath)</IncludePath>
+    <IncludePath>D:\repos\Vulk\Vulk\include\meshoptimizer-1.2\src;D:\repos\Vulk\Vulk\include\imgui;D:\repos\Vulk\Vulk\include\glm-1.0.3;D:\repos\Vulk\Vulk\include\glfw-3.4.bin.WIN64\include;C:\VulkanSDK\1.4.350.0\Include;D:\repos\Vulk\Vulk\include\asio\include;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <IncludePath>D:\repos\Vulk\Vulk\include\imgui;D:\repos\Vulk\Vulk\include\glm-1.0.3;D:\repos\Vulk\Vulk\include\glfw-3.4.bin.WIN64\include;C:\VulkanSDK\1.4.350.0\Include;D:\repos\Vulk\Vulk\include\asio\include;$(IncludePath)</IncludePath>
+    <IncludePath>D:\repos\Vulk\Vulk\include\meshoptimizer-1.2\src;D:\repos\Vulk\Vulk\include\imgui;D:\repos\Vulk\Vulk\include\glm-1.0.3;D:\repos\Vulk\Vulk\include\glfw-3.4.bin.WIN64\include;C:\VulkanSDK\1.4.350.0\Include;D:\repos\Vulk\Vulk\include\asio\include;$(IncludePath)</IncludePath>
     <LinkIncremental>true</LinkIncremental>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
@@ -126,6 +126,7 @@
       <LanguageStandard>stdcpp20</LanguageStandard>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
+      <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -147,6 +148,7 @@
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
+      <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -168,6 +170,8 @@
     <ClCompile Include="include\imgui\imgui_impl_vulkan.cpp" />
     <ClCompile Include="include\imgui\imgui_tables.cpp" />
     <ClCompile Include="include\imgui\imgui_widgets.cpp" />
+    <ClCompile Include="include\meshoptimizer-1.2\src\vcacheoptimizer.cpp" />
+    <ClCompile Include="include\meshoptimizer-1.2\src\vfetchoptimizer.cpp" />
     <ClCompile Include="input.cpp" />
     <ClCompile Include="logger.cpp" />
     <ClCompile Include="main.cpp" />

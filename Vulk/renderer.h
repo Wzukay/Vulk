@@ -6,7 +6,7 @@
 #include <optional>
 #include <chrono>
 #include <unordered_set>
-
+#include <mutex>
 #include <glm/gtc/matrix_transform.hpp>
 #include <vulkan/vulkan_core.h>
 #include <fstream>
@@ -71,28 +71,33 @@ struct DrawEntry {
     float worldRadius;
     int64_t chunkKey = -1;
 };
-struct TerrainChunkGPU
-{
-    int64_t key;
-    glm::vec3 center;
-    float radius;
-    std::string meshName;
-    glm::mat4 transform;
+struct TerrainChunkGPU {
+    int64_t key = 0;
+    glm::vec3 center{ 0.0f };
+    float radius = 0.0f;
+    int lod = 0;
+    bool ready = false;
 
-    VkBuffer vertexBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory vertexMemory = VK_NULL_HANDLE;
-
-    VkBuffer indexBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory indexMemory = VK_NULL_HANDLE;
-
+    uint32_t vertexOffset = 0;
+    uint32_t indexOffset = 0;
+    uint32_t vertexCount = 0;
     uint32_t indexCount = 0;
-
-    std::vector<SubMesh> subMeshes;
+};
+struct PendingUpload {
+    VkFence fence = VK_NULL_HANDLE;
+    VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+    VkBuffer stagingVertexBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory stagingVertexMemory = VK_NULL_HANDLE;
+    VkBuffer stagingIndexBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory stagingIndexMemory = VK_NULL_HANDLE;
+    int64_t chunkKey;
+    TerrainChunkGPU chunk;
 };
 struct PendingDeletion {
     std::vector<VkBuffer> buffers;
     std::vector<VkDeviceMemory> memories;
 };
+struct FreeSpan { uint32_t offset; uint32_t count; };
 
 struct FrustumPlane {
     glm::vec3 normal;
@@ -248,6 +253,7 @@ private:
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     VkPipeline graphicsPipeline = VK_NULL_HANDLE;
 
+
     VkBuffer globalVertexBuffer = VK_NULL_HANDLE;
     VkDeviceMemory globalVertexBufferMemory = VK_NULL_HANDLE;
 
@@ -257,9 +263,33 @@ private:
     const VkDeviceSize MAX_GLOBAL_VERTICES = 5'000'000;
     const VkDeviceSize MAX_GLOBAL_INDICES = 10'000'000;
     const VkDeviceSize MAX_GLOBAL_SUBMESHES = 1'000;
+    
+    VkBuffer globalTerrainVertexBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory globalTerrainVertexMemory = VK_NULL_HANDLE;
+
+    VkBuffer globalTerrainIndexBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory globalTerrainIndexMemory = VK_NULL_HANDLE;
+
+    std::atomic<uint32_t> nextTerrainVertexOffset{ 0 };
+    std::atomic<uint32_t> nextTerrainIndexOffset{ 0 };
+    std::mutex terrainAllocMutex;
+
+    std::vector<FreeSpan> freeVertexSpans;
+    std::vector<FreeSpan> freeIndexSpans;
+
+    const VkDeviceSize MAX_TERRAIN_VERTICES = 5'000'000;
+    const VkDeviceSize MAX_TERRAIN_INDICES = 10'000'000;
 
     std::unordered_map<int64_t, TerrainChunkGPU> terrainChunks;
     std::vector<ChunkSlot> chunkSlots;
+
+    VkBuffer m_globalStagingBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_globalStagingMemory = VK_NULL_HANDLE;
+    void* m_stagingBufferMapped = nullptr;
+
+    uint32_t m_stagingRingOffset = 0;
+    const uint32_t STAGING_BUFFER_SIZE = 32 * 1024 * 1024; // 32MB is plenty for rolling chunks
+    std::mutex m_stagingBufferMutex;
 
     VkDescriptorSetLayout descriptorSetLayout;
     VkDescriptorPool descriptorPool;
@@ -298,7 +328,10 @@ private:
 
     std::vector<DrawEntry> terrainDrawList;
     std::vector<DrawEntry> visibleTerrainDrawList;
+
+    std::vector<PendingUpload> pendingUploads;
     std::array<PendingDeletion, 3> pendingDeletions;
+    VkCommandPool uploadCommandPool;
 
     void CreateGraphicsPipeline(VkPolygonMode polygonMode);
 	uint32_t FindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);
@@ -313,10 +346,11 @@ private:
     void CreateGlobalBuffers();
     void CreateUniformBuffer();
     void CreateLightBuffer();
+    void CreateTerrainBuffers();
 
     void DrawStaticMeshes(VkCommandBuffer commandBuffer);
     void DrawTerrain(VkCommandBuffer commandBuffer);
-    void UploadTerrainChunk(
+    void UploadTerrainChunkAsync(
         TerrainChunkGPU& chunk,
         const std::vector<ModelVertex>& verts,
         const std::vector<uint32_t>& indices);

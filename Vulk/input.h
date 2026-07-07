@@ -20,7 +20,7 @@ private:
 	bool firstMouse = true;
 
 public:	
-	float cameraSpeed = 0.35f;
+	float cameraSpeed = 1.0f;
 	void ProcessMouse(GLFWwindow* window, double xpos, double ypos);
 	CameraData ProcessInput(GLFWwindow* window);
 };

@@ -28,6 +28,7 @@ private:
 
 	Scene scene;
 
+	AssetManager assetManager;
 	NetworkManager netManager;
 	Chunk chunk;
 	VulkanRenderer renderer;

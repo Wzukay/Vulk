@@ -57,6 +57,8 @@ public:
     void SetDescriptorSet(VkDescriptorSet set) { m_descriptorSet = set; }
 
 public:
+    uint32_t LoadTextureFromFile(const std::string& filePath);
+    uint32_t LoadNormalTextureFromFile(const std::string& filePath);
     void CreateTextureImage(const std::string& path, Texture& tex, VkFormat format = VK_FORMAT_R8G8B8A8_SRGB);
     void CreateTextureImageView(Texture& tex, VkFormat format);
     void CreateTextureSampler(Texture& tex);
@@ -81,7 +83,12 @@ public:
 
     Texture& GetDefaultTexture() { return m_defaultTexture; }
 
+    bool IsTextureDirty() const { return m_textureDirty; }
+    void ClearTextureDirty() { m_textureDirty = false; }
+
 private:
+    bool m_textureDirty = false;
+
     VkDevice GetDevice() const;
     VkPhysicalDevice GetPhysicalDevice() const;
     VkCommandPool GetCommandPool() const;
