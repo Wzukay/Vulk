@@ -5,12 +5,12 @@
 #include <string>
 #include <optional>
 #include <chrono>
+#include <unordered_set>
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <vulkan/vulkan_core.h>
 #include <fstream>
 
-#include "vertex.h"
 #include "renderMesh.h"
 #include "scene.h"
 #include "scene_types.h"
@@ -24,7 +24,6 @@
 struct CameraData;
 class Scene;
 
-// Structure to hold indices of the hardware execution queues we need
 struct QueueFamilyIndices {
     std::optional<uint32_t> graphicsFamily;
     std::optional<uint32_t> presentFamily;
@@ -56,29 +55,48 @@ struct PushConstants {
     uint32_t objectId;          // 4 bytes
 };
 
+struct ChunkSlot {
+    uint32_t vertexOffset;
+    uint32_t indexOffset;
+    uint32_t indexCount;
+    bool isAllocated;
+    std::string objectName;
+};
+
 struct DrawEntry {
     uint32_t objectIndex;
     uint32_t subMeshIndex; // index into globalSubMeshes
     float distSq;
     glm::vec3 worldCenter;
     float worldRadius;
+    int64_t chunkKey = -1;
+};
+struct TerrainChunkGPU
+{
+    int64_t key;
+    glm::vec3 center;
+    float radius;
+    std::string meshName;
+    glm::mat4 transform;
+
+    VkBuffer vertexBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory vertexMemory = VK_NULL_HANDLE;
+
+    VkBuffer indexBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory indexMemory = VK_NULL_HANDLE;
+
+    uint32_t indexCount = 0;
+
+    std::vector<SubMesh> subMeshes;
+};
+struct PendingDeletion {
+    std::vector<VkBuffer> buffers;
+    std::vector<VkDeviceMemory> memories;
 };
 
 struct FrustumPlane {
     glm::vec3 normal;
     float distance;
-};
-
-struct CopyRegion {
-    uint32_t srcVertexOffset;   // in vertices
-    uint32_t dstVertexOffset;   // in vertices (globalVertices size before this submesh)
-    uint32_t vertexCount;
-
-    uint32_t srcIndexOffset;    // in indices
-    uint32_t dstIndexOffset;    // in indices (globalIndices size before this submesh)
-    uint32_t indexCount;
-
-    uint32_t materialIndex;     // to retrieve the actual data later
 };
 
 struct Light {
@@ -108,6 +126,8 @@ private:
     int windowedPosX = 0, windowedPosY = 0;
     int windowedWidth = 1280, windowedHeight = 720;
 
+    bool m_isShuttingDown = false;
+
     GLFWwindow* window = nullptr;
 
     const Scene* currentScene = nullptr;
@@ -123,9 +143,6 @@ private:
     VkQueue graphicsQueue = VK_NULL_HANDLE;
     VkQueue presentQueue = VK_NULL_HANDLE;
 
-    uint32_t drawCallCount = 0;
-    uint32_t culledCount = 0;
-
     void InitWindow(int width, int height, const std::string& title);
     void InitVulkan();
 
@@ -134,8 +151,6 @@ private:
     void CreateSurface();
     void PickPhysicalDevice();
     void CreateLogicalDevice();
-
-    void UploadSceneData(const std::vector<ModelVertex>& verts, const std::vector<uint32_t>& idxs);
 
     QueueFamilyIndices FindQueueFamilies(VkPhysicalDevice device);
     bool CheckDeviceExtensionSupport(VkPhysicalDevice device);
@@ -197,12 +212,13 @@ private:
     VkCommandPool commandPool = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> commandBuffers;
 
-    const int MAX_FRAMES_IN_FLIGHT = 2;
+    const int MAX_FRAMES_IN_FLIGHT = 3;
     size_t currentFrame = 0;
 
     std::vector<VkSemaphore> imageAvailableSemaphores;
     std::vector<VkSemaphore> renderFinishedSemaphores;
     std::vector<VkFence> inFlightFences;
+    std::vector<VkFence> imagesInFlight;
 
     // New phase declarations
     void CreateRenderPass();
@@ -242,6 +258,9 @@ private:
     const VkDeviceSize MAX_GLOBAL_INDICES = 10'000'000;
     const VkDeviceSize MAX_GLOBAL_SUBMESHES = 1'000;
 
+    std::unordered_map<int64_t, TerrainChunkGPU> terrainChunks;
+    std::vector<ChunkSlot> chunkSlots;
+
     VkDescriptorSetLayout descriptorSetLayout;
     VkDescriptorPool descriptorPool;
     VkDescriptorSet descriptorSet;
@@ -249,16 +268,37 @@ private:
     VkBuffer uniformBuffer;
     VkDeviceMemory uniformBufferMemory;
 
+    void* uniformBufferMapped = nullptr;
+
     VkBuffer lightBuffer = VK_NULL_HANDLE;
     VkDeviceMemory lightBufferMemory = VK_NULL_HANDLE;
     std::vector<Light> currentLights;
     const uint32_t MAX_LIGHTS = 256;
+
+    void* lightBufferMapped = nullptr;
 
     std::vector<SceneObject> currentSceneObjects;
     std::vector<SubMesh> currentSceneSubMeshes;
 
     uint32_t sceneTotalVertices = 0;
     uint32_t sceneTotalIndices = 0;
+    uint32_t m_lastTotalVertices = 0;
+    uint32_t m_lastTotalIndices = 0;
+
+    uint32_t drawCallCount = 0;
+    uint32_t culledCount = 0;
+    uint32_t m_lastDrawCallCount = 0;
+    uint32_t m_lastCulledCount = 0;
+
+    std::vector<DrawEntry> staticDrawList;
+    std::vector<DrawEntry> visibleStaticDrawList;
+
+    std::unordered_set<VkBuffer> m_allocatedTerrainBuffers;
+    std::unordered_set<VkDeviceMemory> m_allocatedTerrainMemory;
+
+    std::vector<DrawEntry> terrainDrawList;
+    std::vector<DrawEntry> visibleTerrainDrawList;
+    std::array<PendingDeletion, 3> pendingDeletions;
 
     void CreateGraphicsPipeline(VkPolygonMode polygonMode);
 	uint32_t FindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);
@@ -274,9 +314,27 @@ private:
     void CreateUniformBuffer();
     void CreateLightBuffer();
 
+    void DrawStaticMeshes(VkCommandBuffer commandBuffer);
+    void DrawTerrain(VkCommandBuffer commandBuffer);
+    void UploadTerrainChunk(
+        TerrainChunkGPU& chunk,
+        const std::vector<ModelVertex>& verts,
+        const std::vector<uint32_t>& indices);
+
 public:
     void UpdateUniformBuffer(const CameraData& cam);
     void SetLights(const std::vector<Light>& lights);
+
+    void UploadStaticSceneData(const std::vector<ModelVertex>& verts, const std::vector<uint32_t>& idxs);
+    
+    void AddTerrainChunk(
+        int64_t key,
+        int cx,
+        int cz,
+        const std::vector<ModelVertex>& vertices,
+        const std::vector<uint32_t>& indices);
+    void RemoveTerrainChunk(
+        int64_t key);
 
 private:
     bool showSettingsPanel = false;
@@ -294,6 +352,12 @@ private:
     std::array<FrustumPlane, 6> frustumPlanes;
     void UpdateFrustumPlanes(const glm::mat4& viewProj);
     bool IsSphereInFrustum(const glm::vec3& center, float radius) const;
+
+public:
+    bool IsWorldSphereInFrustum(const glm::vec3& center, float radius) const { // NEW
+        return IsSphereInFrustum(center, radius);
+    }
+    
 
 #ifdef NDEBUG
     const bool enableValidationLayers = false;

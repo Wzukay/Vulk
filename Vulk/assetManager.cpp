@@ -697,50 +697,62 @@ void AssetManager::LoadMesh(const std::string& path) {
     m_meshes[path] = std::move(mesh);
     std::cout << "[Asset Manager] Loaded mesh: " << path << " with " << m_meshes[path].subMeshes.size() << " submeshes\n";
 }
-void AssetManager::RegisterMesh(const std::string& name, const std::vector<ModelVertex>& vertices,
-    const std::vector<uint32_t>& indices,
-    const std::vector<SubMesh>& subMeshes,
-    const std::vector<std::string>& materialTextures) {
+void AssetManager::RegisterMesh(
+    const std::string& name,
+    std::vector<ModelVertex>&& vertices,
+    std::vector<uint32_t>&& indices,
+    std::vector<SubMesh> subMeshes,
+    std::vector<std::string> materialTextures) {
+
+    // 1. Erase old asset map keys quickly
     if (m_meshes.find(name) != m_meshes.end()) {
-        // Overwrite? We'll just replace it.
         m_meshes.erase(name);
     }
 
     MeshAsset mesh;
-    mesh.vertices = vertices;
-    mesh.indices = indices;
+    mesh.vertices = std::move(vertices);
+    mesh.indices = std::move(indices);
 
     if (subMeshes.empty()) {
-        // Create a single submesh covering all geometry
         SubMesh sub;
-        sub.indexCount = static_cast<uint32_t>(indices.size());
+        sub.indexCount = static_cast<uint32_t>(mesh.indices.size());
         sub.firstIndex = 0;
         sub.vertexOffset = 0;
 
-        // Compute bounding sphere
-        glm::vec3 minBound(FLT_MAX), maxBound(-FLT_MAX);
-        for (const auto& v : vertices) {
+        glm::vec3 minBound(FLT_MAX);
+        glm::vec3 maxBound(-FLT_MAX);
+        for (const auto& v : mesh.vertices) {
             minBound = glm::min(minBound, v.pos);
             maxBound = glm::max(maxBound, v.pos);
         }
+
+        minBound.y = glm::min(minBound.y, -50.0f);
+        maxBound.y = glm::max(maxBound.y, 50.0f);
+
         sub.boundingCenterLocal = (minBound + maxBound) * 0.5f;
         sub.boundingRadiusLocal = glm::length(maxBound - sub.boundingCenterLocal);
-        sub.textureId = 0; // default
+
+        sub.textureId = 0;
+        sub.normalTextureId = 0;
 
         mesh.subMeshes.push_back(sub);
-        mesh.materialTextures = { "" }; // default texture
+        mesh.materialTextures = { "" };
+        mesh.normalMapTextures = { "" };
     }
     else {
         mesh.subMeshes = subMeshes;
         mesh.materialTextures = materialTextures;
-        // Ensure materialTextures size matches subMeshes
         if (mesh.materialTextures.size() != mesh.subMeshes.size()) {
             mesh.materialTextures.resize(mesh.subMeshes.size(), "");
         }
+        mesh.normalMapTextures.resize(mesh.subMeshes.size(), "");
     }
 
     m_meshes[name] = std::move(mesh);
-    std::cout << "[Asset Manager] Registered mesh: " << name << " with " << m_meshes[name].subMeshes.size() << " submeshes\n";
+
+#ifdef _DEBUG
+    std::cout << "[Asset Manager] Registered mesh: " << name << "\n";
+#endif
 }
 MeshAsset* AssetManager::GetMesh(const std::string& path) {
     auto it = m_meshes.find(path);
@@ -822,25 +834,49 @@ VkQueue AssetManager::GetGraphicsQueue() const { return m_renderer->GetGraphicsQ
 
 void AssetManager::Cleanup(VkDevice device) {
     for (auto& tex : m_textureRegistry) {
-        if (tex.sampler != VK_NULL_HANDLE) vkDestroySampler(device, tex.sampler, nullptr);
-        if (tex.imageView != VK_NULL_HANDLE) vkDestroyImageView(device, tex.imageView, nullptr);
-        if (tex.image != VK_NULL_HANDLE) vkDestroyImage(device, tex.image, nullptr);
-        if (tex.imageMemory != VK_NULL_HANDLE) vkFreeMemory(device, tex.imageMemory, nullptr);
+        if (tex.sampler)     vkDestroySampler(device, tex.sampler, nullptr);
+        if (tex.imageView)   vkDestroyImageView(device, tex.imageView, nullptr);
+        if (tex.image)       vkDestroyImage(device, tex.image, nullptr);
+        if (tex.imageMemory) vkFreeMemory(device, tex.imageMemory, nullptr);
     }
     m_textureRegistry.clear();
-    m_textures.clear();
     m_textureToId.clear();
 
-    // NEW: mirror cleanup for normal map registry
+    for (auto& pair : m_textures) {
+        Texture& tex = pair.second;
+        if (tex.sampler)     vkDestroySampler(device, tex.sampler, nullptr);
+        if (tex.imageView)   vkDestroyImageView(device, tex.imageView, nullptr);
+        if (tex.image)       vkDestroyImage(device, tex.image, nullptr);
+        if (tex.imageMemory) vkFreeMemory(device, tex.imageMemory, nullptr);
+        // Zero them to avoid double-destruction if the same texture appears again
+        tex.sampler = VK_NULL_HANDLE;
+        tex.imageView = VK_NULL_HANDLE;
+        tex.image = VK_NULL_HANDLE;
+        tex.imageMemory = VK_NULL_HANDLE;
+    }
+    m_textures.clear();
+
     for (auto& tex : m_normalTextureRegistry) {
-        if (tex.sampler != VK_NULL_HANDLE) vkDestroySampler(device, tex.sampler, nullptr);
-        if (tex.imageView != VK_NULL_HANDLE) vkDestroyImageView(device, tex.imageView, nullptr);
-        if (tex.image != VK_NULL_HANDLE) vkDestroyImage(device, tex.image, nullptr);
-        if (tex.imageMemory != VK_NULL_HANDLE) vkFreeMemory(device, tex.imageMemory, nullptr);
+        if (tex.sampler)     vkDestroySampler(device, tex.sampler, nullptr);
+        if (tex.imageView)   vkDestroyImageView(device, tex.imageView, nullptr);
+        if (tex.image)       vkDestroyImage(device, tex.image, nullptr);
+        if (tex.imageMemory) vkFreeMemory(device, tex.imageMemory, nullptr);
     }
     m_normalTextureRegistry.clear();
-    m_normalTextures.clear();
     m_normalTextureToId.clear();
+
+    for (auto& pair : m_normalTextures) {
+        Texture& tex = pair.second;
+        if (tex.sampler)     vkDestroySampler(device, tex.sampler, nullptr);
+        if (tex.imageView)   vkDestroyImageView(device, tex.imageView, nullptr);
+        if (tex.image)       vkDestroyImage(device, tex.image, nullptr);
+        if (tex.imageMemory) vkFreeMemory(device, tex.imageMemory, nullptr);
+        tex.sampler = VK_NULL_HANDLE;
+        tex.imageView = VK_NULL_HANDLE;
+        tex.image = VK_NULL_HANDLE;
+        tex.imageMemory = VK_NULL_HANDLE;
+    }
+    m_normalTextures.clear();
 
     m_meshes.clear();
 }

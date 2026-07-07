@@ -85,9 +85,6 @@ struct RenderMesh {
     }
 };
 
-// ============================================================
-// Hash specialization for ModelVertex – needed for unordered_map
-// ============================================================
 namespace std {
     template<> struct hash<ModelVertex> {
         size_t operator()(ModelVertex const& vertex) const {

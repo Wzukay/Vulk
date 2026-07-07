@@ -160,6 +160,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="assetManager.cpp" />
+    <ClCompile Include="chunk.cpp" />
     <ClCompile Include="game.cpp" />
     <ClCompile Include="include\imgui\imgui.cpp" />
     <ClCompile Include="include\imgui\imgui_draw.cpp" />
@@ -174,10 +175,10 @@
     <ClCompile Include="renderer.cpp" />
     <ClCompile Include="settings.cpp" />
     <ClCompile Include="terrain.cpp" />
-    <ClCompile Include="vertex.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="assetManager.h" />
+    <ClInclude Include="chunk.h" />
     <ClInclude Include="FastNoiseLite.h" />
     <ClInclude Include="game.h" />
     <ClInclude Include="input.h" />
@@ -191,14 +192,12 @@
     <ClInclude Include="stb_image.h" />
     <ClInclude Include="terrain.h" />
     <ClInclude Include="texture.h" />
+    <ClInclude Include="threadPool.h" />
     <ClInclude Include="tiny_obj_loader.h" />
-    <ClInclude Include="vertex.h" />
-    <ClInclude Include="worldGen.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="shaders\shader.frag" />
     <None Include="shaders\shader.vert" />
-    <None Include="shadow.vert" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

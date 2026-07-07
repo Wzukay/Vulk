@@ -3,14 +3,9 @@
 #include <vector>
 #include <string>
 #include <glm/glm.hpp>
+#include <algorithm>
 
 #include "scene_types.h"
-
-struct MeshInstance {
-    std::string meshName;
-    glm::mat4 transform;
-    uint32_t objectId;
-};
 
 class Scene {
 private:
@@ -20,14 +15,41 @@ private:
     mutable bool hasModifiedLights = false;
 
 public:
-    void AddInstance(const std::string& meshName, const glm::mat4& transform, uint32_t objectId) {
-        instances.push_back({ meshName, transform, objectId });
+    void AddInstance(
+        const std::string& meshName,
+        const glm::mat4& transform,
+        uint32_t objectId)
+    {
+        instances.push_back(
+            {
+                meshName,
+                transform,
+                objectId,
+                MeshType::Static
+            });
     }
 
-    void AddLight(const SceneLight& light) {
-        lights.push_back(light);
-        hasModifiedLights = true;
+    void RemoveChunk(int64_t key)
+    {
+        instances.erase(
+            std::remove_if(
+                instances.begin(),
+                instances.end(),
+                [&](const MeshInstance& inst)
+                {
+                    return inst.chunkKey == key;
+                }),
+            instances.end());
     }
+
+    void RemoveInstance(const std::string& meshName) { // NEW
+        instances.erase(
+            std::remove_if(instances.begin(), instances.end(),
+                [&](const MeshInstance& inst) { return inst.meshName == meshName; }),
+            instances.end());
+    }
+
+    void AddLight(const SceneLight& light) { lights.push_back(light); hasModifiedLights = true; }
     bool HasModifiedLights() const { return hasModifiedLights; }
     void ClearModifiedLightsFlag() const { hasModifiedLights = false; }
     const std::vector<SceneLight>& GetLights() const { return lights; }

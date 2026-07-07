@@ -12,12 +12,12 @@ void Game::Init()
     renderer.Initialize(g_Settings.windowWidth, g_Settings.windowHeight, "Vulk");
     window = renderer.GetWindow();
 
-    g_AssetManager.LoadMesh("assets/models/sponza/sponza.obj");
+    //g_AssetManager.LoadMesh("assets/models/sponza/sponza.obj");
 
-    glm::mat4 sponzaTransform = glm::mat4(1.0f);
-    sponzaTransform = glm::rotate(sponzaTransform, glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-    sponzaTransform = glm::scale(sponzaTransform, glm::vec3(0.3f));
-    scene.AddInstance("assets/models/sponza/sponza.obj", sponzaTransform, 1);
+    //glm::mat4 sponzaTransform = glm::mat4(1.0f);
+    //sponzaTransform = glm::rotate(sponzaTransform, glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+    //sponzaTransform = glm::scale(sponzaTransform, glm::vec3(0.3f));
+    //scene.AddInstance("assets/models/sponza/sponza.obj", sponzaTransform, 1);
 
     scene.AddLight(MakeDirectional(glm::vec3(0.6f, 0.9f, 0.6f), glm::vec3(0.75f, 0.7f, 0.65f), 1.0f));
     //scene.AddLight(MakePoint(glm::vec3(2.0f, 10.0f, -1.0f), glm::vec3(1.0f, 0.4f, 0.2f), 1.0f, 15.0f));
@@ -42,8 +42,14 @@ void Game::Init()
         debugLog.AddLog("[Lobby] Contacting introduction server. Standing by...");
     }
     else {
-        worldGenerator.GetRandomSeed();
-        worldGenerator.InitializeWorld(renderer, scene, 200, 200);
+        chunk.SetSeed(23645);
+
+        CameraData initialCam = { glm::vec3(100.0f, 60.0f, 250.0f),
+                                  glm::normalize(glm::vec3(0.0f, sin(glm::radians(-30.0f)), -cos(glm::radians(-30.0f)))),
+                                  glm::vec3(0.0f, 1.0f, 0.0f) };
+        renderer.UpdateUniformBuffer(initialCam);
+
+        chunk.Update(initialCam.pos, scene, renderer);
         isReadyToDraw = true;
     }
 
@@ -72,6 +78,8 @@ void Game::Loop()
 
         if (isReadyToDraw) {
             renderer.UpdateUniformBuffer({ cam.pos, cam.front, cam.up });
+
+            chunk.Update(cam.pos, scene, renderer);
         }
 
         renderer.DrawFrame();
@@ -81,6 +89,7 @@ void Game::Loop()
 
     g_Settings.SaveToFile();
 
+    chunk.Shutdown();
     renderer.Cleanup();
     ShutdownCleanly();
 }
@@ -101,9 +110,8 @@ void Game::ProcessNetworkPackets() {
         if (netManager.GetConnectedPeersCount() == 0 && netManager.GetPendingPeersCount() == 0) {
             debugLog.AddLog("[Lobby] Async role resolved: You are HOST. Generating world...");
 
-            worldGenerator.GetRandomSeed();
-            worldGenerator.InitializeWorld(renderer, scene, 200, 200);
-            renderer.UpdateScene(scene);
+            chunk.SetRandomSeed();
+            chunk.Update(cam.pos, scene, renderer);
             isReadyToDraw = true;
         }
     }
@@ -134,8 +142,8 @@ void Game::ProcessNetworkPackets() {
                 std::cout << "[Network Test] Attempting to parse seed token: '" << seedStr << "'\n";
                 int seed = std::stoi(seedStr);
 
-                worldGenerator.SetSeed(seed);
-                worldGenerator.InitializeWorld(renderer, scene, 200, 200);
+                chunk.SetSeed(seed);
+                chunk.Update(cam.pos, scene, renderer);
                 isReadyToDraw = true;
 
                 std::cout << "[Network Test] SUCCESS! World buffers built for client.\n";
@@ -147,7 +155,7 @@ void Game::ProcessNetworkPackets() {
         else if (isHost && packet.packetType == 3) {
             debugLog.AddLog("[Hot-Plug] Late arrival peer detected: " + epKey);
 
-            int currentSeed = worldGenerator.GetSeed();
+            int currentSeed = chunk.seed;
             if (currentSeed == 0) {
                 debugLog.AddLog("[DEBUG] Seed was 0 on host: " + epKey);
                 currentSeed = 123456;

@@ -1,10 +1,10 @@
 #pragma once
 
 #include "networkManager.h"
-#include "worldGen.h"
 #include "logger.h"
 #include "renderer.h"
 #include "input.h"
+#include "chunk.h"
 
 #include <iostream>
 #include <string>
@@ -29,9 +29,8 @@ private:
 	Scene scene;
 
 	NetworkManager netManager;
-	WorldGen worldGenerator;
+	Chunk chunk;
 	VulkanRenderer renderer;
-	WorldGen worldGen;
 	Input input;
 
 	void ShutdownCleanly();

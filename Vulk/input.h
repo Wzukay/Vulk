@@ -15,7 +15,7 @@ class Input
 {
 private:	
 	float yaw = -90.0f;
-	float pitch = 0.0f;
+	float pitch = -30.0f;
 	float lastX = 400.0f, lastY = 300.0f;
 	bool firstMouse = true;
 

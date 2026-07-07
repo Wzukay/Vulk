@@ -40,10 +40,14 @@ public:
     void SetRenderer(VulkanRenderer* renderer) { m_renderer = renderer; }
 
     void LoadMesh(const std::string& path);
-    void RegisterMesh(const std::string& name, const std::vector<ModelVertex>& vertices,
-        const std::vector<uint32_t>& indices,
-        const std::vector<SubMesh>& subMeshes = {},
-        const std::vector<std::string>& materialTextures = {});
+    void RegisterMesh(
+        const std::string& name,
+        std::vector<ModelVertex>&& vertices,   
+        std::vector<uint32_t>&& indices,                     
+        std::vector<SubMesh> subMeshes = {},            
+        std::vector<std::string> materialTextures = {}
+    );
+    void UnregisterMesh(const std::string& name) { m_meshes.erase(name); }
     MeshAsset* GetMesh(const std::string& path);
     void ParseObjFileByMaterial(const std::string& filepath,
         std::vector<std::vector<ModelVertex>>& verticesPerMaterial,

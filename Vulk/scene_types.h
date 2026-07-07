@@ -3,6 +3,22 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
+enum class MeshType
+{
+    Static,
+    Terrain
+};
+
+struct MeshInstance {
+    std::string meshName;
+    glm::mat4 transform;
+    uint32_t objectId;
+
+    MeshType type;
+
+    int64_t chunkKey = -1;
+};
+
 struct SubMesh {
     uint32_t indexCount = 0;
     uint32_t firstIndex = 0;
@@ -17,8 +33,11 @@ struct SubMesh {
 struct SceneObject {
     uint32_t firstSubMesh = 0;
     uint32_t subMeshCount = 0;
+
     glm::mat4 modelMatrix = glm::mat4(1.0f);
     uint32_t objectId = 0;
+
+    MeshType type;
 };
 
 struct SceneLight {
