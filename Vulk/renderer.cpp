@@ -534,12 +534,14 @@ void VulkanRenderer::RecreateSwapChain() {
 
 	vkFreeCommandBuffers(logicalDevice, commandPool, static_cast<uint32_t>(commandBuffers.size()), commandBuffers.data());
 	CreateCommandBuffers(); // re-allocates commandBuffers with new framebuffers
-
 	CreateSyncObjects();
 
 	currentFrame = 0;
 
 	ImGui_ImplVulkan_Shutdown();
+
+	vkResetDescriptorPool(logicalDevice, imguiDescriptorPool, 0);
+
 	ImGui_ImplVulkan_InitInfo init_info = {};
 	init_info.Instance = instance;
 	init_info.PhysicalDevice = physicalDevice;
@@ -554,6 +556,7 @@ void VulkanRenderer::RecreateSwapChain() {
 	init_info.PipelineInfoMain.RenderPass = renderPass;
 	init_info.PipelineInfoMain.Subpass = 0;
 	init_info.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+
 	ImGui_ImplVulkan_Init(&init_info);
 }
 
@@ -1496,8 +1499,13 @@ void VulkanRenderer::UpdateUniformBuffer(const CameraData& cam) {
 	ubo.proj[1][1] *= -1;
 
 	ubo.ambient = 0.25f;                // brighter ambient
-	ubo.specularPower = 32.0f;           // softer highlights
+	ubo.specularPower = 8.0f;           // softer highlights
 	ubo.lightCount = static_cast<uint32_t>(currentLights.size());
+
+	ubo.cameraPos = cam.pos;
+
+	ubo.fogStart = m_fogStart;
+	ubo.fogEnd = m_fogEnd;
 
 	UpdateFrustumPlanes(ubo.proj * ubo.view);
 
@@ -1581,21 +1589,21 @@ void VulkanRenderer::CreateTerrainBuffers() {
 
 	std::cout << "[Memory Manager] Pre-allocated global terrain buffers.\n";
 }
-
 void VulkanRenderer::CreateImGuiDescriptorPool() {
-	VkDescriptorPoolSize pool_sizes[] = {
-		{ VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, IMGUI_IMPL_VULKAN_MINIMUM_SAMPLED_IMAGE_POOL_SIZE },
-		{ VK_DESCRIPTOR_TYPE_SAMPLER, IMGUI_IMPL_VULKAN_MINIMUM_SAMPLER_POOL_SIZE },
-	};
+	VkDescriptorPoolSize pool_sizes[2] = {};
+	pool_sizes[0].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+	pool_sizes[0].descriptorCount = 100; 
+	pool_sizes[1].type = VK_DESCRIPTOR_TYPE_SAMPLER;
+	pool_sizes[1].descriptorCount = 100; 
 
 	VkDescriptorPoolCreateInfo pool_info = {};
 	pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 	pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
 	pool_info.maxSets = 0;
-	for (VkDescriptorPoolSize& pool_size : pool_sizes) {
-		pool_info.maxSets += pool_size.descriptorCount;
+	for (VkDescriptorPoolSize& size : pool_sizes) {
+		pool_info.maxSets += size.descriptorCount;
 	}
-	pool_info.poolSizeCount = static_cast<uint32_t>(sizeof(pool_sizes) / sizeof(pool_sizes[0]));
+	pool_info.poolSizeCount = 2;
 	pool_info.pPoolSizes = pool_sizes;
 
 	if (vkCreateDescriptorPool(logicalDevice, &pool_info, nullptr, &imguiDescriptorPool) != VK_SUCCESS) {
@@ -1624,12 +1632,10 @@ void VulkanRenderer::CreateImGui() {
 	init_info.ImageCount = static_cast<uint32_t>(swapChainImages.size());
 	init_info.Allocator = nullptr;
 
-	// --- THIS IS THE FIX FOR THE RENDERPASS ERROR ---
 	init_info.PipelineInfoMain.RenderPass = renderPass;
 	init_info.PipelineInfoMain.Subpass = 0;
 	init_info.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
 
-	// Only takes ONE parameter now
 	ImGui_ImplVulkan_Init(&init_info);
 }
 void VulkanRenderer::DrawGUI() {
@@ -1848,15 +1854,21 @@ void VulkanRenderer::AddTerrainChunk(
 	TerrainChunkGPU chunk{};
 
 	chunk.key = key;
-	chunk.center = glm::vec3( cx * 128.0f + 64.0f, 0.0f, cz * 128.0f + 64.0f);
 
+	glm::vec3 minBound(FLT_MAX), maxBound(-FLT_MAX);
+	for (const auto& v : vertices) {
+		minBound = glm::min(minBound, v.pos);
+		maxBound = glm::max(maxBound, v.pos);
+	}
+	glm::vec3 center = (minBound + maxBound) * 0.5f;
 	float radius = 0.0f;
-	glm::vec3 center(cx * 128.0f + 64.0f, 0.0f, cz * 128.0f + 64.0f);
-	for (auto& v : vertices) {
+	for (const auto& v : vertices) {
 		radius = glm::max(radius, glm::length(v.pos - center));
 	}
+	radius += 10.0f;  // margin for safety
 
-	chunk.radius = radius + 10.0f; // add margin
+	chunk.center = center;
+	chunk.radius = radius;
 
 	UploadTerrainChunkAsync(chunk, vertices, indices);
 }
@@ -2063,7 +2075,11 @@ void VulkanRenderer::DrawFrame() {
 
 	DrawGUI();
 
+	auto fenceStart = std::chrono::high_resolution_clock::now();
 	vkWaitForFences(logicalDevice, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
+	auto fenceEnd = std::chrono::high_resolution_clock::now();
+	float fenceMs = std::chrono::duration<float, std::milli>(fenceEnd - fenceStart).count();
+	if (fenceMs > 1.0f) std::cout << "[Fence Wait] " << fenceMs << " ms\n";
 
 	// --- Process pending deletions (already present) ---
 	auto& pending = pendingDeletions[currentFrame];
@@ -2169,6 +2185,11 @@ void VulkanRenderer::DrawFrame() {
 
 	// Advance to next frame
 	currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
+}
+
+void VulkanRenderer::SetFogParams(float start, float end) {
+	m_fogStart = start;
+	m_fogEnd = end;
 }
 
 void VulkanRenderer::Cleanup() {

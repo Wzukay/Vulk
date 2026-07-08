@@ -1,8 +1,11 @@
 #include "game.h"
 #include "assetManager.h"
 
+#include <chrono>
+
 GameLogger debugLog;
 bool isReadyToDraw = false;
+static glm::vec3 lastCamPos;
 
 void Game::Init()
 { 
@@ -13,6 +16,8 @@ void Game::Init()
     renderer.Initialize(g_Settings.windowWidth, g_Settings.windowHeight, "Vulk");
     window = renderer.GetWindow();
 
+	chunk.Init(renderer);
+
     //g_AssetManager.LoadMesh("assets/models/sponza/sponza.obj");
 
     //glm::mat4 sponzaTransform = glm::mat4(1.0f);
@@ -20,13 +25,13 @@ void Game::Init()
     //sponzaTransform = glm::scale(sponzaTransform, glm::vec3(0.3f));
     //scene.AddInstance("assets/models/sponza/sponza.obj", sponzaTransform, 1);
 
-    uint32_t sandId = g_AssetManager.LoadTextureFromFile("assets/textures/sand_albedo.png");   // Index 0
-    uint32_t grassId = g_AssetManager.LoadTextureFromFile("assets/textures/grass_albedo.png");  // Index 1
-    uint32_t rockId = g_AssetManager.LoadTextureFromFile("assets/textures/rock_albedo.png");   // Index 2
+    uint32_t sandId = g_AssetManager.LoadTextureFromFile("assets/textures/sand_albedo.dds");   // Index 0
+    uint32_t grassId = g_AssetManager.LoadTextureFromFile("assets/textures/grass_albedo.dds");  // Index 1
+    uint32_t rockId = g_AssetManager.LoadTextureFromFile("assets/textures/rock_albedo.dds");   // Index 2
 
-    uint32_t sandNormalId = g_AssetManager.LoadTextureFromFile("assets/textures/sand_normal.png");
-    uint32_t grassNormalId = g_AssetManager.LoadTextureFromFile("assets/textures/grass_normal.png");
-    uint32_t rockNormalId = g_AssetManager.LoadTextureFromFile("assets/textures/rock_normal.png");
+    uint32_t sandNormalId = g_AssetManager.LoadTextureFromFile("assets/textures/sand_normal.dds");
+    uint32_t grassNormalId = g_AssetManager.LoadTextureFromFile("assets/textures/grass_normal.dds");
+    uint32_t rockNormalId = g_AssetManager.LoadTextureFromFile("assets/textures/rock_normal.dds");
 
     scene.AddLight(MakeDirectional(glm::vec3(0.6f, 0.9f, 0.6f), glm::vec3(0.75f, 0.7f, 0.65f), 1.0f));
     //scene.AddLight(MakePoint(glm::vec3(2.0f, 10.0f, -1.0f), glm::vec3(1.0f, 0.4f, 0.2f), 1.0f, 15.0f));
@@ -78,9 +83,11 @@ void Game::Loop()
     }
 
     while (!renderer.ShouldClose() && isRunning) {
+        auto frameStart = std::chrono::high_resolution_clock::now();
+
         renderer.PollEvents();
 
-        if(isMultiplayerGame)
+        if (isMultiplayerGame)
             ProcessNetworkPackets();
 
         CameraData cam = input.ProcessInput(window);
@@ -88,11 +95,31 @@ void Game::Loop()
         if (isReadyToDraw) {
             renderer.UpdateUniformBuffer({ cam.pos, cam.front, cam.up });
 
+            //auto chunkStart = std::chrono::high_resolution_clock::now();
+            //chunk.Update(cam.pos, scene, renderer);
+            //chunk.PreGenerateChunks(cam.pos, scene, renderer);
+            //auto chunkEnd = std::chrono::high_resolution_clock::now();
+            //float chunkMs = std::chrono::duration<float, std::milli>(chunkEnd - chunkStart).count();
+
+            //auto renderStart = std::chrono::high_resolution_clock::now();
+            //renderer.DrawFrame();
+            //auto renderEnd = std::chrono::high_resolution_clock::now();
+            //float renderMs = std::chrono::duration<float, std::milli>(renderEnd - renderStart).count();
+
+            //auto frameEnd = std::chrono::high_resolution_clock::now();
+            //float frameMs = std::chrono::duration<float, std::milli>(frameEnd - frameStart).count();
+            //if (frameMs > 16.0f) {
+            //    std::cout << "[Frame] Chunk: " << chunkMs << " ms, Render: " << renderMs << " ms, Total: " << frameMs << "\n";
+            //}
+
             chunk.Update(cam.pos, scene, renderer);
             chunk.PreGenerateChunks(cam.pos, scene, renderer);
-        }
 
-        renderer.DrawFrame();
+            renderer.DrawFrame();
+        }
+        else {
+            renderer.DrawFrame();
+        }
     }
 
     std::cout << "Closing and dropping pipelines...\n";

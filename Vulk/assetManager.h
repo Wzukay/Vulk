@@ -3,10 +3,13 @@
 #include <unordered_map>
 #include <string>
 #include <vector>
+#include <fstream>
 #include <glm/glm.hpp>
+
 #include "scene_types.h"
 #include "texture.h"
 #include "renderMesh.h"
+#include "settings.h"
 
 class VulkanRenderer;
 
@@ -18,17 +21,42 @@ struct MeshAsset {
     std::vector<std::string> normalMapTextures;
 };
 
+struct DDSHeader {
+    uint32_t dwSize;
+    uint32_t dwFlags;
+    uint32_t dwHeight;
+    uint32_t dwWidth;
+    uint32_t dwLinearSize;
+    uint32_t dwDepth;
+    uint32_t dwMipMapCount;
+    uint32_t dwReserved1[11];
+    struct {
+        uint32_t dwSize;
+        uint32_t dwFlags;
+        uint32_t dwFourCC;
+        uint32_t dwRGBBitCount;
+        uint32_t dwRBitMask;
+        uint32_t dwGBitMask;
+        uint32_t dwBBitMask;
+        uint32_t dwABitMask;
+    } ddspf;
+    uint32_t dwCaps;
+    uint32_t dwCaps2;
+    uint32_t dwCaps3;
+    uint32_t dwCaps4;
+    uint32_t dwReserved2;
+};
+
 class AssetManager {
 private:
     VulkanRenderer* m_renderer = nullptr;
     VkDescriptorSet m_descriptorSet = VK_NULL_HANDLE;
 
     std::unordered_map<std::string, MeshAsset> m_meshes;
-    std::unordered_map<std::string, Texture> m_textures;
+
     std::unordered_map<std::string, uint32_t> m_textureToId;
     std::vector<Texture> m_textureRegistry;
-
-    std::unordered_map<std::string, Texture> m_normalTextures;       
+  
     std::unordered_map<std::string, uint32_t> m_normalTextureToId;    
     std::vector<Texture> m_normalTextureRegistry;                   
 
@@ -64,8 +92,7 @@ public:
     void CreateTextureSampler(Texture& tex);
     void TransitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t mipLevels = 1);
     void CopyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height);
-    void GenerateMipmaps(VkImage image, VkFormat imageFormat, int32_t texWidth, int32_t texHeight, uint32_t mipLevels);
-    
+
     Texture* GetTexture(const std::string& path);
     uint32_t GetTextureId(const std::string& path);
     

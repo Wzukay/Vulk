@@ -14,6 +14,8 @@ layout(binding = 0) uniform UniformBufferObject {
     float ambient;
     float specularPower;
     uint lightCount;
+    float fogStart;
+    float fogEnd;
 } ubo;
 
 layout(std430, binding = 1) readonly buffer LightBuffer {
@@ -25,19 +27,37 @@ layout(binding = 3) uniform sampler2D normalTextures[];
 
 layout(location = 0) in vec3 fragNormal;
 layout(location = 1) in vec2 fragTexCoord;
+layout(location = 2) flat in uint fragTextureId;
 layout(location = 3) in vec3 fragWorldPos;
 layout(location = 4) in vec3 fragTangent;
 layout(location = 5) in float fragTangentHandedness;
+layout(location = 6) flat in uint fragNormalTextureId;
 layout(location = 7) in vec3 fragColor; // Splat weights (r=sand, g=grass, b=rock)
 
 layout(location = 0) out vec4 outColor;
 
-// 🚀 TRIPLANAR SAMPLING HELPER
-// Samples a texture three times based on world position and blends by normal
+// 🚀 TRIPLANAR SAMPLING HELPER FOR ALBEDO
 vec4 TriplanarSample(uint textureId, vec3 pos, vec3 weights) {
     vec4 x = texture(globalTextures[textureId], pos.yz);
     vec4 y = texture(globalTextures[textureId], pos.xz);
     vec4 z = texture(globalTextures[textureId], pos.xy);
+    return x * weights.x + y * weights.y + z * weights.z;
+}
+
+// 🚀 NEW: RECONSTRUCT 2-CHANNEL COMPRESSED NORMALS
+vec3 UnpackNormal(vec4 sampledNormal) {
+    // Extract Red (X) and Green (Y) and transform from [0, 1] texture space to [-1, 1] simulation space
+    vec2 normalXY = sampledNormal.rg * 2.0 - 1.0;
+    // Mathematically derive Z component based on geometric unit vector length constraints
+    float normalZ = sqrt(max(0.0, 1.0 - dot(normalXY, normalXY)));
+    return vec3(normalXY, normalZ);
+}
+
+// 🚀 NEW: TRIPLANAR SAMPLING HELPER FOR COMPRESSED NORMALS
+vec3 TriplanarSampleNormal(uint textureId, vec3 pos, vec3 weights) {
+    vec3 x = UnpackNormal(texture(normalTextures[textureId], pos.yz));
+    vec3 y = UnpackNormal(texture(normalTextures[textureId], pos.xz));
+    vec3 z = UnpackNormal(texture(normalTextures[textureId], pos.xy));
     return x * weights.x + y * weights.y + z * weights.z;
 }
 
@@ -53,35 +73,31 @@ void main() {
     vec3 blendWeights = abs(fragNormal);
     blendWeights /= (blendWeights.x + blendWeights.y + blendWeights.z);
 
-    // 2. Sample Textures (Indices 1, 2, 3 as per your logs)
-    // We use Triplanar for Rock (3) to prevent cliff stretching
-    vec4 sand  = texture(globalTextures[1], fragTexCoord);
-    vec4 grass = texture(globalTextures[2], fragTexCoord);
-    vec4 rock  = TriplanarSample(3, fragWorldPos * 0.05, blendWeights);
-
+    // 2. Blend Albedo Maps based on splat map configuration
     vec4 albedo = vec4(0.0);
 
     if (fragColor.r > 0.01) {
-        albedo += texture(globalTextures[1], fragTexCoord) * fragColor.r;
+        albedo += texture(globalTextures[0], fragTexCoord) * fragColor.r;
     }
     if (fragColor.g > 0.01) {
-        albedo += texture(globalTextures[2], fragTexCoord) * fragColor.g;
+        albedo += texture(globalTextures[1], fragTexCoord) * fragColor.g;
     }
     if (fragColor.b > 0.01) {
-        // Only use Triplanar for Rock if it's actually visible
-        albedo += TriplanarSample(3, fragWorldPos * 0.05, blendWeights) * fragColor.b;
+        albedo += TriplanarSample(2, fragWorldPos * 0.05, blendWeights) * fragColor.b;
     }
 
-    // 3. Normal Mapping
+    // 3. Normal Mapping Reconstruction & Blending
     vec3 N_geo = normalize(fragNormal);
     vec3 T = normalize(fragTangent);
     T = normalize(T - N_geo * dot(N_geo, T)); 
     vec3 B = cross(N_geo, T) * fragTangentHandedness;
     mat3 TBN = mat3(T, B, N_geo);
 
-    vec3 nSand  = texture(normalTextures[4], fragTexCoord).rgb * 2.0 - 1.0;
-    vec3 nGrass = texture(normalTextures[5], fragTexCoord).rgb * 2.0 - 1.0;
-    vec3 nRock  = texture(normalTextures[6], fragTexCoord).rgb * 2.0 - 1.0; // Can also be Triplanar-sampled
+    // Unpack compressed BC5/BC7 texture layers
+    vec3 nSand  = UnpackNormal(texture(normalTextures[3], fragTexCoord));
+    vec3 nGrass = UnpackNormal(texture(normalTextures[4], fragTexCoord));
+    // Triplanar sample Rock normal map to match albedo mapping layouts and fix cliff textures
+    vec3 nRock  = TriplanarSampleNormal(6, fragWorldPos * 0.05, blendWeights);
     
     vec3 blendedNormal = (nSand * fragColor.r) + (nGrass * fragColor.g) + (nRock * fragColor.b);
     vec3 N = normalize(TBN * blendedNormal);
@@ -98,5 +114,10 @@ void main() {
         result += CalcBlinnPhong(N, V, lightVec, L.color.rgb * L.color.a * atten, albedo.xyz, ubo.specularPower);
     }
 
-    outColor = vec4(result, 1.0);
+    float dist = length(ubo.cameraPos - fragWorldPos);
+    float fogFactor = clamp((dist - ubo.fogStart) / (ubo.fogEnd - ubo.fogStart), 0.0, 1.0);
+    if (dist > ubo.fogEnd) fogFactor = 1.0;
+    vec3 fogColor = vec3(0.1, 0.15, 0.25);
+    vec3 finalColor = mix(result, fogColor, fogFactor);
+    outColor = vec4(finalColor, 1.0);
 }

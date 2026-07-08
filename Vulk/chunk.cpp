@@ -5,6 +5,10 @@
 
 Chunk::Chunk() : threadPool(std::max(1u, std::thread::hardware_concurrency() - 1)) {}
 
+void Chunk::Init(VulkanRenderer& renderer) {
+    UpdateFogParamsBasedOnData(renderer);
+}
+
 static int64_t Key(int cx, int cz) {
     return (static_cast<int64_t>(cx) << 32) | (static_cast<uint32_t>(cz));
 }
@@ -122,9 +126,9 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
             // HEIGHT INTEGRATION: Define LOD ranges based on world units instead of grid units.
             // Adjust these numbers based on your preferences.
             int desiredLod = 0;
-            if (true3DDistance <= (chunkSize * 2.0f))       desiredLod = 0; // High detail near ground/low camera
-            else if (true3DDistance <= (chunkSize * 4.0f))  desiredLod = 1; // Medium detail
-            else                                            desiredLod = 2; // Low detail when far or high up
+            if (true3DDistance <= (chunkSize * 1.5f))    desiredLod = 0;   // was 2.0f
+            else if (true3DDistance <= (chunkSize * 3.0f)) desiredLod = 1; // was 4.0f
+            else                                          desiredLod = 2;
 
             int targetResolution = resolution;
             if (desiredLod == 1)      targetResolution = ((resolution - 1) / 2) + 1;
@@ -371,6 +375,13 @@ float Chunk::ChunkBoundsRadius() const {
     float footprintRadius = (chunkSize * 1.41421356f) * 0.5f;
     float heightMargin = 100.0f;
     return std::sqrt(footprintRadius * footprintRadius + heightMargin * heightMargin);
+}
+
+void Chunk::UpdateFogParamsBasedOnData(VulkanRenderer& renderer) {
+    float totalViewDistance = viewDistanceChunks * chunkSize;
+    float fogStart = 0.3125f * totalViewDistance;   // 1600/5120 = 0.3125
+    float fogEnd = 0.3320f * totalViewDistance;   // 1700/5120 ≈ 0.332
+    renderer.SetFogParams(fogStart, fogEnd);
 }
 
 void Chunk::Shutdown() {

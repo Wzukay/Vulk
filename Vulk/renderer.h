@@ -46,6 +46,8 @@ struct UniformBufferObject {
     float ambient;
     float specularPower;
     uint32_t lightCount;
+    float fogStart;
+    float fogEnd;
 };
 
 struct PushConstants {
@@ -392,6 +394,12 @@ public:
         return IsSphereInFrustum(center, radius);
     }
     
+
+private: 
+    float m_fogStart = 1600.0f;
+    float m_fogEnd = 1700.0f;
+public:
+    void SetFogParams(float start, float end);
 
 #ifdef NDEBUG
     const bool enableValidationLayers = false;

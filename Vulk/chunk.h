@@ -71,14 +71,15 @@ class Chunk {
 public:
     Chunk();
 
-    float chunkSize = 256;
-    int resolution = 40;
-    int viewDistanceChunks = 12;
-    int immediateViewChunks = 4;
+    float chunkSize = 512;
+    int resolution = 50;
+    int viewDistanceChunks = 50;
+    int immediateViewChunks = 12;
     int seed = 0;
 
     std::unordered_map<int64_t, std::future<ChunkJobResult>> m_pendingTerrainGen;
 
+    void Init(VulkanRenderer& renderer);
     void SetSeed(int s) { seed = s; }
     void SetRandomSeed() { seed = std::rand() % 1000000; }
     bool Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& renderer);
@@ -116,6 +117,7 @@ private:
     std::chrono::steady_clock::time_point firstChunkReadyTime;
     std::chrono::steady_clock::time_point lastChunkReadyTime;
 
+    void UpdateFogParamsBasedOnData(VulkanRenderer& renderer);
     glm::vec3 ChunkBoundsCenter(int cx, int cz) const;
     bool HasCameraShiftedNoticeably(const glm::vec3& camPos, const glm::vec3& camForward);
     float ChunkBoundsRadius() const;

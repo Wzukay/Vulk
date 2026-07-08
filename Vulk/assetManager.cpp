@@ -1,6 +1,5 @@
 #include "assetManager.h"
 #include "renderer.h"
-#include "stb_image.h"
 
 #include <iostream>
 #include <algorithm>
@@ -58,19 +57,61 @@ void AssetManager::CreateDefaultTexture() {
     vkBindImageMemory(GetDevice(), m_defaultTexture.image, m_defaultTexture.imageMemory, 0);
 
     TransitionImageLayout(m_defaultTexture.image, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-    CopyBufferToImage(stagingBuffer, m_defaultTexture.image, 1, 1);
+    
+    VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
+    VkBufferImageCopy region{};
+    region.bufferOffset = 0;
+    region.bufferRowLength = 0;
+    region.bufferImageHeight = 0;
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.mipLevel = 0;
+    region.imageSubresource.baseArrayLayer = 0;
+    region.imageSubresource.layerCount = 1;
+    region.imageOffset = { 0, 0, 0 };
+    region.imageExtent = { 1, 1, 1 };
+    vkCmdCopyBufferToImage(commandBuffer, stagingBuffer, m_defaultTexture.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    EndSingleTimeCommands(commandBuffer);
+
     TransitionImageLayout(m_defaultTexture.image, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     vkDestroyBuffer(GetDevice(), stagingBuffer, nullptr);
     vkFreeMemory(GetDevice(), stagingBufferMemory, nullptr);
 
-    CreateTextureImageView(m_defaultTexture, VK_FORMAT_R8G8B8A8_SRGB);
-    CreateTextureSampler(m_defaultTexture);
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image = m_defaultTexture.image;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = VK_FORMAT_R8G8B8A8_SRGB;
+    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewInfo.subresourceRange.baseMipLevel = 0;
+    viewInfo.subresourceRange.levelCount = m_defaultTexture.mipLevels;
+    viewInfo.subresourceRange.baseArrayLayer = 0;
+    viewInfo.subresourceRange.layerCount = 1;
+    if (vkCreateImageView(GetDevice(), &viewInfo, nullptr, &m_defaultTexture.imageView) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create texture image view.");
 
-    // Register as first texture
-    m_textureRegistry.clear();
-    m_textureRegistry.push_back(m_defaultTexture);
-    m_textureToId["default"] = 0;
+    VkPhysicalDeviceProperties properties{};
+    vkGetPhysicalDeviceProperties(GetPhysicalDevice(), &properties);
+
+    VkSamplerCreateInfo samplerInfo{};
+    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    samplerInfo.magFilter = VK_FILTER_LINEAR;
+    samplerInfo.minFilter = VK_FILTER_LINEAR;
+    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.anisotropyEnable = VK_TRUE;
+    samplerInfo.maxAnisotropy = g_Settings.maxAnisotropy;
+    samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+    samplerInfo.unnormalizedCoordinates = VK_FALSE;
+    samplerInfo.compareEnable = VK_FALSE;
+    samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
+    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    samplerInfo.minLod = 0.0f;
+    samplerInfo.maxLod = static_cast<float>(m_defaultTexture.mipLevels);
+    samplerInfo.mipLodBias = 0.0f;
+    if (vkCreateSampler(GetDevice(), &samplerInfo, nullptr, &m_defaultTexture.sampler) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create texture sampler.");
 
     VkDescriptorImageInfo descriptorInfo{};
     descriptorInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -88,332 +129,6 @@ void AssetManager::CreateDefaultTexture() {
 
     vkUpdateDescriptorSets(GetDevice(), 1, &descriptorWrite, 0, nullptr);
 }
-void AssetManager::LoadTexture(const std::string& path) {
-    if (m_descriptorSet == VK_NULL_HANDLE) {
-        std::cerr << "[AssetManager] ERROR: m_descriptorSet is null in LoadTexture!\n";
-        return;
-    }
-    if (path.empty() || path == "default") return;
-    if (m_textures.find(path) != m_textures.end()) return;
-
-    try {
-        Texture tex;
-        CreateTextureImage(path, tex);
-        m_textures[path] = tex;
-        m_textureRegistry.push_back(tex);
-        uint32_t id = static_cast<uint32_t>(m_textureRegistry.size()) - 1;
-        m_textureToId[path] = id;
-
-        // Write to descriptor set
-        VkDescriptorImageInfo descriptorInfo{};
-        descriptorInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        descriptorInfo.imageView = tex.imageView;
-        descriptorInfo.sampler = tex.sampler;
-
-        VkWriteDescriptorSet descriptorWrite{};
-        descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        descriptorWrite.dstSet = m_descriptorSet;
-        descriptorWrite.dstBinding = 2;
-        descriptorWrite.dstArrayElement = id;
-        descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        descriptorWrite.descriptorCount = 1;
-        descriptorWrite.pImageInfo = &descriptorInfo;
-
-        vkUpdateDescriptorSets(GetDevice(), 1, &descriptorWrite, 0, nullptr);
-        std::cout << "[AssetManager] Loaded texture: " << path << " (ID: " << id << ")\n";
-    }
-    catch (const std::exception& e) {
-        std::cerr << "[AssetManager] Exception loading texture '" << path << "': " << e.what() << "\n";
-        // Do not re-throw; we'll fall back to default texture later.
-    }
-}
-uint32_t AssetManager::LoadTextureFromFile(const std::string& filePath) {
-    // 1. If the texture is already loaded, immediately return its existing index
-    auto it = m_textureToId.find(filePath);
-    if (it != m_textureToId.end()) {
-        return it->second;
-    }
-
-    // 2. Initialize a fresh engine Texture structure
-    Texture tex{};
-
-    // 🚀 REUSE YOUR EXISITING ENGINE CODE: 
-    // This creates the VkImage, allocates memory, maps it, transitions its layout,
-    // copies pixel arrays internally, and builds optional mipmaps.
-    CreateTextureImage(filePath, tex, VK_FORMAT_R8G8B8A8_SRGB);
-
-    // Build its corresponding shader view wrapper
-    CreateTextureImageView(tex, VK_FORMAT_R8G8B8A8_SRGB);
-
-    // Create its unique linear filter configuration sampler
-    CreateTextureSampler(tex);
-
-    // 3. Register the newly built texture into your bindless storage arrays
-    uint32_t newTextureId = static_cast<uint32_t>(m_textureRegistry.size());
-
-    m_textures[filePath] = tex;
-    m_textureToId[filePath] = newTextureId;
-    m_textureRegistry.push_back(tex);
-
-    // 4. Signal your pipeline to update the descriptor sets on the next frame
-    m_textureDirty = true;
-
-    std::cout << "[AssetManager] Successfully loaded and registered: " << filePath
-        << " into ID slot: " << newTextureId << "\n";
-
-    return newTextureId;
-}
-uint32_t AssetManager::LoadNormalTextureFromFile(const std::string& filePath) {
-    auto it = m_normalTextureToId.find(filePath);
-    if (it != m_normalTextureToId.end()) {
-        return it->second;
-    }
-
-    Texture tex{};
-
-    // Normal maps should typically be loaded with UNORM format instead of SRGB 
-    // so colors aren't altered by gamma curves before vector calculations!
-    CreateTextureImage(filePath, tex, VK_FORMAT_R8G8B8A8_UNORM);
-    CreateTextureImageView(tex, VK_FORMAT_R8G8B8A8_UNORM);
-    CreateTextureSampler(tex);
-
-    uint32_t newNormalId = static_cast<uint32_t>(m_normalTextureRegistry.size());
-
-    m_normalTextures[filePath] = tex;
-    m_normalTextureToId[filePath] = newNormalId;
-    m_normalTextureRegistry.push_back(tex);
-
-    m_textureDirty = true; // Tell renderer to update descriptor pools
-
-    return newNormalId;
-}
-Texture* AssetManager::GetTexture(const std::string& path) {
-    // Return default texture for empty path or "default"
-    if (path.empty() || path == "default") return &m_defaultTexture;
-    auto it = m_textures.find(path);
-    if (it != m_textures.end()) return &it->second;
-    LoadTexture(path);
-    m_textureDirty = true;
-    return &m_textures[path];
-}
-uint32_t AssetManager::GetTextureId(const std::string& path) {
-    // Return 0 for empty path or "default"
-    if (path.empty() || path == "default") return 0;
-    auto it = m_textureToId.find(path);
-    if (it != m_textureToId.end()) return it->second;
-    LoadTexture(path);
-    return m_textureToId[path];
-}
-void AssetManager::TransitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t mipLevels) {
-    VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
-
-    VkImageMemoryBarrier barrier{};
-    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    barrier.oldLayout = oldLayout;
-    barrier.newLayout = newLayout;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image = image;
-    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    barrier.subresourceRange.baseMipLevel = 0;
-    barrier.subresourceRange.levelCount = mipLevels;
-    barrier.subresourceRange.baseArrayLayer = 0;
-    barrier.subresourceRange.layerCount = 1;
-
-    VkPipelineStageFlags sourceStage, destinationStage;
-    if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
-        barrier.srcAccessMask = 0;
-        barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-        destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-    }
-    else if (oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
-        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        sourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-        destinationStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    }
-    else {
-        throw std::invalid_argument("Unsupported layout transition!");
-    }
-
-    vkCmdPipelineBarrier(commandBuffer, sourceStage, destinationStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
-    EndSingleTimeCommands(commandBuffer);
-}
-void AssetManager::CopyBufferToImage(VkBuffer buffer, VkImage image, uint32_t width, uint32_t height) {
-    VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
-    VkBufferImageCopy region{};
-    region.bufferOffset = 0;
-    region.bufferRowLength = 0;
-    region.bufferImageHeight = 0;
-    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    region.imageSubresource.mipLevel = 0;
-    region.imageSubresource.baseArrayLayer = 0;
-    region.imageSubresource.layerCount = 1;
-    region.imageOffset = { 0, 0, 0 };
-    region.imageExtent = { width, height, 1 };
-    vkCmdCopyBufferToImage(commandBuffer, buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-    EndSingleTimeCommands(commandBuffer);
-}
-void AssetManager::GenerateMipmaps(VkImage image, VkFormat imageFormat, int32_t texWidth, int32_t texHeight, uint32_t mipLevels) {
-    VkFormatProperties formatProperties;
-    vkGetPhysicalDeviceFormatProperties(GetPhysicalDevice(), imageFormat, &formatProperties);
-    if (!(formatProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)) {
-        throw std::runtime_error("Texture image format does not support linear blitting for mipmap generation.");
-    }
-
-    VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
-    VkImageMemoryBarrier barrier{};
-    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    barrier.image = image;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    barrier.subresourceRange.baseArrayLayer = 0;
-    barrier.subresourceRange.layerCount = 1;
-    barrier.subresourceRange.levelCount = 1;
-
-    int32_t mipWidth = texWidth;
-    int32_t mipHeight = texHeight;
-    for (uint32_t i = 1; i < mipLevels; i++) {
-        barrier.subresourceRange.baseMipLevel = i - 1;
-        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
-
-        VkImageBlit blit{};
-        blit.srcOffsets[0] = { 0, 0, 0 };
-        blit.srcOffsets[1] = { mipWidth, mipHeight, 1 };
-        blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        blit.srcSubresource.mipLevel = i - 1;
-        blit.srcSubresource.baseArrayLayer = 0;
-        blit.srcSubresource.layerCount = 1;
-        blit.dstOffsets[0] = { 0, 0, 0 };
-        blit.dstOffsets[1] = { mipWidth > 1 ? mipWidth / 2 : 1, mipHeight > 1 ? mipHeight / 2 : 1, 1 };
-        blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        blit.dstSubresource.mipLevel = i;
-        blit.dstSubresource.baseArrayLayer = 0;
-        blit.dstSubresource.layerCount = 1;
-        vkCmdBlitImage(commandBuffer, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
-
-        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
-
-        if (mipWidth > 1) mipWidth /= 2;
-        if (mipHeight > 1) mipHeight /= 2;
-    }
-
-    barrier.subresourceRange.baseMipLevel = mipLevels - 1;
-    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
-    EndSingleTimeCommands(commandBuffer);
-}
-void AssetManager::CreateTextureImage(const std::string& path, Texture& texture, VkFormat format) {
-    int texWidth, texHeight, texChannels;
-    stbi_uc* pixels = stbi_load(path.c_str(), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
-    if (!pixels) {
-        std::string err = stbi_failure_reason();
-        throw std::runtime_error("Failed to load texture image: " + path + " (STB error: " + err + ")");
-    }
-
-    texture.mipLevels = static_cast<uint32_t>(std::floor(std::log2(std::max(texWidth, texHeight)))) + 1;
-    VkDeviceSize imageSize = static_cast<VkDeviceSize>(texWidth) * texHeight * 4;
-
-    VkBuffer stagingBuffer;
-    VkDeviceMemory stagingBufferMemory;
-    CreateBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        stagingBuffer, stagingBufferMemory);
-
-    void* data;
-    vkMapMemory(GetDevice(), stagingBufferMemory, 0, imageSize, 0, &data);
-    memcpy(data, pixels, static_cast<size_t>(imageSize));
-    vkUnmapMemory(GetDevice(), stagingBufferMemory);
-    stbi_image_free(pixels);
-
-    VkImageCreateInfo imageInfo{};
-    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    imageInfo.imageType = VK_IMAGE_TYPE_2D;
-    imageInfo.extent.width = static_cast<uint32_t>(texWidth);
-    imageInfo.extent.height = static_cast<uint32_t>(texHeight);
-    imageInfo.extent.depth = 1;
-    imageInfo.mipLevels = texture.mipLevels;
-    imageInfo.arrayLayers = 1;
-    imageInfo.format = format;
-    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    if (vkCreateImage(GetDevice(), &imageInfo, nullptr, &texture.image) != VK_SUCCESS)
-        throw std::runtime_error("Failed to create texture image.");
-
-    VkMemoryRequirements memRequirements;
-    vkGetImageMemoryRequirements(GetDevice(), texture.image, &memRequirements);
-    VkMemoryAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.allocationSize = memRequirements.size;
-    allocInfo.memoryTypeIndex = FindMemoryType(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (vkAllocateMemory(GetDevice(), &allocInfo, nullptr, &texture.imageMemory) != VK_SUCCESS)
-        throw std::runtime_error("Failed to allocate texture memory.");
-    vkBindImageMemory(GetDevice(), texture.image, texture.imageMemory, 0);
-
-    TransitionImageLayout(texture.image, format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, texture.mipLevels);
-    CopyBufferToImage(stagingBuffer, texture.image, texWidth, texHeight);
-    vkDestroyBuffer(GetDevice(), stagingBuffer, nullptr);
-    vkFreeMemory(GetDevice(), stagingBufferMemory, nullptr);
-
-    GenerateMipmaps(texture.image, format, texWidth, texHeight, texture.mipLevels);
-    CreateTextureImageView(texture, format);
-    CreateTextureSampler(texture);
-}
-void AssetManager::CreateTextureImageView(Texture& texture, VkFormat format) {
-    VkImageViewCreateInfo viewInfo{};
-    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    viewInfo.image = texture.image;
-    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    viewInfo.format = format;
-    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    viewInfo.subresourceRange.baseMipLevel = 0;
-    viewInfo.subresourceRange.levelCount = texture.mipLevels;
-    viewInfo.subresourceRange.baseArrayLayer = 0;
-    viewInfo.subresourceRange.layerCount = 1;
-    if (vkCreateImageView(GetDevice(), &viewInfo, nullptr, &texture.imageView) != VK_SUCCESS)
-        throw std::runtime_error("Failed to create texture image view.");
-}
-void AssetManager::CreateTextureSampler(Texture& texture) {
-    VkPhysicalDeviceProperties properties{};
-    vkGetPhysicalDeviceProperties(GetPhysicalDevice(), &properties);
-
-    VkSamplerCreateInfo samplerInfo{};
-    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    samplerInfo.magFilter = VK_FILTER_LINEAR;
-    samplerInfo.minFilter = VK_FILTER_LINEAR;
-    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    samplerInfo.anisotropyEnable = VK_TRUE;
-    samplerInfo.maxAnisotropy = properties.limits.maxSamplerAnisotropy;
-    samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
-    samplerInfo.unnormalizedCoordinates = VK_FALSE;
-    samplerInfo.compareEnable = VK_FALSE;
-    samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
-    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-    samplerInfo.minLod = 0.0f;
-    samplerInfo.maxLod = static_cast<float>(texture.mipLevels);
-    samplerInfo.mipLodBias = 0.0f;
-    if (vkCreateSampler(GetDevice(), &samplerInfo, nullptr, &texture.sampler) != VK_SUCCESS)
-        throw std::runtime_error("Failed to create texture sampler.");
-}
-
 void AssetManager::CreateDefaultNormalTexture() {
     uint8_t flatNormalPixel[4] = { 128, 128, 255, 255 }; // tangent-space "no perturbation"
     VkDeviceSize imageSize = 4;
@@ -460,19 +175,61 @@ void AssetManager::CreateDefaultNormalTexture() {
     vkBindImageMemory(GetDevice(), m_defaultNormalTexture.image, m_defaultNormalTexture.imageMemory, 0);
 
     TransitionImageLayout(m_defaultNormalTexture.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-    CopyBufferToImage(stagingBuffer, m_defaultNormalTexture.image, 1, 1);
+
+    VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
+    VkBufferImageCopy region{};
+    region.bufferOffset = 0;
+    region.bufferRowLength = 0;
+    region.bufferImageHeight = 0;
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.mipLevel = 0;
+    region.imageSubresource.baseArrayLayer = 0;
+    region.imageSubresource.layerCount = 1;
+    region.imageOffset = { 0, 0, 0 };
+    region.imageExtent = { 1, 1, 1 };
+    vkCmdCopyBufferToImage(commandBuffer, stagingBuffer, m_defaultNormalTexture.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    EndSingleTimeCommands(commandBuffer);
+
     TransitionImageLayout(m_defaultNormalTexture.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     vkDestroyBuffer(GetDevice(), stagingBuffer, nullptr);
     vkFreeMemory(GetDevice(), stagingBufferMemory, nullptr);
 
-    CreateTextureImageView(m_defaultNormalTexture, VK_FORMAT_R8G8B8A8_UNORM);
-    CreateTextureSampler(m_defaultNormalTexture);
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image = m_defaultNormalTexture.image;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewInfo.subresourceRange.baseMipLevel = 0;
+    viewInfo.subresourceRange.levelCount = m_defaultNormalTexture.mipLevels;
+    viewInfo.subresourceRange.baseArrayLayer = 0;
+    viewInfo.subresourceRange.layerCount = 1;
+    if (vkCreateImageView(GetDevice(), &viewInfo, nullptr, &m_defaultNormalTexture.imageView) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create texture image view.");
+    
+    VkPhysicalDeviceProperties properties{};
+    vkGetPhysicalDeviceProperties(GetPhysicalDevice(), &properties);
 
-    // Register as first normal texture (index 0)
-    m_normalTextureRegistry.clear();
-    m_normalTextureRegistry.push_back(m_defaultNormalTexture);
-    m_normalTextureToId["default"] = 0;
+    VkSamplerCreateInfo samplerInfo{};
+    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    samplerInfo.magFilter = VK_FILTER_LINEAR;
+    samplerInfo.minFilter = VK_FILTER_LINEAR;
+    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.anisotropyEnable = VK_TRUE;
+    samplerInfo.maxAnisotropy = g_Settings.maxAnisotropy;
+    samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+    samplerInfo.unnormalizedCoordinates = VK_FALSE;
+    samplerInfo.compareEnable = VK_FALSE;
+    samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
+    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    samplerInfo.minLod = 0.0f;
+    samplerInfo.maxLod = static_cast<float>(m_defaultNormalTexture.mipLevels);
+    samplerInfo.mipLodBias = 0.0f;
+    if (vkCreateSampler(GetDevice(), &samplerInfo, nullptr, &m_defaultNormalTexture.sampler) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create texture sampler.");
 
     VkDescriptorImageInfo descriptorInfo{};
     descriptorInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -490,49 +247,87 @@ void AssetManager::CreateDefaultNormalTexture() {
 
     vkUpdateDescriptorSets(GetDevice(), 1, &descriptorWrite, 0, nullptr);
 }
+
+uint32_t AssetManager::LoadTextureFromFile(const std::string& filePath) {
+    // 1. If the texture is already loaded, immediately return its existing index
+    auto it = m_textureToId.find(filePath);
+    if (it != m_textureToId.end()) {
+        return it->second;
+    }
+
+    // 2. Initialize a fresh engine Texture structure
+    Texture tex{};
+    CreateTextureImage(filePath, tex, VK_FORMAT_BC7_SRGB_BLOCK);
+
+    // 3. Register the newly built texture into your bindless storage arrays
+    uint32_t newId = static_cast<uint32_t>(m_textureRegistry.size());
+    m_textureRegistry.push_back(std::move(tex));   // move, not copy
+    m_textureToId[filePath] = newId;
+
+    // 4. Signal your pipeline to update the descriptor sets on the next frame
+    m_textureDirty = true;
+
+    std::cout << "[AssetManager] Loaded: " << filePath << " -> ID " << newId << "\n";
+
+    return newId;
+}
+void AssetManager::LoadTexture(const std::string& path) {
+    if (path.empty() || path == "default") return;
+    if (m_textureToId.find(path) != m_textureToId.end()) return;
+    // Load and add to registry automatically via LoadTextureFromFile
+    LoadTextureFromFile(path);
+}
+Texture* AssetManager::GetTexture(const std::string& path) {
+    if (path.empty() || path == "default")
+        return &m_defaultTexture;
+    auto it = m_textureToId.find(path);
+    if (it != m_textureToId.end())
+        return &m_textureRegistry[it->second];
+    // Load on demand
+    LoadTexture(path);
+    return &m_textureRegistry[m_textureToId[path]];
+}
+uint32_t AssetManager::GetTextureId(const std::string& path) {
+    // Return 0 for empty path or "default"
+    if (path.empty() || path == "default") return 0;
+    auto it = m_textureToId.find(path);
+    if (it != m_textureToId.end()) return it->second;
+    LoadTexture(path);
+    return m_textureToId[path];
+}
+
+uint32_t AssetManager::LoadNormalTextureFromFile(const std::string& filePath) {
+    auto it = m_normalTextureToId.find(filePath);
+    if (it != m_normalTextureToId.end()) {
+        return it->second;
+    }
+
+    Texture tex{};
+
+    CreateTextureImage(filePath, tex, VK_FORMAT_BC7_UNORM_BLOCK);
+
+    uint32_t newId = static_cast<uint32_t>(m_normalTextureRegistry.size());
+    m_normalTextureRegistry.push_back(std::move(tex));
+    m_normalTextureToId[filePath] = newId;
+
+    m_textureDirty = true; // Tell renderer to update descriptor pools
+    std::cout << "[AssetManager] Loaded normal: " << filePath << " -> ID " << newId << "\n";
+
+    return newId;
+}
 void AssetManager::LoadNormalTexture(const std::string& path) {
-    if (m_descriptorSet == VK_NULL_HANDLE) {
-        std::cerr << "[AssetManager] ERROR: m_descriptorSet is null in LoadNormalTexture!\n";
-        return;
-    }
     if (path.empty()) return;
-    if (m_normalTextures.find(path) != m_normalTextures.end()) return;
-
-    try {
-        Texture tex;
-        CreateTextureImage(path, tex, VK_FORMAT_R8G8B8A8_UNORM); // reuses existing loader; format concern noted below
-        m_normalTextures[path] = tex;
-        m_normalTextureRegistry.push_back(tex);
-        uint32_t id = static_cast<uint32_t>(m_normalTextureRegistry.size()); // +1 offset, since slot 0 is default
-        m_normalTextureToId[path] = id;
-
-        VkDescriptorImageInfo descriptorInfo{};
-        descriptorInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        descriptorInfo.imageView = tex.imageView;
-        descriptorInfo.sampler = tex.sampler;
-
-        VkWriteDescriptorSet descriptorWrite{};
-        descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        descriptorWrite.dstSet = m_descriptorSet;
-        descriptorWrite.dstBinding = 3;
-        descriptorWrite.dstArrayElement = id;
-        descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        descriptorWrite.descriptorCount = 1;
-        descriptorWrite.pImageInfo = &descriptorInfo;
-
-        vkUpdateDescriptorSets(GetDevice(), 1, &descriptorWrite, 0, nullptr);
-        std::cout << "[AssetManager] Loaded normal map: " << path << " (ID: " << id << ")\n";
-    }
-    catch (const std::exception& e) {
-        std::cerr << "[AssetManager] Exception loading normal map '" << path << "': " << e.what() << "\n";
-    }
+    if (m_normalTextureToId.find(path) != m_normalTextureToId.end()) return;
+    LoadNormalTextureFromFile(path);
 }
 Texture* AssetManager::GetNormalTexture(const std::string& path) {
-    if (path.empty()) return &m_defaultNormalTexture;
-    auto it = m_normalTextures.find(path);
-    if (it != m_normalTextures.end()) return &it->second;
+    if (path.empty())
+        return &m_defaultNormalTexture;
+    auto it = m_normalTextureToId.find(path);
+    if (it != m_normalTextureToId.end())
+        return &m_normalTextureRegistry[it->second];
     LoadNormalTexture(path);
-    return &m_normalTextures[path];
+    return &m_normalTextureRegistry[m_normalTextureToId[path]];
 }
 uint32_t AssetManager::GetNormalTextureId(const std::string& path) {
     if (path.empty()) return 0; // slot 0 reserved for default flat normal
@@ -540,6 +335,223 @@ uint32_t AssetManager::GetNormalTextureId(const std::string& path) {
     if (it != m_normalTextureToId.end()) return it->second;
     LoadNormalTexture(path);
     return m_normalTextureToId[path];
+}
+
+void AssetManager::CreateTextureImage(const std::string& path, Texture& texture, VkFormat format) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file.is_open()) {
+        throw std::runtime_error("failed to open compressed texture file: " + path);
+    }
+
+    uint32_t magic = 0;
+    file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+    if (magic != 0x20534444) { // "DDS " in ASCII
+        throw std::runtime_error("File is not a valid DDS file: " + path);
+    }
+
+    DDSHeader header;
+    file.read(reinterpret_cast<char*>(&header), sizeof(header));
+
+    uint32_t texWidth = header.dwWidth;
+    uint32_t texHeight = header.dwHeight;
+    uint32_t mipLevels = (header.dwMipMapCount == 0) ? 1 : header.dwMipMapCount;
+
+    // Handle DX10 header extension if present
+    if ((header.ddspf.dwFlags & 0x4) && (header.ddspf.dwFourCC == 0x30315844)) { 
+        // Skip DX10 extension header (20 bytes)
+        file.seekg(20, std::ios::cur);
+    }
+
+    // Read the remainder of the compressed pixel data blocks
+    std::vector<char> pixelData((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    VkDeviceSize imageSize = pixelData.size();
+
+    uint32_t safeMipLevels = 0;
+    VkDeviceSize accumulatedSize = 0;
+    uint32_t currentWidth = texWidth;
+    uint32_t currentHeight = texHeight;
+
+    for (uint32_t i = 0; i < mipLevels; i++) {
+        uint32_t blockWidth = (currentWidth + 3) / 4;
+        uint32_t blockHeight = (currentHeight + 3) / 4;
+        VkDeviceSize mipSize = blockWidth * blockHeight * 16; // 16 bytes per block for BC7
+
+        if (accumulatedSize + mipSize > imageSize) {
+            break; // Stop parsing if the file doesn't actually contain this mip level
+        }
+
+        accumulatedSize += mipSize;
+        safeMipLevels++;
+
+        if (currentWidth > 1) currentWidth /= 2;
+        if (currentHeight > 1) currentHeight /= 2;
+    }
+
+    if (safeMipLevels == 0) safeMipLevels = 1;
+    texture.mipLevels = safeMipLevels;
+
+    VkBuffer stagingBuffer;
+    VkDeviceMemory stagingBufferMemory;
+    CreateBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        stagingBuffer, stagingBufferMemory);
+
+    void* data;
+    vkMapMemory(GetDevice(), stagingBufferMemory, 0, imageSize, 0, &data);
+    memcpy(data, pixelData.data(), static_cast<size_t>(imageSize));
+    vkUnmapMemory(GetDevice(), stagingBufferMemory);
+
+    VkImageCreateInfo imageInfo{};
+    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.extent.width = texWidth;
+    imageInfo.extent.height = texHeight;
+    imageInfo.extent.depth = 1;
+    imageInfo.mipLevels = texture.mipLevels;
+    imageInfo.arrayLayers = 1;
+    imageInfo.format = format;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    if (vkCreateImage(GetDevice(), &imageInfo, nullptr, &texture.image) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create texture image.");
+
+    VkMemoryRequirements memRequirements;
+    vkGetImageMemoryRequirements(GetDevice(), texture.image, &memRequirements);
+    VkMemoryAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memRequirements.size;
+    allocInfo.memoryTypeIndex = FindMemoryType(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+    if (vkAllocateMemory(GetDevice(), &allocInfo, nullptr, &texture.imageMemory) != VK_SUCCESS)
+        throw std::runtime_error("Failed to allocate texture memory.");
+    vkBindImageMemory(GetDevice(), texture.image, texture.imageMemory, 0);
+
+    // Transition image layout to receive all mip levels
+    TransitionImageLayout(texture.image, format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, texture.mipLevels);
+
+    // Record copy regions for every precomputed mipmap inside the DDS file
+    VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
+    std::vector<VkBufferImageCopy> bufferCopyRegions;
+    VkDeviceSize bufferOffset = 0;
+
+    currentWidth = texWidth;
+    currentHeight = texHeight;
+
+    for (uint32_t i = 0; i < texture.mipLevels; i++) {
+        uint32_t blockWidth = (currentWidth + 3) / 4;
+        uint32_t blockHeight = (currentHeight + 3) / 4;
+        VkDeviceSize mipSize = blockWidth * blockHeight * 16;
+
+        VkBufferImageCopy region{};
+        region.bufferOffset = bufferOffset;
+        region.bufferRowLength = 0;
+        region.bufferImageHeight = 0;
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.mipLevel = i;
+        region.imageSubresource.baseArrayLayer = 0;
+        region.imageSubresource.layerCount = 1;
+        region.imageOffset = { 0, 0, 0 };
+        region.imageExtent = { currentWidth, currentHeight, 1 };
+
+        bufferCopyRegions.push_back(region);
+        bufferOffset += mipSize;
+
+        if (currentWidth > 1) currentWidth /= 2;
+        if (currentHeight > 1) currentHeight /= 2;
+    }
+
+    vkCmdCopyBufferToImage(
+        commandBuffer,
+        stagingBuffer,
+        texture.image,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        static_cast<uint32_t>(bufferCopyRegions.size()),
+        bufferCopyRegions.data()
+    );
+    EndSingleTimeCommands(commandBuffer);
+
+    // Transition image layout to shader-readable format
+    TransitionImageLayout(texture.image, format, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, texture.mipLevels);
+
+    vkDestroyBuffer(GetDevice(), stagingBuffer, nullptr);
+    vkFreeMemory(GetDevice(), stagingBufferMemory, nullptr);
+
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image = texture.image;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = format;
+    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewInfo.subresourceRange.baseMipLevel = 0;
+    viewInfo.subresourceRange.levelCount = texture.mipLevels;
+    viewInfo.subresourceRange.baseArrayLayer = 0;
+    viewInfo.subresourceRange.layerCount = 1;
+    if (vkCreateImageView(GetDevice(), &viewInfo, nullptr, &texture.imageView) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create texture image view.");
+
+    VkPhysicalDeviceProperties properties{};
+    vkGetPhysicalDeviceProperties(GetPhysicalDevice(), &properties);
+
+    VkSamplerCreateInfo samplerInfo{};
+    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    samplerInfo.magFilter = VK_FILTER_LINEAR;
+    samplerInfo.minFilter = VK_FILTER_LINEAR;
+    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.anisotropyEnable = VK_TRUE;
+    samplerInfo.maxAnisotropy = g_Settings.maxAnisotropy;
+    samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+    samplerInfo.unnormalizedCoordinates = VK_FALSE;
+    samplerInfo.compareEnable = VK_FALSE;
+    samplerInfo.compareOp = VK_COMPARE_OP_ALWAYS;
+    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    samplerInfo.minLod = 0.0f;
+    samplerInfo.maxLod = static_cast<float>(texture.mipLevels);
+    samplerInfo.mipLodBias = 0.0f;
+    if (vkCreateSampler(GetDevice(), &samplerInfo, nullptr, &texture.sampler) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create texture sampler.");
+}
+
+void AssetManager::TransitionImageLayout(VkImage image, VkFormat format, VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t mipLevels) {
+    VkCommandBuffer commandBuffer = BeginSingleTimeCommands();
+
+    VkImageMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.oldLayout = oldLayout;
+    barrier.newLayout = newLayout;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = image;
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.baseMipLevel = 0;
+    barrier.subresourceRange.levelCount = mipLevels;
+    barrier.subresourceRange.baseArrayLayer = 0;
+    barrier.subresourceRange.layerCount = 1;
+
+    VkPipelineStageFlags sourceStage, destinationStage;
+    if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+        barrier.srcAccessMask = 0;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    }
+    else if (oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        sourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        destinationStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    }
+    else {
+        throw std::invalid_argument("Unsupported layout transition!");
+    }
+
+    vkCmdPipelineBarrier(commandBuffer, sourceStage, destinationStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+    EndSingleTimeCommands(commandBuffer);
 }
 
 static void ComputeTangents(std::vector<ModelVertex>& verts, const std::vector<uint32_t>& idxs) {
@@ -695,6 +707,7 @@ void AssetManager::ParseObjFileByMaterial(const std::string& filepath,
     std::cout << "[Asset Manager] '" << filepath << "' split into " << materials.size()
         << " materials (+ possible untextured group)\n";
 }
+
 void AssetManager::LoadMesh(const std::string& path) {
     if (m_meshes.find(path) != m_meshes.end()) return;
 
@@ -894,50 +907,24 @@ VkCommandPool AssetManager::GetCommandPool() const { return m_renderer->GetComma
 VkQueue AssetManager::GetGraphicsQueue() const { return m_renderer->GetGraphicsQueue(); }
 
 void AssetManager::Cleanup(VkDevice device) {
+    std::cout << "[AssetManager] Cleaning up asset resources...\n";
+
+    m_defaultTexture.CleanUp(device);
+    m_defaultNormalTexture.CleanUp(device);
+
+    // 1. Destroy diffuse/albedo textures exactly once via the registry
     for (auto& tex : m_textureRegistry) {
-        if (tex.sampler)     vkDestroySampler(device, tex.sampler, nullptr);
-        if (tex.imageView)   vkDestroyImageView(device, tex.imageView, nullptr);
-        if (tex.image)       vkDestroyImage(device, tex.image, nullptr);
-        if (tex.imageMemory) vkFreeMemory(device, tex.imageMemory, nullptr);
+        tex.CleanUp(device);
     }
     m_textureRegistry.clear();
     m_textureToId.clear();
 
-    for (auto& pair : m_textures) {
-        Texture& tex = pair.second;
-        if (tex.sampler)     vkDestroySampler(device, tex.sampler, nullptr);
-        if (tex.imageView)   vkDestroyImageView(device, tex.imageView, nullptr);
-        if (tex.image)       vkDestroyImage(device, tex.image, nullptr);
-        if (tex.imageMemory) vkFreeMemory(device, tex.imageMemory, nullptr);
-        // Zero them to avoid double-destruction if the same texture appears again
-        tex.sampler = VK_NULL_HANDLE;
-        tex.imageView = VK_NULL_HANDLE;
-        tex.image = VK_NULL_HANDLE;
-        tex.imageMemory = VK_NULL_HANDLE;
-    }
-    m_textures.clear();
-
+    // 2. Destroy normal textures exactly once via the normal registry
     for (auto& tex : m_normalTextureRegistry) {
-        if (tex.sampler)     vkDestroySampler(device, tex.sampler, nullptr);
-        if (tex.imageView)   vkDestroyImageView(device, tex.imageView, nullptr);
-        if (tex.image)       vkDestroyImage(device, tex.image, nullptr);
-        if (tex.imageMemory) vkFreeMemory(device, tex.imageMemory, nullptr);
+        tex.CleanUp(device);
     }
     m_normalTextureRegistry.clear();
     m_normalTextureToId.clear();
-
-    for (auto& pair : m_normalTextures) {
-        Texture& tex = pair.second;
-        if (tex.sampler)     vkDestroySampler(device, tex.sampler, nullptr);
-        if (tex.imageView)   vkDestroyImageView(device, tex.imageView, nullptr);
-        if (tex.image)       vkDestroyImage(device, tex.image, nullptr);
-        if (tex.imageMemory) vkFreeMemory(device, tex.imageMemory, nullptr);
-        tex.sampler = VK_NULL_HANDLE;
-        tex.imageView = VK_NULL_HANDLE;
-        tex.image = VK_NULL_HANDLE;
-        tex.imageMemory = VK_NULL_HANDLE;
-    }
-    m_normalTextures.clear();
 
     m_meshes.clear();
 }
