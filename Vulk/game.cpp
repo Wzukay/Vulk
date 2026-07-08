@@ -192,7 +192,7 @@ void Game::ProcessNetworkPackets() {
         else if (isHost && packet.packetType == 3) {
             debugLog.AddLog("[Hot-Plug] Late arrival peer detected: " + epKey);
 
-            int currentSeed = chunk.seed;
+            int currentSeed = Chunk::s_globalSeed;
             if (currentSeed == 0) {
                 debugLog.AddLog("[DEBUG] Seed was 0 on host: " + epKey);
                 currentSeed = 123456;

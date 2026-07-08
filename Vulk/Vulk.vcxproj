@@ -178,7 +178,6 @@
     <ClCompile Include="networkManager.cpp" />
     <ClCompile Include="renderer.cpp" />
     <ClCompile Include="settings.cpp" />
-    <ClCompile Include="terrain.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="assetManager.h" />
@@ -194,7 +193,6 @@
     <ClInclude Include="scene_types.h" />
     <ClInclude Include="settings.h" />
     <ClInclude Include="stb_image.h" />
-    <ClInclude Include="terrain.h" />
     <ClInclude Include="texture.h" />
     <ClInclude Include="threadPool.h" />
     <ClInclude Include="tiny_obj_loader.h" />

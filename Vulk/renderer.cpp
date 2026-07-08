@@ -877,13 +877,16 @@ void VulkanRenderer::DrawTerrain(VkCommandBuffer commandBuffer)
 	vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
 	vkCmdBindIndexBuffer(commandBuffer, globalTerrainIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
-	static int frameCount = 0;
-
 	for (auto& [key, chunk] : terrainChunks) {
 		if (!chunk.ready) continue;
 
 		if (!IsSphereInFrustum(chunk.center, chunk.radius)) {
 			culledCount++;
+			continue;
+		}
+
+		if (IsChunkOccluded(chunk.center, chunk.radius)) {
+			culledCount++;   // counts as culled
 			continue;
 		}
 
@@ -2003,6 +2006,56 @@ void VulkanRenderer::RemoveTerrainChunk(int64_t key) {
 
 	// Remove from the map
 	terrainChunks.erase(it);
+}
+bool VulkanRenderer::IsChunkOccluded(const glm::vec3& chunkCenter, float chunkRadius) {
+	const glm::vec3& camPos = cameraPosition;
+
+	// If the camera is inside the chunk, don't occlude
+	float distToCenter = glm::length(chunkCenter - camPos);
+	if (distToCenter < chunkRadius) return false;
+
+	// Direction from camera to chunk center
+	glm::vec3 dir = glm::normalize(chunkCenter - camPos);
+
+	// Number of samples along the ray (more = more accurate, slower)
+	const int numSamples = 20;   // was 10
+	float step = distToCenter / (float)numSamples;
+
+	// Start slightly offset from the camera (avoid self‑occlusion)
+	float offset = 2.0f;
+	glm::vec3 samplePos = camPos + dir * offset;
+
+	// Height margin to avoid tiny bumps culling chunks (tune this)
+	const float heightMargin = 10.0f;
+
+	glm::vec3 up(0.0f, 1.0f, 0.0f);
+	glm::vec3 right = glm::normalize(glm::cross(dir, up));
+	glm::vec3 sampleOffsets[] = {
+		glm::vec3(0.0f, 0.0f, 0.0f),      // center
+		right * chunkRadius * 0.5f,        // right
+		-right * chunkRadius * 0.5f,       // left
+		up * chunkRadius * 0.5f,           // above
+		-up * chunkRadius * 0.5f           // below
+	};
+
+	for (int i = 0; i < numSamples; ++i) {
+		// Check the main ray
+		float terrainHeight = Chunk::GetHeight(samplePos.x, samplePos.z);
+		if (samplePos.y < terrainHeight + heightMargin) {
+			// Also check the offsets – if any offset point is above terrain, chunk is visible
+			for (const auto& offsetVec : sampleOffsets) {
+				glm::vec3 offsetPos = samplePos + offsetVec;
+				float offsetTerrain = Chunk::GetHeight(offsetPos.x, offsetPos.z);
+				if (offsetPos.y >= offsetTerrain + heightMargin) {
+					return false; // visible
+				}
+			}
+			return true; // all points are below terrain → occluded
+		}
+		samplePos += dir * step;
+	}
+
+	return false; // Not occluded
 }
 
 void VulkanRenderer::ApplySettings() {

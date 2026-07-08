@@ -9,13 +9,68 @@
 #include <future>
 #include <time.h>
 #include <mutex>
+#include <memory>
+#include <atomic>
+#include <algorithm>
 
-#include "terrain.h"
 #include "assetManager.h"
 #include "scene.h"
 #include "renderer.h"
 #include "threadPool.h"
+#include "renderMesh.h"
+#include "FastNoiseLite.h"
+#include "meshoptimizer.h"
 
+enum class BiomeType {
+    Desert,
+    Savanna,
+    Plains,
+    Forest,
+    Taiga,
+    Tundra
+};
+
+struct BiomeProperties {
+    float heightScale;
+    float exponent;
+    glm::vec3 textureWeights;
+};
+
+inline BiomeProperties GetBiomeProperties(BiomeType type) {
+    switch (type) {
+        // Desert is 100% sand texture
+    case BiomeType::Desert:  return { 30.0f,  1.2f, glm::vec3(1.0f, 0.0f, 0.0f) };
+                          // Savanna is mostly sand/dry dirt mixed with a little grass
+    case BiomeType::Savanna: return { 45.0f,  1.5f, glm::vec3(0.6f, 0.4f, 0.0f) };
+                           // Plains are 100% grass texture
+    case BiomeType::Plains:  return { 25.0f,  2.0f, glm::vec3(0.0f, 1.0f, 0.0f) };
+                          // Forest is 100% grass texture
+    case BiomeType::Forest:  return { 70.0f,  2.2f, glm::vec3(0.0f, 1.0f, 0.0f) };
+                          // Taiga hills start introducing rock/snow textures
+    case BiomeType::Taiga:   return { 110.0f, 2.5f, glm::vec3(0.0f, 0.5f, 0.5f) };
+                         // Tundra mountains are entirely rock/snow
+    case BiomeType::Tundra:  return { 160.0f, 3.0f, glm::vec3(0.0f, 0.0f, 1.0f) };
+    }
+    return { 50.0f, 2.0f, glm::vec3(0.0f, 1.0f, 0.0f) };
+}
+
+inline BiomeType DetermineBiome(float temperature, float moisture) {
+    // Cold zones (Temperature < 0.3)
+    if (temperature < 0.3f) {
+        if (moisture < 0.4f) return BiomeType::Tundra;
+        return BiomeType::Taiga;
+    }
+    // Temperate zones (0.3 <= Temperature < 0.7)
+    else if (temperature < 0.7f) {
+        if (moisture < 0.3f) return BiomeType::Plains;
+        return BiomeType::Forest;
+    }
+    // Hot zones (Temperature >= 0.7)
+    else {
+        if (moisture < 0.3f) return BiomeType::Desert;
+        return BiomeType::Savanna;
+    }
+}
 
 struct ChunkJobResult {
     int cx = 0, cz = 0;
@@ -75,13 +130,13 @@ public:
     int resolution = 50;
     int viewDistanceChunks = 50;
     int immediateViewChunks = 12;
-    int seed = 0;
+    static int s_globalSeed;
 
     std::unordered_map<int64_t, std::future<ChunkJobResult>> m_pendingTerrainGen;
 
     void Init(VulkanRenderer& renderer);
-    void SetSeed(int s) { seed = s; }
-    void SetRandomSeed() { seed = std::rand() % 1000000; }
+    void SetSeed(int s) { s_globalSeed = s; }
+    void SetRandomSeed() { s_globalSeed = std::rand() % 1000000; }
     bool Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& renderer);
     void PreGenerateChunks(const glm::vec3& camPos, Scene& scene, VulkanRenderer& renderer);
     void Shutdown();
@@ -121,4 +176,10 @@ private:
     glm::vec3 ChunkBoundsCenter(int cx, int cz) const;
     bool HasCameraShiftedNoticeably(const glm::vec3& camPos, const glm::vec3& camForward);
     float ChunkBoundsRadius() const;
+    void GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSize,
+        std::vector<ModelVertex>& outVertices, std::vector<uint32_t>& outIndices,
+        std::shared_ptr<std::atomic<bool>> cancelToken = nullptr);
+
+public:
+    static float GetHeight(float worldX, float worldZ);
 };

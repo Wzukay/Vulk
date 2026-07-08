@@ -16,6 +16,7 @@
 #include "scene_types.h"
 #include "settings.h"
 #include "assetManager.h"
+#include "chunk.h"
 
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
@@ -84,6 +85,9 @@ struct TerrainChunkGPU {
     uint32_t indexOffset = 0;
     uint32_t vertexCount = 0;
     uint32_t indexCount = 0;
+
+    float minHeight = 0.0f;
+    float maxHeight = 0.0f;
 };
 struct PendingUpload {
     VkFence fence = VK_NULL_HANDLE;
@@ -356,6 +360,7 @@ private:
         TerrainChunkGPU& chunk,
         const std::vector<ModelVertex>& verts,
         const std::vector<uint32_t>& indices);
+    bool IsChunkOccluded(const glm::vec3& chunkCenter, float chunkRadius);
 
 public:
     void UpdateUniformBuffer(const CameraData& cam);
