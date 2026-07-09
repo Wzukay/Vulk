@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <chrono>
 #include <unordered_set>
+#include <iostream>
 
 // --- Static seed for height queries ---
 int Chunk::s_globalSeed = 23645;
@@ -10,6 +11,7 @@ Chunk::Chunk() : threadPool(std::max(1u, std::thread::hardware_concurrency() - 1
 
 void Chunk::Init(VulkanRenderer& renderer) {
     UpdateFogParamsBasedOnData(renderer);
+    renderer.SetTerrainChunkSize(chunkSize);
 }
 
 static int64_t Key(int cx, int cz) {
@@ -53,7 +55,7 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
                 scene.RemoveChunk(result.key);
             }
 
-            renderer.AddTerrainChunk(result.key, result.cx, result.cz, result.vertices, result.indices);
+            renderer.AddTerrainChunk(result.key, result.cx, result.cz, result.lod, result.vertices, result.indices);
             loadedChunks[result.key] = result.lod;
             loadingChunks.erase(result.key);
             m_bufferPool.Release({ std::move(result.vertices), std::move(result.indices) });
@@ -117,9 +119,11 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
             float true3DDistance = std::sqrt(distSq);
 
             int desiredLod = 0;
-            if (true3DDistance <= (chunkSize * 1.5f))    desiredLod = 0;
-            else if (true3DDistance <= (chunkSize * 3.0f)) desiredLod = 1;
-            else                                          desiredLod = 2;
+            float morphStart = chunkSize * 1.8f;   // start fading at 80% of chunk size
+            float morphEnd = chunkSize * 2.0f;   // finish exactly when LOD1 starts
+            if (true3DDistance <= morphStart)           desiredLod = 0;
+            else if (true3DDistance <= morphEnd)        desiredLod = 0; // still LOD0, but morphing
+            else                                        desiredLod = 1; // LOD1 after morph end
 
             int targetResolution = resolution;
             if (desiredLod == 1)      targetResolution = ((resolution - 1) / 2) + 1;
@@ -347,14 +351,17 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
         noiseInitialized = true;
     }
 
-    baseNoise.SetSeed(s_globalSeed);
-    tempNoise.SetSeed(s_globalSeed + 101);
-    moistNoise.SetSeed(s_globalSeed + 202);
+    // Use the static seed (set by SetSeed or SetRandomSeed)
+    int seed = s_globalSeed;
+    baseNoise.SetSeed(seed);
+    tempNoise.SetSeed(seed + 101);
+    moistNoise.SetSeed(seed + 202);
 
     const float COLD_BOUND = 0.3f;
     const float BLEND_RANGE = 0.5f;
     const float terrainHeightScale = 120.0f;
 
+    // ─── 1. Generate height and color grid ────────────────────────────────
     for (int gz = 0; gz < gridSize; ++gz) {
         float worldZ = originZ + (gz - 1) * step;
         int rowOffset = gz * gridSize;
@@ -396,6 +403,7 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
         return colorGrid[(localZ + 1) * gridSize + (localX + 1)];
         };
 
+    // ─── 2. Vertex assembly (including coarse LOD data) ─────────────────
     for (int z = 0; z < resolution; z++) {
         if (cancelToken && cancelToken->load(std::memory_order_relaxed)) {
             outVertices.clear(); outIndices.clear(); return;
@@ -415,6 +423,7 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
             v.texCoord = glm::vec2(worldX * 0.02f, worldZ * 0.02f);
             v.color = GetCachedColor(x, z);
 
+            // Fine normal
             glm::vec3 tangentX(2.0f * step, hR - hL, 0.0f);
             glm::vec3 tangentZ(0.0f, hU - hD, 2.0f * step);
             v.normal = glm::normalize(glm::cross(tangentZ, tangentX));
@@ -423,10 +432,28 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
             t = glm::normalize(t - v.normal * glm::dot(v.normal, t));
             v.tangent = glm::vec4(t, 1.0f);
 
+            // ─── Coarse LOD data (half resolution) ──────────────────────
+            float coarseStep = step * 2.0f;
+            float coarseX = std::floor(worldX / coarseStep + 0.5f) * coarseStep;
+            float coarseZ = std::floor(worldZ / coarseStep + 0.5f) * coarseStep;
+            float hCoarse = Chunk::GetHeight(coarseX, coarseZ);
+
+            float hL_coarse = Chunk::GetHeight(coarseX - coarseStep, coarseZ);
+            float hR_coarse = Chunk::GetHeight(coarseX + coarseStep, coarseZ);
+            float hD_coarse = Chunk::GetHeight(coarseX, coarseZ - coarseStep);
+            float hU_coarse = Chunk::GetHeight(coarseX, coarseZ + coarseStep);
+            glm::vec3 coarseTangentX(2.0f * coarseStep, hR_coarse - hL_coarse, 0.0f);
+            glm::vec3 coarseTangentZ(0.0f, hU_coarse - hD_coarse, 2.0f * coarseStep);
+            glm::vec3 coarseNormal = glm::normalize(glm::cross(coarseTangentZ, coarseTangentX));
+
+            v.coarsePos = glm::vec3(coarseX, hCoarse, coarseZ);
+            v.coarseNormal = coarseNormal;
+
             outVertices.push_back(v);
         }
     }
 
+    // ─── 3. Indices ──────────────────────────────────────────────────────
     for (int z = 0; z < resolution - 1; z++) {
         for (int x = 0; x < resolution - 1; x++) {
             uint32_t i0 = z * resolution + x;
@@ -437,12 +464,23 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
         }
     }
 
+    // ─── 4. Skirts ────────────────────────────────────────────────────────
     const float skirtDepth = 20.0f;
     auto AddSkirtSegment = [&](uint32_t indexA, uint32_t indexB) {
         uint32_t skirtA = (uint32_t)outVertices.size();
-        ModelVertex vA = outVertices[indexA]; vA.pos.y -= skirtDepth; outVertices.push_back(vA);
+        ModelVertex vA = outVertices[indexA];
+        vA.pos.y -= skirtDepth;
+        vA.coarsePos = vA.pos;          // no morph for skirts
+        vA.coarseNormal = vA.normal;
+        outVertices.push_back(vA);
+
         uint32_t skirtB = (uint32_t)outVertices.size();
-        ModelVertex vB = outVertices[indexB]; vB.pos.y -= skirtDepth; outVertices.push_back(vB);
+        ModelVertex vB = outVertices[indexB];
+        vB.pos.y -= skirtDepth;
+        vB.coarsePos = vB.pos;
+        vB.coarseNormal = vB.normal;
+        outVertices.push_back(vB);
+
         outIndices.insert(outIndices.end(), { indexA, skirtA, indexB, indexB, skirtA, skirtB });
         };
 
@@ -455,6 +493,7 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
         outVertices.clear(); outIndices.clear(); return;
     }
 
+    // ─── 5. Meshoptimizer ────────────────────────────────────────────────
     meshopt_optimizeVertexCache(
         outIndices.data(),
         outIndices.data(),

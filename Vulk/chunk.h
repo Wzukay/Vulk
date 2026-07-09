@@ -128,8 +128,8 @@ public:
 
     float chunkSize = 512;
     int resolution = 50;
-    int viewDistanceChunks = 50;
-    int immediateViewChunks = 12;
+    int viewDistanceChunks = 12;
+    int immediateViewChunks = 3;
     static int s_globalSeed;
 
     std::unordered_map<int64_t, std::future<ChunkJobResult>> m_pendingTerrainGen;
@@ -149,7 +149,7 @@ private:
 
     size_t m_currentAmortizeIndex = 0;
     bool m_needsGridRebuild = false;
-    const size_t CHUNKS_PER_FRAME_BUDGET = 16;
+    const size_t CHUNKS_PER_FRAME_BUDGET = 32;
 
     RenderMesh mesh;
     ThreadPool threadPool;

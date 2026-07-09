@@ -9,6 +9,9 @@
 #define TINYOBJLOADER_IMPLEMENTATION
 #include "tiny_obj_loader.h"
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
 AssetManager g_AssetManager;
 
 void AssetManager::CreateDefaultTexture() {
@@ -337,6 +340,135 @@ uint32_t AssetManager::GetNormalTextureId(const std::string& path) {
     return m_normalTextureToId[path];
 }
 
+Texture AssetManager::LoadCubemapFromFaces(
+    const std::string& right,
+    const std::string& left,
+    const std::string& top,
+    const std::string& bottom,
+    const std::string& front,
+    const std::string& back) {
+
+    std::vector<std::string> paths = { right, left, top, bottom, front, back };
+    std::vector<unsigned char*> faceData(6);
+    int width, height, channels;
+    for (int i = 0; i < 6; ++i) {
+        faceData[i] = stbi_load(paths[i].c_str(), &width, &height, &channels, 4);
+        if (!faceData[i]) {
+            throw std::runtime_error("Failed to load face: " + paths[i]);
+        }
+    }
+
+    VkDeviceSize faceSize = width * height * 4;
+    VkDeviceSize totalSize = faceSize * 6;
+
+    // Create staging buffer
+    VkBuffer stagingBuffer;
+    VkDeviceMemory stagingMemory;
+    CreateBuffer(totalSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        stagingBuffer, stagingMemory);
+
+    void* mapped;
+    vkMapMemory(GetDevice(), stagingMemory, 0, totalSize, 0, &mapped);
+    for (int i = 0; i < 6; ++i) {
+        memcpy(static_cast<char*>(mapped) + i * faceSize, faceData[i], faceSize);
+        stbi_image_free(faceData[i]);
+    }
+    vkUnmapMemory(GetDevice(), stagingMemory);
+
+    // Create cubemap image
+    VkImageCreateInfo imageInfo{};
+    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.extent = { (uint32_t)width, (uint32_t)height, 1 };
+    imageInfo.mipLevels = 1;
+    imageInfo.arrayLayers = 6;
+    imageInfo.format = VK_FORMAT_R8G8B8A8_SRGB;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    imageInfo.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+
+    Texture tex{};
+    if (vkCreateImage(GetDevice(), &imageInfo, nullptr, &tex.image) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create cubemap image");
+
+    VkMemoryRequirements memReq;
+    vkGetImageMemoryRequirements(GetDevice(), tex.image, &memReq);
+    VkMemoryAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memReq.size;
+    allocInfo.memoryTypeIndex = FindMemoryType(memReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (vkAllocateMemory(GetDevice(), &allocInfo, nullptr, &tex.imageMemory) != VK_SUCCESS)
+        throw std::runtime_error("Failed to allocate cubemap memory");
+    vkBindImageMemory(GetDevice(), tex.image, tex.imageMemory, 0);
+
+    TransitionImageLayout(tex.image, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1);
+
+    VkCommandBuffer cmd = BeginSingleTimeCommands();
+    for (int face = 0; face < 6; ++face) {
+        VkBufferImageCopy region{};
+        region.bufferOffset = face * faceSize;
+        region.bufferRowLength = 0;
+        region.bufferImageHeight = 0;
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.mipLevel = 0;
+        region.imageSubresource.baseArrayLayer = face;
+        region.imageSubresource.layerCount = 1;
+        region.imageOffset = { 0, 0, 0 };
+        region.imageExtent = { (uint32_t)width, (uint32_t)height, 1 };
+        vkCmdCopyBufferToImage(cmd, stagingBuffer, tex.image,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    }
+    EndSingleTimeCommands(cmd);
+
+    TransitionImageLayout(tex.image, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 1);
+
+    vkDestroyBuffer(GetDevice(), stagingBuffer, nullptr);
+    vkFreeMemory(GetDevice(), stagingMemory, nullptr);
+
+    // Create image view
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image = tex.image;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_CUBE;
+    viewInfo.format = VK_FORMAT_R8G8B8A8_SRGB;
+    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewInfo.subresourceRange.baseMipLevel = 0;
+    viewInfo.subresourceRange.levelCount = 1;
+    viewInfo.subresourceRange.baseArrayLayer = 0;
+    viewInfo.subresourceRange.layerCount = 6;
+    if (vkCreateImageView(GetDevice(), &viewInfo, nullptr, &tex.imageView) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create cubemap view");
+
+    // Create sampler
+    VkPhysicalDeviceProperties props{};
+    vkGetPhysicalDeviceProperties(GetPhysicalDevice(), &props);
+    VkSamplerCreateInfo samplerInfo{};
+    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    samplerInfo.magFilter = VK_FILTER_LINEAR;
+    samplerInfo.minFilter = VK_FILTER_LINEAR;
+    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerInfo.anisotropyEnable = VK_FALSE;
+    samplerInfo.maxAnisotropy = 1.0f;
+    samplerInfo.compareEnable = VK_FALSE;
+    samplerInfo.minLod = 0.0f;
+    samplerInfo.maxLod = 0.0f;
+    samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+    if (vkCreateSampler(GetDevice(), &samplerInfo, nullptr, &tex.sampler) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create sampler");
+
+    tex.mipLevels = 1;
+    return tex;
+}
+
 void AssetManager::CreateTextureImage(const std::string& path, Texture& texture, VkFormat format) {
     std::ifstream file(path, std::ios::binary);
     if (!file.is_open()) {
@@ -531,7 +663,7 @@ void AssetManager::TransitionImageLayout(VkImage image, VkFormat format, VkImage
     barrier.subresourceRange.baseMipLevel = 0;
     barrier.subresourceRange.levelCount = mipLevels;
     barrier.subresourceRange.baseArrayLayer = 0;
-    barrier.subresourceRange.layerCount = 1;
+    barrier.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
 
     VkPipelineStageFlags sourceStage, destinationStage;
     if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {

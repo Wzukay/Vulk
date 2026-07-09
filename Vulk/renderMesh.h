@@ -15,6 +15,8 @@ struct ModelVertex {
     glm::vec2 texCoord;
     glm::vec4 tangent;
     glm::vec3 color;
+    glm::vec3 coarsePos;   
+    glm::vec3 coarseNormal;  
 
     bool operator==(const ModelVertex& other) const {
         return pos == other.pos && normal == other.normal &&
@@ -30,8 +32,8 @@ struct ModelVertex {
         return bindingDescription;
     }
 
-    static std::array<VkVertexInputAttributeDescription, 5> getAttributeDescriptions() {
-        std::array<VkVertexInputAttributeDescription, 5> attributeDescriptions{};
+    static std::array<VkVertexInputAttributeDescription, 7> getAttributeDescriptions() {
+        std::array<VkVertexInputAttributeDescription, 7> attributeDescriptions{};
 
         attributeDescriptions[0].binding = 0;
         attributeDescriptions[0].location = 0;
@@ -57,6 +59,16 @@ struct ModelVertex {
         attributeDescriptions[4].location = 4; // Matches layout(location = 4) in your GLSL Vertex Shader
         attributeDescriptions[4].format = VK_FORMAT_R32G32B32_SFLOAT; // RGB is 3 floats
         attributeDescriptions[4].offset = offsetof(ModelVertex, color);
+
+        attributeDescriptions[5].binding = 0;
+        attributeDescriptions[5].location = 5;
+        attributeDescriptions[5].format = VK_FORMAT_R32G32B32_SFLOAT;
+        attributeDescriptions[5].offset = offsetof(ModelVertex, coarsePos);
+
+        attributeDescriptions[6].binding = 0;
+        attributeDescriptions[6].location = 6;
+        attributeDescriptions[6].format = VK_FORMAT_R32G32B32_SFLOAT;
+        attributeDescriptions[6].offset = offsetof(ModelVertex, coarseNormal);
 
         return attributeDescriptions;
     }

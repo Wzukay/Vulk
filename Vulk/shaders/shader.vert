@@ -14,6 +14,7 @@ layout(push_constant) uniform Constants {
     uint textureId;
     uint normalTextureId;
     uint objectId;
+    float lodBlend; 
 } push;
 
 layout(location = 0) in vec3 inPosition;
@@ -21,6 +22,8 @@ layout(location = 1) in vec3 inNormal;
 layout(location = 2) in vec2 inTexCoord;
 layout(location = 3) in vec4 inTangent;
 layout(location = 4) in vec3 inColor;
+layout(location = 5) in vec3 inCoarsePos;
+layout(location = 6) in vec3 inCoarseNormal; 
 
 layout(location = 0) out vec3 fragNormal;
 layout(location = 1) out vec2 fragTexCoord;
@@ -32,6 +35,9 @@ layout(location = 6) flat out uint fragNormalTextureId;
 layout(location = 7) out vec3 fragColor;
 
 void main() {
+    vec3 finalPos = mix(inPosition, inCoarsePos, push.lodBlend);
+    vec3 finalNormal = mix(inNormal, inCoarseNormal, push.lodBlend);
+
     vec4 worldPos = push.modelMatrix * vec4(inPosition, 1.0);
     gl_Position = ubo.proj * ubo.view * worldPos;
 

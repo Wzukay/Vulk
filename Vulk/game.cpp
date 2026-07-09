@@ -149,6 +149,7 @@ void Game::ProcessNetworkPackets() {
 
             chunk.SetRandomSeed();
             chunk.Update(cam.pos, scene, renderer);
+            renderer.UpdateScene(scene);
             isReadyToDraw = true;
         }
     }
@@ -181,6 +182,7 @@ void Game::ProcessNetworkPackets() {
 
                 chunk.SetSeed(seed);
                 chunk.Update(cam.pos, scene, renderer);
+                renderer.UpdateScene(scene);
                 isReadyToDraw = true;
 
                 std::cout << "[Network Test] SUCCESS! World buffers built for client.\n";

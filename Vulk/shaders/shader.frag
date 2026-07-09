@@ -117,7 +117,7 @@ void main() {
     float dist = length(ubo.cameraPos - fragWorldPos);
     float fogFactor = clamp((dist - ubo.fogStart) / (ubo.fogEnd - ubo.fogStart), 0.0, 1.0);
     if (dist > ubo.fogEnd) fogFactor = 1.0;
-    vec3 fogColor = vec3(0.1, 0.15, 0.25);
+    vec3 fogColor = vec3(0.6, 0.7, 0.8);
     vec3 finalColor = mix(result, fogColor, fogFactor);
     outColor = vec4(finalColor, 1.0);
 }

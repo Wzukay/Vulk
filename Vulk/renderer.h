@@ -41,14 +41,18 @@ struct SwapChainSupportDetails {
 };
 
 struct UniformBufferObject {
-    alignas(16) glm::mat4 view;
-    alignas(16) glm::mat4 proj;
-    alignas(16) glm::vec3 cameraPos;
+    glm::mat4 view;
+    glm::mat4 proj;
+    glm::vec3 cameraPos;
     float ambient;
     float specularPower;
     uint32_t lightCount;
     float fogStart;
     float fogEnd;
+    glm::vec2 screenSize; float _pad1[2];
+    glm::mat4 inverseViewProj;
+    glm::mat4 inverseProj;
+    glm::mat4 inverseView;
 };
 
 struct PushConstants {
@@ -56,6 +60,7 @@ struct PushConstants {
     uint32_t textureId;         // 4 bytes
     uint32_t normalTextureId;   // 4 bytes
     uint32_t objectId;          // 4 bytes
+    float lodBlend;
 };
 
 struct ChunkSlot {
@@ -73,6 +78,7 @@ struct DrawEntry {
     glm::vec3 worldCenter;
     float worldRadius;
     int64_t chunkKey = -1;
+    float cachedMaxScale = 1.0f;
 };
 struct TerrainChunkGPU {
     int64_t key = 0;
@@ -88,6 +94,8 @@ struct TerrainChunkGPU {
 
     float minHeight = 0.0f;
     float maxHeight = 0.0f;
+
+    bool cachedOccluded = false;
 };
 struct PendingUpload {
     VkFence fence = VK_NULL_HANDLE;
@@ -259,6 +267,12 @@ private:
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     VkPipeline graphicsPipeline = VK_NULL_HANDLE;
 
+    VkPipeline skyboxPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout skyboxPipelineLayout = VK_NULL_HANDLE;
+    VkShaderModule skyboxVertModule = VK_NULL_HANDLE;
+    VkShaderModule skyboxFragModule = VK_NULL_HANDLE;
+
+    Texture m_skyboxTexture;
 
     VkBuffer globalVertexBuffer = VK_NULL_HANDLE;
     VkDeviceMemory globalVertexBufferMemory = VK_NULL_HANDLE;
@@ -288,6 +302,8 @@ private:
 
     std::unordered_map<int64_t, TerrainChunkGPU> terrainChunks;
     std::vector<ChunkSlot> chunkSlots;
+
+    float m_terrainChunkSize = 512.0f; // Is set in chunk::Init
 
     VkBuffer m_globalStagingBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_globalStagingMemory = VK_NULL_HANDLE;
@@ -329,6 +345,9 @@ private:
     std::vector<DrawEntry> staticDrawList;
     std::vector<DrawEntry> visibleStaticDrawList;
 
+    std::vector<std::string> m_lastInstanceMeshNames;
+    std::vector<std::vector<uint32_t>> m_objectDrawEntryIndices;
+
     std::unordered_set<VkBuffer> m_allocatedTerrainBuffers;
     std::unordered_set<VkDeviceMemory> m_allocatedTerrainMemory;
 
@@ -340,6 +359,11 @@ private:
     VkCommandPool uploadCommandPool;
 
     void CreateGraphicsPipeline(VkPolygonMode polygonMode);
+
+    void CreateSkyboxPipeline();
+    void DrawSkybox(VkCommandBuffer commandBuffer);
+    void CreateSkyboxTexture();
+
 	uint32_t FindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);
     void CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory);
 
@@ -348,6 +372,7 @@ private:
     void CreateDescriptorSet();
 
     void UpdateTextureDescriptors(const Scene& scene);
+    void UpdateSkyboxDescriptor();
 
     void CreateGlobalBuffers();
     void CreateUniformBuffer();
@@ -372,10 +397,13 @@ public:
         int64_t key,
         int cx,
         int cz,
+        int lod,
         const std::vector<ModelVertex>& vertices,
         const std::vector<uint32_t>& indices);
     void RemoveTerrainChunk(
         int64_t key);
+
+    void SetTerrainChunkSize(float size) { m_terrainChunkSize = size; }
 
 private:
     bool showSettingsPanel = false;
@@ -398,11 +426,13 @@ public:
     bool IsWorldSphereInFrustum(const glm::vec3& center, float radius) const { // NEW
         return IsSphereInFrustum(center, radius);
     }
-    
 
 private: 
     float m_fogStart = 1600.0f;
     float m_fogEnd = 1700.0f;
+
+    glm::vec3 m_lastOcclusionCameraPos = glm::vec3(0.0f);
+    bool m_firstOcclusionUpdate = true;
 public:
     void SetFogParams(float start, float end);
 
