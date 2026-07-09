@@ -8,6 +8,8 @@
 #include <glm/glm.hpp>
 #include <glm/gtx/hash.hpp>
 #include <functional>
+#include <algorithm>
+#include <limits>
 
 struct ModelVertex {
     glm::vec3 pos;
@@ -15,8 +17,8 @@ struct ModelVertex {
     glm::vec2 texCoord;
     glm::vec4 tangent;
     glm::vec3 color;
-    glm::vec3 coarsePos;   
-    glm::vec3 coarseNormal;  
+    glm::vec3 coarsePos;
+    glm::vec3 coarseNormal;
 
     bool operator==(const ModelVertex& other) const {
         return pos == other.pos && normal == other.normal &&
@@ -83,26 +85,7 @@ struct RenderMesh {
     VkDeviceMemory indexBufferMemory = VK_NULL_HANDLE;
     uint32_t indexCount = 0;
 
-    void CleanUp(VkDevice device) {
-        if (indexBuffer != VK_NULL_HANDLE) {
-            vkDestroyBuffer(device, indexBuffer, nullptr);
-            indexBuffer = VK_NULL_HANDLE;
-        }
-        if (indexBufferMemory != VK_NULL_HANDLE) {
-            vkFreeMemory(device, indexBufferMemory, nullptr);
-            indexBufferMemory = VK_NULL_HANDLE;
-        }
-        if (vertexBuffer != VK_NULL_HANDLE) {
-            vkDestroyBuffer(device, vertexBuffer, nullptr);
-            vertexBuffer = VK_NULL_HANDLE;
-        }
-        if (vertexBufferMemory != VK_NULL_HANDLE) {
-            vkFreeMemory(device, vertexBufferMemory, nullptr);
-            vertexBufferMemory = VK_NULL_HANDLE;
-        }
-        indexCount = 0;
-        vertexCount = 0;
-    }
+    void CleanUp(VkDevice device);
 };
 
 namespace std {
@@ -118,3 +101,26 @@ namespace std {
         }
     };
 }
+
+// ---------------
+
+struct WaterVertex {
+    glm::vec3 pos;
+    glm::vec2 uv;
+};
+
+struct WaterMesh {
+    std::vector<WaterVertex> vertices;
+    std::vector<uint32_t> indices;
+    float waterHeight = 0.0f;
+};
+
+class WaterMeshGen {
+public:
+    static WaterMesh GenerateLake(const std::vector<glm::vec2>& footprintXZ, float waterHeight, float gridSpacing);
+    static WaterMesh GenerateRiver(const std::vector<glm::vec3>& centerline, float width, int segmentsPerPoint = 1);
+
+private:
+    static bool PointInPolygon(const glm::vec2& p, const std::vector<glm::vec2>& poly);
+};
+

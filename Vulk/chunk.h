@@ -12,12 +12,13 @@
 #include <memory>
 #include <atomic>
 #include <algorithm>
+#include <queue>
 
 #include "assetManager.h"
 #include "scene.h"
 #include "renderer.h"
 #include "threadPool.h"
-#include "renderMesh.h"
+#include "mesh.h"
 #include "FastNoiseLite.h"
 #include "meshoptimizer.h"
 
@@ -72,12 +73,29 @@ inline BiomeType DetermineBiome(float temperature, float moisture) {
     }
 }
 
+struct TerrainSample
+{
+    float height;
+    glm::vec3 biomeWeights;
+};
+
+struct RiverSegment {
+    std::vector<glm::vec3> path;   // centerline points
+    float width;
+};
+
 struct ChunkJobResult {
     int cx = 0, cz = 0;
     int64_t key = 0;
     std::vector<ModelVertex> vertices;
     std::vector<uint32_t> indices;
     int lod;
+
+    bool hasWater = false;
+    WaterMesh waterMesh;
+
+    bool hasRiver = false;
+    std::vector<RiverSegment> rivers;
 };
 
 struct ActiveJob {
@@ -177,8 +195,10 @@ private:
     bool HasCameraShiftedNoticeably(const glm::vec3& camPos, const glm::vec3& camForward);
     float ChunkBoundsRadius() const;
     void GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSize,
-        std::vector<ModelVertex>& outVertices, std::vector<uint32_t>& outIndices,
+        ChunkJobResult& outResult,
         std::shared_ptr<std::atomic<bool>> cancelToken = nullptr);
+    static std::vector<glm::vec2> ConvexHull(std::vector<glm::vec2> points);
+    //static TerrainSample SampleTerrain(float worldX, float worldZ);
 
 public:
     static float GetHeight(float worldX, float worldZ);

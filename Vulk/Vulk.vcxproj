@@ -175,6 +175,7 @@
     <ClCompile Include="input.cpp" />
     <ClCompile Include="logger.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="mesh.cpp" />
     <ClCompile Include="networkManager.cpp" />
     <ClCompile Include="renderer.cpp" />
     <ClCompile Include="settings.cpp" />
@@ -186,7 +187,7 @@
     <ClInclude Include="game.h" />
     <ClInclude Include="input.h" />
     <ClInclude Include="logger.h" />
-    <ClInclude Include="renderMesh.h" />
+    <ClInclude Include="mesh.h" />
     <ClInclude Include="networkManager.h" />
     <ClInclude Include="renderer.h" />
     <ClInclude Include="scene.h" />
@@ -202,6 +203,8 @@
     <None Include="shaders\shader.vert" />
     <None Include="shaders\skybox.frag" />
     <None Include="shaders\skybox.vert" />
+    <None Include="shaders\water.frag" />
+    <None Include="shaders\water.vert" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

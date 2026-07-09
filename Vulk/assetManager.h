@@ -8,7 +8,7 @@
 
 #include "scene_types.h"
 #include "texture.h"
-#include "renderMesh.h"
+#include "mesh.h"
 #include "settings.h"
 
 class VulkanRenderer;

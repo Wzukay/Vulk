@@ -314,6 +314,8 @@ void VulkanRenderer::InitVulkan() {
 	UpdateSkyboxDescriptor();
 	CreateSkyboxPipeline();
 
+	CreateWaterPipeline();
+
 	currentSettings = g_Settings;
 }
 
@@ -837,6 +839,8 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 			DrawStaticMeshes(commandBuffer);
 
 			DrawTerrain(commandBuffer);
+
+			DrawWater(commandBuffer);
 		}
 		else {
 			if (globalVertexBuffer == VK_NULL_HANDLE) {
@@ -1534,6 +1538,142 @@ void VulkanRenderer::CreateSkyboxPipeline() {
 
 	if (vkCreateGraphicsPipelines(logicalDevice, pipelineCache, 1, &pipelineInfo, nullptr, &skyboxPipeline) != VK_SUCCESS) {
 		throw std::runtime_error("Failed to create skybox pipeline");
+	}
+}
+void VulkanRenderer::CreateWaterPipeline() {
+	auto vertCode = ReadFile("shaders/water_vert.spv");
+	auto fragCode = ReadFile("shaders/water_frag.spv");
+	waterVertModule = CreateShaderModule(vertCode);
+	waterFragModule = CreateShaderModule(fragCode);
+
+	VkPipelineShaderStageCreateInfo vertStage = {};
+	vertStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	vertStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+	vertStage.module = waterVertModule;
+	vertStage.pName = "main";
+
+	VkPipelineShaderStageCreateInfo fragStage = {};
+	fragStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	fragStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+	fragStage.module = waterFragModule;
+	fragStage.pName = "main";
+
+	VkPipelineShaderStageCreateInfo stages[] = { vertStage, fragStage };
+
+	// Vertex input: WaterVertex { vec3 pos; vec2 uv; }
+	VkVertexInputBindingDescription binding{};
+	binding.binding = 0;
+	binding.stride = sizeof(WaterVertex);
+	binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+	std::array<VkVertexInputAttributeDescription, 2> attributes{};
+	attributes[0].location = 0;
+	attributes[0].binding = 0;
+	attributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+	attributes[0].offset = offsetof(WaterVertex, pos);
+
+	attributes[1].location = 1;
+	attributes[1].binding = 0;
+	attributes[1].format = VK_FORMAT_R32G32_SFLOAT;
+	attributes[1].offset = offsetof(WaterVertex, uv);
+
+	VkPipelineVertexInputStateCreateInfo vertexInput = {};
+	vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+	vertexInput.vertexBindingDescriptionCount = 1;
+	vertexInput.pVertexBindingDescriptions = &binding;
+	vertexInput.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributes.size());
+	vertexInput.pVertexAttributeDescriptions = attributes.data();
+
+	VkPipelineInputAssemblyStateCreateInfo inputAssembly = {};
+	inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+	inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+	inputAssembly.primitiveRestartEnable = VK_FALSE;
+
+	VkPipelineViewportStateCreateInfo viewportState = {};
+	viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+	viewportState.viewportCount = 1;
+	viewportState.scissorCount = 1;
+
+	// No culling: water can be seen from below (underwater) as well as above.
+	VkPipelineRasterizationStateCreateInfo rasterizer = {};
+	rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+	rasterizer.depthClampEnable = VK_FALSE;
+	rasterizer.rasterizerDiscardEnable = VK_FALSE;
+	rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+	rasterizer.lineWidth = 1.0f;
+	rasterizer.cullMode = VK_CULL_MODE_NONE;
+	rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
+	rasterizer.depthBiasEnable = VK_FALSE;
+
+	VkPipelineMultisampleStateCreateInfo multisample = {};
+	multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+	multisample.sampleShadingEnable = VK_FALSE;
+	multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+	// Depth test on (so terrain/objects occlude water), depth write OFF (translucent, like skybox).
+	VkPipelineDepthStencilStateCreateInfo depthStencil = {};
+	depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+	depthStencil.depthTestEnable = VK_TRUE;
+	depthStencil.depthWriteEnable = VK_FALSE;
+	depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+	depthStencil.stencilTestEnable = VK_FALSE;
+
+	// Alpha blending on, same factors as your other translucent pass.
+	VkPipelineColorBlendAttachmentState colorBlendAttachment = {};
+	colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+	colorBlendAttachment.blendEnable = VK_TRUE;
+	colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+	colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+	colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+	colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+	colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+	colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+
+	VkPipelineColorBlendStateCreateInfo colorBlending = {};
+	colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+	colorBlending.attachmentCount = 1;
+	colorBlending.pAttachments = &colorBlendAttachment;
+
+	VkDynamicState dynamicStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+	VkPipelineDynamicStateCreateInfo dynamicState = {};
+	dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+	dynamicState.dynamicStateCount = 2;
+	dynamicState.pDynamicStates = dynamicStates;
+
+	VkPushConstantRange pushConstantRange{};
+	pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+	pushConstantRange.offset = 0;
+	pushConstantRange.size = sizeof(WaterPushConstants);
+
+	VkPipelineLayoutCreateInfo layoutInfo = {};
+	layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+	layoutInfo.setLayoutCount = 1;
+	layoutInfo.pSetLayouts = &descriptorSetLayout; // reuse the same bindless layout as everything else
+	layoutInfo.pushConstantRangeCount = 1;
+	layoutInfo.pPushConstantRanges = &pushConstantRange;
+
+	if (vkCreatePipelineLayout(logicalDevice, &layoutInfo, nullptr, &waterPipelineLayout) != VK_SUCCESS) {
+		throw std::runtime_error("Failed to create water pipeline layout");
+	}
+
+	VkGraphicsPipelineCreateInfo pipelineInfo = {};
+	pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+	pipelineInfo.stageCount = 2;
+	pipelineInfo.pStages = stages;
+	pipelineInfo.pVertexInputState = &vertexInput;
+	pipelineInfo.pInputAssemblyState = &inputAssembly;
+	pipelineInfo.pViewportState = &viewportState;
+	pipelineInfo.pRasterizationState = &rasterizer;
+	pipelineInfo.pMultisampleState = &multisample;
+	pipelineInfo.pDepthStencilState = &depthStencil;
+	pipelineInfo.pColorBlendState = &colorBlending;
+	pipelineInfo.pDynamicState = &dynamicState;
+	pipelineInfo.layout = waterPipelineLayout;
+	pipelineInfo.renderPass = renderPass;
+	pipelineInfo.subpass = 0;
+
+	if (vkCreateGraphicsPipelines(logicalDevice, pipelineCache, 1, &pipelineInfo, nullptr, &waterPipeline) != VK_SUCCESS) {
+		throw std::runtime_error("Failed to create water pipeline");
 	}
 }
 void VulkanRenderer::RecreateGraphicsPipeline() {
@@ -2293,6 +2433,98 @@ bool VulkanRenderer::IsChunkOccluded(const glm::vec3& chunkCenter, float chunkRa
 	return false; // Not occluded
 }
 
+size_t VulkanRenderer::CreateWaterBodyGPU(const WaterMesh& mesh,
+	const std::string& normalMapPath,
+	float tiling, float waveStrength) {
+	WaterBodyGPU body{};
+	body.indexCount = static_cast<uint32_t>(mesh.indices.size());
+	body.normalTextureId = g_AssetManager.GetNormalTextureId(normalMapPath);
+	body.tiling = tiling;
+	body.waveStrength = waveStrength;
+
+	VkDeviceSize vertexSize = sizeof(WaterVertex) * mesh.vertices.size();
+	VkDeviceSize indexSize = sizeof(uint32_t) * mesh.indices.size();
+
+	CreateBuffer(vertexSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+		body.vertexBuffer, body.vertexMemory);
+
+	void* data;
+	vkMapMemory(logicalDevice, body.vertexMemory, 0, vertexSize, 0, &data);
+	memcpy(data, mesh.vertices.data(), vertexSize);
+	vkUnmapMemory(logicalDevice, body.vertexMemory);
+
+	CreateBuffer(indexSize, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+		body.indexBuffer, body.indexMemory);
+
+	vkMapMemory(logicalDevice, body.indexMemory, 0, indexSize, 0, &data);
+	memcpy(data, mesh.indices.data(), indexSize);
+	vkUnmapMemory(logicalDevice, body.indexMemory);
+
+	m_waterBodies.push_back(body);
+	return m_waterBodies.size() - 1;
+}
+void VulkanRenderer::AddWaterBody(const WaterMesh& mesh,
+	const std::string& normalMapPath,
+	float tiling, float waveStrength) {
+	if (mesh.vertices.empty() || mesh.indices.empty()) return;
+	CreateWaterBodyGPU(mesh, normalMapPath, tiling, waveStrength);
+}
+void VulkanRenderer::AddWaterBodyForChunk(int64_t chunkKey,
+	const WaterMesh& mesh,
+	const std::string& normalMapPath,
+	float tiling, float waveStrength) {
+	if (mesh.vertices.empty() || mesh.indices.empty()) return;
+
+	// Remove any existing water for this chunk first
+	auto it = m_waterBodyLookup.find(chunkKey);
+	if (it != m_waterBodyLookup.end()) {
+		RemoveWaterBody(chunkKey);
+	}
+
+	size_t idx = CreateWaterBodyGPU(mesh, normalMapPath, tiling, waveStrength);
+	m_waterBodyLookup[chunkKey] = idx;
+}
+void VulkanRenderer::RemoveWaterBody(int64_t chunkKey) {
+	auto it = m_waterBodyLookup.find(chunkKey);
+	if (it == m_waterBodyLookup.end()) {
+		return;
+	}
+
+	size_t targetIndex = it->second;
+	if (targetIndex >= m_waterBodies.size()) {
+		m_waterBodyLookup.erase(it);
+		return;
+	}
+
+	WaterBodyGPU& body = m_waterBodies[targetIndex];
+
+	PendingDeletion del;
+	del.buffers.push_back(body.vertexBuffer);
+	del.memories.push_back(body.vertexMemory);
+	del.buffers.push_back(body.indexBuffer);
+	del.memories.push_back(body.indexMemory);
+	// Ensure the buffers survive at least MAX_FRAMES_IN_FLIGHT frames
+	del.safeFrame = m_globalFrameCounter + MAX_FRAMES_IN_FLIGHT + 1;
+	m_pendingDeletionsGlobal.push_back(std::move(del));
+
+	// ---- Swap-and-pop pattern to remove from vector ----
+	if (targetIndex != m_waterBodies.size() - 1) {
+		m_waterBodies[targetIndex] = m_waterBodies.back();
+		// Update lookup for the moved entry
+		for (auto& pair : m_waterBodyLookup) {
+			if (pair.second == m_waterBodies.size() - 1) {
+				pair.second = targetIndex;
+				break;
+			}
+		}
+	}
+
+	m_waterBodies.pop_back();
+	m_waterBodyLookup.erase(it);
+}
+
 void VulkanRenderer::ApplySettings() {
 	bool needSwapchainRecreate = false;
 
@@ -2361,24 +2593,40 @@ void VulkanRenderer::DrawFrame() {
 
 	ApplySettings();
 
+	m_globalFrameCounter++;
+
+	for (auto it = m_pendingDeletionsGlobal.begin(); it != m_pendingDeletionsGlobal.end(); ) {
+		if (m_globalFrameCounter >= it->safeFrame) {
+			for (auto buf : it->buffers) {
+				if (buf != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, buf, nullptr);
+			}
+			for (auto mem : it->memories) {
+				if (mem != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, mem, nullptr);
+			}
+			it = m_pendingDeletionsGlobal.erase(it);
+		}
+		else {
+			++it;
+		}
+	}
+
+
 	DrawGUI();
 
-	auto fenceStart = std::chrono::high_resolution_clock::now();
 	vkWaitForFences(logicalDevice, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
-	auto fenceEnd = std::chrono::high_resolution_clock::now();
-	float fenceMs = std::chrono::duration<float, std::milli>(fenceEnd - fenceStart).count();
-	if (fenceMs > 1.0f) std::cout << "[Fence Wait] " << fenceMs << " ms\n";
 
-	// --- Process pending deletions (already present) ---
-	auto& pending = pendingDeletions[currentFrame];
-	for (auto buf : pending.buffers) {
-		if (buf != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, buf, nullptr);
+	for (auto it = m_staleWaterQueue.begin(); it != m_staleWaterQueue.end(); ) {
+		if (it->safeFrameIndex == currentFrame) {
+			if (it->vertexBuffer != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, it->vertexBuffer, nullptr);
+			if (it->vertexMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, it->vertexMemory, nullptr);
+			if (it->indexBuffer != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, it->indexBuffer, nullptr);
+			if (it->indexMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, it->indexMemory, nullptr);
+			it = m_staleWaterQueue.erase(it);
+		}
+		else {
+			++it;
+		}
 	}
-	for (auto mem : pending.memories) {
-		if (mem != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, mem, nullptr);
-	}
-	pending.buffers.clear();
-	pending.memories.clear();
 
 	// --- Process completed asynchronous uploads (NEW) ---
 	for (auto it = pendingUploads.begin(); it != pendingUploads.end(); ) {
@@ -2474,12 +2722,40 @@ void VulkanRenderer::DrawFrame() {
 	// Advance to next frame
 	currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
 }
-
 void VulkanRenderer::DrawSkybox(VkCommandBuffer commandBuffer) {
 	if (m_skyboxTexture.imageView == VK_NULL_HANDLE) return;
 	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, skyboxPipeline);
 	vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, skyboxPipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
 	vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+}
+void VulkanRenderer::DrawWater(VkCommandBuffer commandBuffer) {
+	if (m_waterBodies.empty()) return;
+
+	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, waterPipeline);
+	vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, waterPipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
+
+	float elapsed = std::chrono::duration<float>(std::chrono::high_resolution_clock::now() - m_waterStartTime).count();
+
+	for (const auto& body : m_waterBodies) {
+		VkBuffer vertexBuffers[] = { body.vertexBuffer };
+		VkDeviceSize offsets[] = { 0 };
+		vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+		vkCmdBindIndexBuffer(commandBuffer, body.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+		WaterPushConstants constants{};
+		constants.modelMatrix = glm::mat4(1.0f);
+		constants.time = elapsed;
+		constants.normalTextureId = body.normalTextureId;
+		constants.tiling = body.tiling;
+		constants.waveStrength = body.waveStrength;
+
+		vkCmdPushConstants(commandBuffer, waterPipelineLayout,
+			VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+			0, sizeof(WaterPushConstants), &constants);
+
+		vkCmdDrawIndexed(commandBuffer, body.indexCount, 1, 0, 0, 0);
+		drawCallCount++;
+	}
 }
 
 void VulkanRenderer::CreateSkyboxTexture() {
@@ -2497,7 +2773,6 @@ void VulkanRenderer::CreateSkyboxTexture() {
 		std::cerr << "[Skybox] Failed to load skybox faces.\n";
 	}
 }
-
 void VulkanRenderer::UpdateSkyboxDescriptor() {
 	if (descriptorSet == VK_NULL_HANDLE) return;
 
@@ -2533,258 +2808,213 @@ void VulkanRenderer::SetFogParams(float start, float end) {
 }
 
 void VulkanRenderer::Cleanup() {
-	vkDeviceWaitIdle(logicalDevice);
+	m_isShuttingDown = true;
 
-	m_isShuttingDown = true;	
-
-	for (auto& cmdBuf : commandBuffers) {
-		if (cmdBuf != VK_NULL_HANDLE) {
-			vkResetCommandBuffer(cmdBuf, 0);
-		}
+	// Wait for the GPU to finish all outstanding operations before tearing resources down
+	if (logicalDevice != VK_NULL_HANDLE) {
+		vkDeviceWaitIdle(logicalDevice);
 	}
 
-	for (auto& pending : pendingDeletions) {
-		for (auto buf : pending.buffers) {
-			if (buf != VK_NULL_HANDLE)
-				vkDestroyBuffer(logicalDevice, buf, nullptr);
-		}
-		for (auto mem : pending.memories) {
-			if (mem != VK_NULL_HANDLE)
-				vkFreeMemory(logicalDevice, mem, nullptr);
-		}
-		pending.buffers.clear();
-		pending.memories.clear();
-	}
-
-	terrainChunks.clear();
-
-	for (auto& upload : pendingUploads) {
-		vkDestroyBuffer(logicalDevice, upload.stagingVertexBuffer, nullptr);
-		vkFreeMemory(logicalDevice, upload.stagingVertexMemory, nullptr);
-		vkDestroyBuffer(logicalDevice, upload.stagingIndexBuffer, nullptr);
-		vkFreeMemory(logicalDevice, upload.stagingIndexMemory, nullptr);
-		vkDestroyFence(logicalDevice, upload.fence, nullptr);
-		vkFreeCommandBuffers(logicalDevice, uploadCommandPool, 1, &upload.commandBuffer);
-	}
-	pendingUploads.clear();
-
-	if (m_stagingBufferMapped != nullptr) {
-		vkUnmapMemory(logicalDevice, m_globalStagingMemory);
-		m_stagingBufferMapped = nullptr;
-	}
-
-	// Destroy structural buffer wrapper
-	if (m_globalStagingBuffer != VK_NULL_HANDLE) {
-		vkDestroyBuffer(logicalDevice, m_globalStagingBuffer, nullptr);
-		m_globalStagingBuffer = VK_NULL_HANDLE;
-	}
-
-	// Free underlying driver memory block
-	if (m_globalStagingMemory != VK_NULL_HANDLE) {
-		vkFreeMemory(logicalDevice, m_globalStagingMemory, nullptr);
-		m_globalStagingMemory = VK_NULL_HANDLE;
-	}
-
-	if (globalVertexBuffer) {
-		vkDestroyBuffer(logicalDevice, globalVertexBuffer, nullptr);
-		globalVertexBuffer = VK_NULL_HANDLE;
-	}
-	if (globalVertexBufferMemory) {
-		vkFreeMemory(logicalDevice, globalVertexBufferMemory, nullptr);
-		globalVertexBufferMemory = VK_NULL_HANDLE;
-	}
-	if (globalIndexBuffer) {
-		vkDestroyBuffer(logicalDevice, globalIndexBuffer, nullptr);
-		globalIndexBuffer = VK_NULL_HANDLE;
-	}
-	if (globalIndexBufferMemory) {
-		vkFreeMemory(logicalDevice, globalIndexBufferMemory, nullptr);
-		globalIndexBufferMemory = VK_NULL_HANDLE;
-	}
-
-	if (globalTerrainVertexBuffer) {
-		vkDestroyBuffer(logicalDevice, globalTerrainVertexBuffer, nullptr);
-		globalTerrainVertexBuffer = VK_NULL_HANDLE;
-	}
-	if (globalTerrainVertexMemory) {
-		vkFreeMemory(logicalDevice, globalTerrainVertexMemory, nullptr);
-		globalTerrainVertexMemory = VK_NULL_HANDLE;
-	}
-	if (globalTerrainIndexBuffer) {
-		vkDestroyBuffer(logicalDevice, globalTerrainIndexBuffer, nullptr);
-		globalTerrainIndexBuffer = VK_NULL_HANDLE;
-	}
-	if (globalTerrainIndexMemory) {
-		vkFreeMemory(logicalDevice, globalTerrainIndexMemory, nullptr);
-		globalTerrainIndexMemory = VK_NULL_HANDLE;
-	}
-
-	if (skyboxPipeline != VK_NULL_HANDLE) {
-		vkDestroyPipeline(logicalDevice, skyboxPipeline, nullptr);
-		skyboxPipeline = VK_NULL_HANDLE;
-	}
-	if (skyboxPipelineLayout != VK_NULL_HANDLE) {
-		vkDestroyPipelineLayout(logicalDevice, skyboxPipelineLayout, nullptr);
-		skyboxPipelineLayout = VK_NULL_HANDLE;
-	}
-	if (skyboxVertModule != VK_NULL_HANDLE) {
-		vkDestroyShaderModule(logicalDevice, skyboxVertModule, nullptr);
-		skyboxVertModule = VK_NULL_HANDLE;
-	}
-	if (skyboxFragModule != VK_NULL_HANDLE) {
-		vkDestroyShaderModule(logicalDevice, skyboxFragModule, nullptr);
-		skyboxFragModule = VK_NULL_HANDLE;
-	}
-
-	if (m_skyboxTexture.imageView != VK_NULL_HANDLE) {
-		vkDestroyImageView(logicalDevice, m_skyboxTexture.imageView, nullptr);
-		m_skyboxTexture.imageView = VK_NULL_HANDLE;
-	}
-	if (m_skyboxTexture.image != VK_NULL_HANDLE) {
-		vkDestroyImage(logicalDevice, m_skyboxTexture.image, nullptr);
-		m_skyboxTexture.image = VK_NULL_HANDLE;
-	}
-	if (m_skyboxTexture.sampler != VK_NULL_HANDLE) {
-		vkDestroySampler(logicalDevice, m_skyboxTexture.sampler, nullptr);
-		m_skyboxTexture.sampler = VK_NULL_HANDLE;
-	}
-	if (m_skyboxTexture.imageMemory != VK_NULL_HANDLE) {
-		vkFreeMemory(logicalDevice, m_skyboxTexture.imageMemory, nullptr);
-		m_skyboxTexture.imageMemory = VK_NULL_HANDLE;
-	}
-
-	g_AssetManager.Cleanup(logicalDevice);
-
-	if (uniformBufferMapped) {
-		vkUnmapMemory(logicalDevice, uniformBufferMemory);
-		uniformBufferMapped = nullptr;
-	}
-	if (uniformBuffer) {
-		vkDestroyBuffer(logicalDevice, uniformBuffer, nullptr);
-		uniformBuffer = VK_NULL_HANDLE;
-	}
-	if (uniformBufferMemory) {
-		vkFreeMemory(logicalDevice, uniformBufferMemory, nullptr);
-		uniformBufferMemory = VK_NULL_HANDLE;
-	}
-
-	if (lightBufferMapped) {
-		vkUnmapMemory(logicalDevice, lightBufferMemory);
-		lightBufferMapped = nullptr;
-	}
-	if (lightBuffer) {
-		vkDestroyBuffer(logicalDevice, lightBuffer, nullptr);
-		lightBuffer = VK_NULL_HANDLE;
-	}
-	if (lightBufferMemory) {
-		vkFreeMemory(logicalDevice, lightBufferMemory, nullptr);
-		lightBufferMemory = VK_NULL_HANDLE;
-	}
-
-	if (descriptorPool) {
-		vkDestroyDescriptorPool(logicalDevice, descriptorPool, nullptr);
-		descriptorPool = VK_NULL_HANDLE;
-	}
-	if (descriptorSetLayout) {
-		vkDestroyDescriptorSetLayout(logicalDevice, descriptorSetLayout, nullptr);
-		descriptorSetLayout = VK_NULL_HANDLE;
-	}
-
-	if (graphicsPipeline) {
-		vkDestroyPipeline(logicalDevice, graphicsPipeline, nullptr);
-		graphicsPipeline = VK_NULL_HANDLE;
-	}
-	if (pipelineLayout) {
-		vkDestroyPipelineLayout(logicalDevice, pipelineLayout, nullptr);
-		pipelineLayout = VK_NULL_HANDLE;
-	}
-	if (pipelineCache) {
-		vkDestroyPipelineCache(logicalDevice, pipelineCache, nullptr);
-		pipelineCache = VK_NULL_HANDLE;
-	}
-
-	if (depthImageView) {
-		vkDestroyImageView(logicalDevice, depthImageView, nullptr);
-		depthImageView = VK_NULL_HANDLE;
-	}
-	if (depthImage) {
-		vkDestroyImage(logicalDevice, depthImage, nullptr);
-		depthImage = VK_NULL_HANDLE;
-	}
-	if (depthImageMemory) {
-		vkFreeMemory(logicalDevice, depthImageMemory, nullptr);
-		depthImageMemory = VK_NULL_HANDLE;
-	}
-
-	ImGui_ImplVulkan_Shutdown();
-	ImGui_ImplGlfw_Shutdown();
-	ImGui::DestroyContext();
-	if (imguiDescriptorPool) {
+	// 1. Clean up ImGui Vulkan resources
+	if (imguiDescriptorPool != VK_NULL_HANDLE) {
+		ImGui_ImplVulkan_Shutdown();
+		ImGui_ImplGlfw_Shutdown();
+		ImGui::DestroyContext();
 		vkDestroyDescriptorPool(logicalDevice, imguiDescriptorPool, nullptr);
 		imguiDescriptorPool = VK_NULL_HANDLE;
 	}
 
-	for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-		if (imageAvailableSemaphores[i]) {
-			vkDestroySemaphore(logicalDevice, imageAvailableSemaphores[i], nullptr);
-			imageAvailableSemaphores[i] = VK_NULL_HANDLE;
-		}
-		if (renderFinishedSemaphores[i]) {
-			vkDestroySemaphore(logicalDevice, renderFinishedSemaphores[i], nullptr);
-			renderFinishedSemaphores[i] = VK_NULL_HANDLE;
-		}
-		if (inFlightFences[i]) {
-			vkDestroyFence(logicalDevice, inFlightFences[i], nullptr);
-			inFlightFences[i] = VK_NULL_HANDLE;
-		}
+	// 2. Clean up Swapchain and dependent resources
+	if (depthImageView != VK_NULL_HANDLE) {
+		vkDestroyImageView(logicalDevice, depthImageView, nullptr);
+		depthImageView = VK_NULL_HANDLE;
+	}
+	if (depthImage != VK_NULL_HANDLE) {
+		vkDestroyImage(logicalDevice, depthImage, nullptr);
+		depthImage = VK_NULL_HANDLE;
+	}
+	if (depthImageMemory != VK_NULL_HANDLE) {
+		vkFreeMemory(logicalDevice, depthImageMemory, nullptr);
+		depthImageMemory = VK_NULL_HANDLE;
 	}
 
-	if (commandPool) {
-		vkDestroyCommandPool(logicalDevice, commandPool, nullptr);
-		commandPool = VK_NULL_HANDLE;
-	}
-	if (uploadCommandPool) {
-		vkDestroyCommandPool(logicalDevice, uploadCommandPool, nullptr);
-		uploadCommandPool = VK_NULL_HANDLE;
-	}
 	for (auto framebuffer : swapChainFramebuffers) {
-		if (framebuffer) vkDestroyFramebuffer(logicalDevice, framebuffer, nullptr);
+		if (framebuffer != VK_NULL_HANDLE) {
+			vkDestroyFramebuffer(logicalDevice, framebuffer, nullptr);
+		}
 	}
 	swapChainFramebuffers.clear();
 
-	if (renderPass) {
-		vkDestroyRenderPass(logicalDevice, renderPass, nullptr);
-		renderPass = VK_NULL_HANDLE;
-	}
-
 	for (auto imageView : swapChainImageViews) {
-		if (imageView) vkDestroyImageView(logicalDevice, imageView, nullptr);
+		if (imageView != VK_NULL_HANDLE) {
+			vkDestroyImageView(logicalDevice, imageView, nullptr);
+		}
 	}
 	swapChainImageViews.clear();
 
-	if (swapChain) {
+	if (swapChain != VK_NULL_HANDLE) {
 		vkDestroySwapchainKHR(logicalDevice, swapChain, nullptr);
 		swapChain = VK_NULL_HANDLE;
 	}
 
-	if (enableValidationLayers && debugMessenger) {
-		DestroyDebugUtilsMessengerEXT(instance, debugMessenger, nullptr);
-		debugMessenger = VK_NULL_HANDLE;
+	// 3. Process remaining pending uploads/deletions immediately
+	if (logicalDevice != VK_NULL_HANDLE) {
+		for (auto& upload : pendingUploads) {
+			if (upload.fence != VK_NULL_HANDLE) vkDestroyFence(logicalDevice, upload.fence, nullptr);
+			if (upload.stagingVertexBuffer != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, upload.stagingVertexBuffer, nullptr);
+			if (upload.stagingVertexMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, upload.stagingVertexMemory, nullptr);
+			if (upload.stagingIndexBuffer != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, upload.stagingIndexBuffer, nullptr);
+			if (upload.stagingIndexMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, upload.stagingIndexMemory, nullptr);
+		}
+		pendingUploads.clear();
 	}
 
-	if (logicalDevice) {
+	// 4. Clean up pipelines, layouts, and individual shader modules
+	if (logicalDevice != VK_NULL_HANDLE) {
+		// Main Mesh Graphics Pipeline
+		if (graphicsPipeline != VK_NULL_HANDLE) vkDestroyPipeline(logicalDevice, graphicsPipeline, nullptr);
+		if (pipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(logicalDevice, pipelineLayout, nullptr);
+
+		// Skybox Pipeline
+		if (skyboxPipeline != VK_NULL_HANDLE) vkDestroyPipeline(logicalDevice, skyboxPipeline, nullptr);
+		if (skyboxPipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(logicalDevice, skyboxPipelineLayout, nullptr);
+		if (skyboxVertModule != VK_NULL_HANDLE) vkDestroyShaderModule(logicalDevice, skyboxVertModule, nullptr);
+		if (skyboxFragModule != VK_NULL_HANDLE) vkDestroyShaderModule(logicalDevice, skyboxFragModule, nullptr);
+
+		// Water Pipeline
+		if (waterPipeline != VK_NULL_HANDLE) vkDestroyPipeline(logicalDevice, waterPipeline, nullptr);
+		if (waterPipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(logicalDevice, waterPipelineLayout, nullptr);
+		if (waterVertModule != VK_NULL_HANDLE) vkDestroyShaderModule(logicalDevice, waterVertModule, nullptr);
+		if (waterFragModule != VK_NULL_HANDLE) vkDestroyShaderModule(logicalDevice, waterFragModule, nullptr);
+
+		// Pipeline cache
+		if (pipelineCache != VK_NULL_HANDLE) vkDestroyPipelineCache(logicalDevice, pipelineCache, nullptr);
+
+		if (renderPass != VK_NULL_HANDLE) {
+			vkDestroyRenderPass(logicalDevice, renderPass, nullptr);
+			renderPass = VK_NULL_HANDLE;
+		}
+	}
+
+	// 5. Clean up individual Water bodies that haven't been queued for deletion
+	if (logicalDevice != VK_NULL_HANDLE) {
+		for (auto& water : m_waterBodies) {
+			if (water.vertexBuffer != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, water.vertexBuffer, nullptr);
+			if (water.vertexMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, water.vertexMemory, nullptr);
+			if (water.indexBuffer != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, water.indexBuffer, nullptr);
+			if (water.indexMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, water.indexMemory, nullptr);
+		}
+		m_waterBodies.clear();
+
+		// Wipe out any stale water buffers that were left waiting in the queue
+		for (auto& stale : m_staleWaterQueue) {
+			if (stale.vertexBuffer != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, stale.vertexBuffer, nullptr);
+			if (stale.vertexMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, stale.vertexMemory, nullptr);
+			if (stale.indexBuffer != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, stale.indexBuffer, nullptr);
+			if (stale.indexMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, stale.indexMemory, nullptr);
+		}
+		m_staleWaterQueue.clear();
+	}
+
+	// 6. Clean up Descriptor Sets, Pools, Layouts & Textures
+	if (logicalDevice != VK_NULL_HANDLE) {
+		if (descriptorPool != VK_NULL_HANDLE) vkDestroyDescriptorPool(logicalDevice, descriptorPool, nullptr);
+		if (descriptorSetLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(logicalDevice, descriptorSetLayout, nullptr);
+
+		// Clean up the ONLY texture the renderer owns (Skybox)
+		if (m_skyboxTexture.sampler != VK_NULL_HANDLE) vkDestroySampler(logicalDevice, m_skyboxTexture.sampler, nullptr);
+		if (m_skyboxTexture.imageView != VK_NULL_HANDLE) vkDestroyImageView(logicalDevice, m_skyboxTexture.imageView, nullptr);
+		if (m_skyboxTexture.image != VK_NULL_HANDLE) vkDestroyImage(logicalDevice, m_skyboxTexture.image, nullptr);
+		// Note: Assuming your Texture struct calls this 'imageMemory', which was used in your original asset loading.
+		if (m_skyboxTexture.imageMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, m_skyboxTexture.imageMemory, nullptr);
+
+		// Let the AssetManager clean up all the other 37 leaked textures (sand, grass, rock)
+		if (assetManager != nullptr) {
+			assetManager->Cleanup(logicalDevice);
+		}
+	}
+
+	// 7. Clean up Global Uniform, Light, Mesh, and Terrain buffers
+	if (logicalDevice != VK_NULL_HANDLE) {
+		// Uniform Buffer
+		if (uniformBufferMapped != nullptr) vkUnmapMemory(logicalDevice, uniformBufferMemory);
+		if (uniformBuffer != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, uniformBuffer, nullptr);
+		if (uniformBufferMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, uniformBufferMemory, nullptr);
+
+		// Light Buffer
+		if (lightBufferMapped != nullptr) vkUnmapMemory(logicalDevice, lightBufferMemory);
+		if (lightBuffer != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, lightBuffer, nullptr);
+		if (lightBufferMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, lightBufferMemory, nullptr);
+
+		// Global Static Meshes Buffer
+		if (globalVertexBuffer != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, globalVertexBuffer, nullptr);
+		if (globalVertexBufferMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, globalVertexBufferMemory, nullptr);
+		if (globalIndexBuffer != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, globalIndexBuffer, nullptr);
+		if (globalIndexBufferMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, globalIndexBufferMemory, nullptr);
+
+		// Global Terrain Buffer
+		if (globalTerrainVertexBuffer != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, globalTerrainVertexBuffer, nullptr);
+		if (globalTerrainVertexMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, globalTerrainVertexMemory, nullptr);
+		if (globalTerrainIndexBuffer != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, globalTerrainIndexBuffer, nullptr);
+		if (globalTerrainIndexMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, globalTerrainIndexMemory, nullptr);
+
+		// Dynamic extra allocated terrain buffers
+		for (auto buf : m_allocatedTerrainBuffers) vkDestroyBuffer(logicalDevice, buf, nullptr);
+		for (auto mem : m_allocatedTerrainMemory) vkFreeMemory(logicalDevice, mem, nullptr);
+
+		// Persistent Staging Ring Buffer
+		if (m_stagingBufferMapped != nullptr) vkUnmapMemory(logicalDevice, m_globalStagingMemory);
+		if (m_globalStagingBuffer != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, m_globalStagingBuffer, nullptr);
+		if (m_globalStagingMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, m_globalStagingMemory, nullptr);
+	}
+
+	// 8. Clean up Sync Objects (Semaphores & Fences)
+	if (logicalDevice != VK_NULL_HANDLE) {
+		for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+			if (renderFinishedSemaphores.size() > i && renderFinishedSemaphores[i] != VK_NULL_HANDLE) {
+				vkDestroySemaphore(logicalDevice, renderFinishedSemaphores[i], nullptr);
+			}
+			if (imageAvailableSemaphores.size() > i && imageAvailableSemaphores[i] != VK_NULL_HANDLE) {
+				vkDestroySemaphore(logicalDevice, imageAvailableSemaphores[i], nullptr);
+			}
+			if (inFlightFences.size() > i && inFlightFences[i] != VK_NULL_HANDLE) {
+				vkDestroyFence(logicalDevice, inFlightFences[i], nullptr);
+			}
+		}
+	}
+
+	// 9. Clean up Command pools
+	if (logicalDevice != VK_NULL_HANDLE) {
+		if (commandPool != VK_NULL_HANDLE) vkDestroyCommandPool(logicalDevice, commandPool, nullptr);
+		if (uploadCommandPool != VK_NULL_HANDLE) vkDestroyCommandPool(logicalDevice, uploadCommandPool, nullptr);
+	}
+
+	// 10. Destroy the core Vulkan Handles
+	if (logicalDevice != VK_NULL_HANDLE) {
 		vkDestroyDevice(logicalDevice, nullptr);
 		logicalDevice = VK_NULL_HANDLE;
 	}
-	if (surface) {
-		vkDestroySurfaceKHR(instance, surface, nullptr);
-		surface = VK_NULL_HANDLE;
-	}
-	if (instance) {
+
+	if (instance != VK_NULL_HANDLE) {
+		// Destroy debug messenger if validation layers were enabled
+		if (enableValidationLayers && debugMessenger != VK_NULL_HANDLE) {
+			auto func = (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT");
+			if (func != nullptr) {
+				func(instance, debugMessenger, nullptr);
+			}
+		}
+
+		if (surface != VK_NULL_HANDLE) {
+			vkDestroySurfaceKHR(instance, surface, nullptr);
+			surface = VK_NULL_HANDLE;
+		}
+
 		vkDestroyInstance(instance, nullptr);
 		instance = VK_NULL_HANDLE;
 	}
-	if (window) {
+
+	// 11. Destroy Window context
+	if (window != nullptr) {
 		glfwDestroyWindow(window);
 		window = nullptr;
 	}

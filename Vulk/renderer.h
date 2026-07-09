@@ -1,5 +1,7 @@
 #pragma once
+
 #define GLFW_INCLUDE_VULKAN
+
 #include <GLFW/glfw3.h>
 #include <vector>
 #include <string>
@@ -11,13 +13,12 @@
 #include <vulkan/vulkan_core.h>
 #include <fstream>
 
-#include "renderMesh.h"
+#include "mesh.h"
 #include "scene.h"
 #include "scene_types.h"
 #include "settings.h"
 #include "assetManager.h"
 #include "chunk.h"
-
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_vulkan.h"
@@ -62,6 +63,48 @@ struct PushConstants {
     uint32_t objectId;          // 4 bytes
     float lodBlend;
 };
+struct TerrainChunkGPU {
+    int64_t key = 0;
+    glm::vec3 center{ 0.0f };
+    float radius = 0.0f;
+    int lod = 0;
+    bool ready = false;
+
+    uint32_t vertexOffset = 0;
+    uint32_t indexOffset = 0;
+    uint32_t vertexCount = 0;
+    uint32_t indexCount = 0;
+
+    float minHeight = 0.0f;
+    float maxHeight = 0.0f;
+
+    bool cachedOccluded = false;
+};
+
+struct WaterPushConstants {
+    glm::mat4 modelMatrix;      // usually identity; kept for flexibility (e.g. moving platforms)
+    float time;
+    uint32_t normalTextureId;
+    float tiling;
+    float waveStrength;
+};
+struct WaterBodyGPU {
+    VkBuffer vertexBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory vertexMemory = VK_NULL_HANDLE;
+    VkBuffer indexBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory indexMemory = VK_NULL_HANDLE;
+    uint32_t indexCount = 0;
+    uint32_t normalTextureId = 0;
+    float tiling = 8.0f;
+    float waveStrength = 0.15f;
+};
+struct StaleWaterBuffers {
+    VkBuffer vertexBuffer;
+    VkDeviceMemory vertexMemory;
+    VkBuffer indexBuffer;
+    VkDeviceMemory indexMemory;
+    uint32_t safeFrameIndex;
+};
 
 struct ChunkSlot {
     uint32_t vertexOffset;
@@ -80,23 +123,7 @@ struct DrawEntry {
     int64_t chunkKey = -1;
     float cachedMaxScale = 1.0f;
 };
-struct TerrainChunkGPU {
-    int64_t key = 0;
-    glm::vec3 center{ 0.0f };
-    float radius = 0.0f;
-    int lod = 0;
-    bool ready = false;
 
-    uint32_t vertexOffset = 0;
-    uint32_t indexOffset = 0;
-    uint32_t vertexCount = 0;
-    uint32_t indexCount = 0;
-
-    float minHeight = 0.0f;
-    float maxHeight = 0.0f;
-
-    bool cachedOccluded = false;
-};
 struct PendingUpload {
     VkFence fence = VK_NULL_HANDLE;
     VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
@@ -110,7 +137,10 @@ struct PendingUpload {
 struct PendingDeletion {
     std::vector<VkBuffer> buffers;
     std::vector<VkDeviceMemory> memories;
+    uint64_t safeFrame;
 };
+
+
 struct FreeSpan { uint32_t offset; uint32_t count; };
 
 struct FrustumPlane {
@@ -234,6 +264,9 @@ private:
     const int MAX_FRAMES_IN_FLIGHT = 3;
     size_t currentFrame = 0;
 
+    std::vector<PendingDeletion> m_pendingDeletionsGlobal;
+    uint64_t m_globalFrameCounter = 0;
+
     std::vector<VkSemaphore> imageAvailableSemaphores;
     std::vector<VkSemaphore> renderFinishedSemaphores;
     std::vector<VkFence> inFlightFences;
@@ -355,7 +388,6 @@ private:
     std::vector<DrawEntry> visibleTerrainDrawList;
 
     std::vector<PendingUpload> pendingUploads;
-    std::array<PendingDeletion, 3> pendingDeletions;
     VkCommandPool uploadCommandPool;
 
     void CreateGraphicsPipeline(VkPolygonMode polygonMode);
@@ -435,6 +467,30 @@ private:
     bool m_firstOcclusionUpdate = true;
 public:
     void SetFogParams(float start, float end);
+
+private:
+    VkPipeline waterPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout waterPipelineLayout = VK_NULL_HANDLE;
+    VkShaderModule waterVertModule = VK_NULL_HANDLE;
+    VkShaderModule waterFragModule = VK_NULL_HANDLE;
+
+    std::vector<WaterBodyGPU> m_waterBodies;
+    std::chrono::high_resolution_clock::time_point m_waterStartTime = std::chrono::high_resolution_clock::now();
+
+    std::unordered_map<int64_t, size_t> m_waterBodyLookup;
+    std::vector<StaleWaterBuffers> m_staleWaterQueue;
+
+    void CreateWaterPipeline();
+    void DrawWater(VkCommandBuffer commandBuffer);
+    size_t CreateWaterBodyGPU(const WaterMesh& mesh,
+        const std::string& normalMapPath,
+        float tiling, float waveStrength);
+public:
+    void AddWaterBodyForChunk(int64_t chunkKey, const WaterMesh& mesh,
+        const std::string& normalMapPath,
+        float tiling = 8.0f, float waveStrength = 0.15f);
+    void RemoveWaterBody(int64_t chunkKey);
+    void AddWaterBody(const WaterMesh& mesh, const std::string& normalMapTexturePath, float tiling = 8.0f, float waveStrength = 0.15f);
 
 #ifdef NDEBUG
     const bool enableValidationLayers = false;
