@@ -23,12 +23,12 @@
 #include "meshoptimizer.h"
 
 enum class BiomeType {
-    Desert,
-    Savanna,
     Plains,
-    Forest,
-    Taiga,
-    Tundra
+    TallPlains,
+    Foothills,
+    LowMountain,
+    MediumMountain,
+    HighMountain,
 };
 
 struct BiomeProperties {
@@ -39,38 +39,41 @@ struct BiomeProperties {
 
 inline BiomeProperties GetBiomeProperties(BiomeType type) {
     switch (type) {
-        // Desert is 100% sand texture
-    case BiomeType::Desert:  return { 30.0f,  1.2f, glm::vec3(1.0f, 0.0f, 0.0f) };
-                          // Savanna is mostly sand/dry dirt mixed with a little grass
-    case BiomeType::Savanna: return { 45.0f,  1.5f, glm::vec3(0.6f, 0.4f, 0.0f) };
-                           // Plains are 100% grass texture
-    case BiomeType::Plains:  return { 25.0f,  2.0f, glm::vec3(0.0f, 1.0f, 0.0f) };
-                          // Forest is 100% grass texture
-    case BiomeType::Forest:  return { 70.0f,  2.2f, glm::vec3(0.0f, 1.0f, 0.0f) };
-                          // Taiga hills start introducing rock/snow textures
-    case BiomeType::Taiga:   return { 110.0f, 2.5f, glm::vec3(0.0f, 0.5f, 0.5f) };
-                         // Tundra mountains are entirely rock/snow
-    case BiomeType::Tundra:  return { 160.0f, 3.0f, glm::vec3(0.0f, 0.0f, 1.0f) };
+        // Smooth transition from flat lowlands to high alpine peaks
+    case BiomeType::Plains:         return { 20.0f,  1.0f, glm::vec3(0.0f, 1.0f, 0.0f) };
+    case BiomeType::TallPlains:     return { 40.0f,  1.1f, glm::vec3(0.0f, 0.8f, 0.2f) };
+    case BiomeType::Foothills:      return { 80.0f,  1.3f, glm::vec3(0.0f, 0.5f, 0.5f) };
+    case BiomeType::LowMountain:    return { 100.0f, 1.6f, glm::vec3(0.4f, 0.f, 0.6f) };
+    case BiomeType::MediumMountain: return { 150.0f, 2.0f, glm::vec3(0.2f, 0.0f, 0.8f) };
+    case BiomeType::HighMountain:   return { 200.0f, 2.5f, glm::vec3(0.0f, 0.0f, 1.0f) };
     }
-    return { 50.0f, 2.0f, glm::vec3(0.0f, 1.0f, 0.0f) };
+    return { 40.0f, 1.0f, glm::vec3(0.0f, 1.0f, 0.0f) };
 }
 
 inline BiomeType DetermineBiome(float temperature, float moisture) {
-    // Cold zones (Temperature < 0.3)
-    if (temperature < 0.3f) {
-        if (moisture < 0.4f) return BiomeType::Tundra;
-        return BiomeType::Taiga;
+    // 1. Wet Regions (The Mountain Chains)
+    if (moisture >= 0.75f) {
+        if (temperature < 0.4f) return BiomeType::HighMountain;    // Cold & Wet = Grand peaks
+        if (temperature < 0.7f) return BiomeType::MediumMountain;  // Temperate & Wet
+        return BiomeType::LowMountain;                             // Warm & Wet = Low ridges
     }
-    // Temperate zones (0.3 <= Temperature < 0.7)
-    else if (temperature < 0.7f) {
-        if (moisture < 0.3f) return BiomeType::Plains;
-        return BiomeType::Forest;
+
+    // 2. Intermediate Regions (The Highlands / Transition Zones)
+    if (moisture >= 0.52f) {
+        if (temperature < 0.5f) return BiomeType::MediumMountain;
+        if (temperature < 0.75f) return BiomeType::LowMountain;
+        return BiomeType::Foothills;
     }
-    // Hot zones (Temperature >= 0.7)
-    else {
-        if (moisture < 0.3f) return BiomeType::Desert;
-        return BiomeType::Savanna;
+
+    // 3. Mild Moisture Regions (The Rolling Lowlands)
+    if (moisture >= 0.32f) {
+        if (temperature < 0.6f) return BiomeType::Foothills;
+        return BiomeType::TallPlains;
     }
+
+    // 4. Dry Regions (The Flat Basin Floors)
+    if (temperature > 0.65f) return BiomeType::Plains;
+    return BiomeType::TallPlains;
 }
 
 struct TerrainSample
@@ -90,6 +93,8 @@ struct ChunkJobResult {
     std::vector<ModelVertex> vertices;
     std::vector<uint32_t> indices;
     int lod;
+
+    std::vector<GrassInstance> grassInstances;
 
     bool hasWater = false;
     WaterMesh waterMesh;
@@ -145,10 +150,12 @@ public:
     Chunk();
 
     float chunkSize = 512;
-    int resolution = 50;
-    int viewDistanceChunks = 12;
-    int immediateViewChunks = 3;
+    int resolution = 65;
+    int viewDistanceChunks = 16;
+    int immediateViewChunks = 4;
     static int s_globalSeed;
+
+    static float m_chunkSize;
 
     std::unordered_map<int64_t, std::future<ChunkJobResult>> m_pendingTerrainGen;
 
@@ -162,7 +169,7 @@ public:
 private:
     bool m_shuttingDown = false;
     bool batch = false;
-    const float MOVE_THRESHOLD = 16.0f;       // Trigger if moved more than 16 meters (e.g., 1/8th of a chunk)
+    const float MOVE_THRESHOLD = 64.0f;       // Trigger if moved more than 16 meters (e.g., 1/8th of a chunk)
     const float ROTATE_THRESHOLD = 0.965f;
 
     size_t m_currentAmortizeIndex = 0;
@@ -198,7 +205,8 @@ private:
         ChunkJobResult& outResult,
         std::shared_ptr<std::atomic<bool>> cancelToken = nullptr);
     static std::vector<glm::vec2> ConvexHull(std::vector<glm::vec2> points);
-    //static TerrainSample SampleTerrain(float worldX, float worldZ);
+    static std::pair<float, glm::vec3> CalculateHeightAndColor(float worldX, float worldZ);
+	float GetChunkSize() const { return chunkSize; }
 
 public:
     static float GetHeight(float worldX, float worldZ);

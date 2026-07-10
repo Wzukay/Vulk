@@ -36,7 +36,6 @@ layout(location = 7) in vec3 fragColor; // Splat weights (r=sand, g=grass, b=roc
 
 layout(location = 0) out vec4 outColor;
 
-// 🚀 TRIPLANAR SAMPLING HELPER FOR ALBEDO
 vec4 TriplanarSample(uint textureId, vec3 pos, vec3 weights) {
     vec4 x = texture(globalTextures[textureId], pos.yz);
     vec4 y = texture(globalTextures[textureId], pos.xz);
@@ -44,7 +43,6 @@ vec4 TriplanarSample(uint textureId, vec3 pos, vec3 weights) {
     return x * weights.x + y * weights.y + z * weights.z;
 }
 
-// 🚀 NEW: RECONSTRUCT 2-CHANNEL COMPRESSED NORMALS
 vec3 UnpackNormal(vec4 sampledNormal) {
     // Extract Red (X) and Green (Y) and transform from [0, 1] texture space to [-1, 1] simulation space
     vec2 normalXY = sampledNormal.rg * 2.0 - 1.0;
@@ -53,7 +51,6 @@ vec3 UnpackNormal(vec4 sampledNormal) {
     return vec3(normalXY, normalZ);
 }
 
-// 🚀 NEW: TRIPLANAR SAMPLING HELPER FOR COMPRESSED NORMALS
 vec3 TriplanarSampleNormal(uint textureId, vec3 pos, vec3 weights) {
     vec3 x = UnpackNormal(texture(normalTextures[textureId], pos.yz));
     vec3 y = UnpackNormal(texture(normalTextures[textureId], pos.xz));

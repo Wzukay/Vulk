@@ -14,6 +14,7 @@
 #include <fstream>
 
 #include "mesh.h"
+#include "gpu_instances.h"
 #include "scene.h"
 #include "scene_types.h"
 #include "settings.h"
@@ -34,94 +35,10 @@ struct QueueFamilyIndices {
         return graphicsFamily.has_value() && presentFamily.has_value();
     }
 };
-
 struct SwapChainSupportDetails {
     VkSurfaceCapabilitiesKHR capabilities;
     std::vector<VkSurfaceFormatKHR> formats;
     std::vector<VkPresentModeKHR> presentModes;
-};
-
-struct UniformBufferObject {
-    glm::mat4 view;
-    glm::mat4 proj;
-    glm::vec3 cameraPos;
-    float ambient;
-    float specularPower;
-    uint32_t lightCount;
-    float fogStart;
-    float fogEnd;
-    glm::vec2 screenSize; float _pad1[2];
-    glm::mat4 inverseViewProj;
-    glm::mat4 inverseProj;
-    glm::mat4 inverseView;
-};
-
-struct PushConstants {
-    glm::mat4 modelMatrix;      // 64 bytes
-    uint32_t textureId;         // 4 bytes
-    uint32_t normalTextureId;   // 4 bytes
-    uint32_t objectId;          // 4 bytes
-    float lodBlend;
-};
-struct TerrainChunkGPU {
-    int64_t key = 0;
-    glm::vec3 center{ 0.0f };
-    float radius = 0.0f;
-    int lod = 0;
-    bool ready = false;
-
-    uint32_t vertexOffset = 0;
-    uint32_t indexOffset = 0;
-    uint32_t vertexCount = 0;
-    uint32_t indexCount = 0;
-
-    float minHeight = 0.0f;
-    float maxHeight = 0.0f;
-
-    bool cachedOccluded = false;
-};
-
-struct WaterPushConstants {
-    glm::mat4 modelMatrix;      // usually identity; kept for flexibility (e.g. moving platforms)
-    float time;
-    uint32_t normalTextureId;
-    float tiling;
-    float waveStrength;
-};
-struct WaterBodyGPU {
-    VkBuffer vertexBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory vertexMemory = VK_NULL_HANDLE;
-    VkBuffer indexBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory indexMemory = VK_NULL_HANDLE;
-    uint32_t indexCount = 0;
-    uint32_t normalTextureId = 0;
-    float tiling = 8.0f;
-    float waveStrength = 0.15f;
-};
-struct StaleWaterBuffers {
-    VkBuffer vertexBuffer;
-    VkDeviceMemory vertexMemory;
-    VkBuffer indexBuffer;
-    VkDeviceMemory indexMemory;
-    uint32_t safeFrameIndex;
-};
-
-struct ChunkSlot {
-    uint32_t vertexOffset;
-    uint32_t indexOffset;
-    uint32_t indexCount;
-    bool isAllocated;
-    std::string objectName;
-};
-
-struct DrawEntry {
-    uint32_t objectIndex;
-    uint32_t subMeshIndex; // index into globalSubMeshes
-    float distSq;
-    glm::vec3 worldCenter;
-    float worldRadius;
-    int64_t chunkKey = -1;
-    float cachedMaxScale = 1.0f;
 };
 
 struct PendingUpload {
@@ -133,41 +50,31 @@ struct PendingUpload {
     VkDeviceMemory stagingIndexMemory = VK_NULL_HANDLE;
     int64_t chunkKey;
     TerrainChunkGPU chunk;
+    bool cancelled = false; // set true if the chunk was removed while the upload was still in flight
 };
 struct PendingDeletion {
     std::vector<VkBuffer> buffers;
     std::vector<VkDeviceMemory> memories;
     uint64_t safeFrame;
 };
-
-
-struct FreeSpan { uint32_t offset; uint32_t count; };
+struct PendingSpanReturn {
+    FreeSpan vertexSpan;
+    FreeSpan indexSpan;
+    uint64_t safeFrame;
+};
+struct PendingGrassUpload {
+    VkFence fence = VK_NULL_HANDLE;
+    VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+    VkBuffer stagingBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+    int64_t chunkKey = 0;
+    GrassChunkGPU grassChunk;
+    bool cancelled = false; // set true if the chunk was removed while this upload was still in flight
+};
 
 struct FrustumPlane {
     glm::vec3 normal;
     float distance;
-};
-
-struct Light {
-    alignas(16) glm::vec4 positionOrDir; // w: 0 = directional, 1 = point
-    alignas(16) glm::vec4 color;         // rgb = color, a = intensity
-    alignas(16) glm::vec4 params;        // x = range (point lights)
-
-    static Light Directional(const glm::vec3& direction, const glm::vec3& color, float intensity = 1.0f) {
-        Light l{};
-        l.positionOrDir = glm::vec4(glm::normalize(direction), 0.0f);
-        l.color = glm::vec4(color, intensity);
-        l.params = glm::vec4(0.0f);
-        return l;
-    }
-
-    static Light Point(const glm::vec3& position, const glm::vec3& color, float intensity = 1.0f, float range = 10.0f) {
-        Light l{};
-        l.positionOrDir = glm::vec4(position, 1.0f);
-        l.color = glm::vec4(color, intensity);
-        l.params = glm::vec4(range, 0.0f, 0.0f, 0.0f);
-        return l;
-    }
 };
 
 class VulkanRenderer {
@@ -227,33 +134,21 @@ public:
     GLFWwindow* GetWindow() const { return window; }
 
 private:
-    VkPipelineCache pipelineCache = VK_NULL_HANDLE;
+    VkSampleCountFlagBits m_currentMsaaSamples = VK_SAMPLE_COUNT_4_BIT;
 
     VkSwapchainKHR swapChain = VK_NULL_HANDLE;
     std::vector<VkImage> swapChainImages;
     VkFormat swapChainImageFormat;
     VkExtent2D swapChainExtent;
-    std::vector<VkImageView> swapChainImageViews; // Handles to wrap our images
+    std::vector<VkImageView> swapChainImageViews;
 
     VkImage depthImage = VK_NULL_HANDLE;
     VkDeviceMemory depthImageMemory = VK_NULL_HANDLE;
     VkImageView depthImageView = VK_NULL_HANDLE;
 
-    void CreateSwapChain();
-    void CreateImageViews();
-
-    void RecreateSwapChain();
-    void CleanupSwapChain();
-
-    void CreateDepthResources();
-    VkFormat FindDepthFormat();
-    VkFormat FindSupportedFormat(const std::vector<VkFormat>& candidates, VkImageTiling tiling, VkFormatFeatureFlags features);
-
-    // Swapchain configuration helpers
-    SwapChainSupportDetails QuerySwapChainSupport(VkPhysicalDevice device);
-    VkSurfaceFormatKHR ChooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& availableFormats);
-    VkPresentModeKHR ChooseSwapPresentMode(const std::vector<VkPresentModeKHR>& availablePresentModes);
-    VkExtent2D ChooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities);
+    VkImage colorImage = VK_NULL_HANDLE;
+    VkDeviceMemory colorImageMemory = VK_NULL_HANDLE;
+    VkImageView colorImageView = VK_NULL_HANDLE;
 
     VkRenderPass renderPass = VK_NULL_HANDLE;
     std::vector<VkFramebuffer> swapChainFramebuffers;
@@ -265,6 +160,7 @@ private:
     size_t currentFrame = 0;
 
     std::vector<PendingDeletion> m_pendingDeletionsGlobal;
+    std::vector<PendingSpanReturn> m_pendingTerrainSpanReturns;
     uint64_t m_globalFrameCounter = 0;
 
     std::vector<VkSemaphore> imageAvailableSemaphores;
@@ -272,7 +168,20 @@ private:
     std::vector<VkFence> inFlightFences;
     std::vector<VkFence> imagesInFlight;
 
-    // New phase declarations
+    void CreateSwapChain();
+    void RecreateSwapChain();
+
+    VkImageView CreateImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags, uint32_t mipLevels);
+    void CreateImage(uint32_t width, uint32_t height, uint32_t mipLevels,
+        VkSampleCountFlagBits numSamples, VkFormat format,
+        VkImageTiling tiling, VkImageUsageFlags usage,
+        VkMemoryPropertyFlags properties, VkImage& image,
+        VkDeviceMemory& imageMemory);
+    void CreateImageViews();
+
+    void CreateDepthResources();
+    void CreateColorResources();
+
     void CreateRenderPass();
     void CreateFrameBuffers();
     void CreateCommandPool();
@@ -280,11 +189,20 @@ private:
     void CreateSyncObjects();
     void RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex);
 
+    VkSampleCountFlagBits GetMaxUsableSampleCount();
+    VkSampleCountFlagBits IntToSampleCount(int samples);
+    VkFormat FindDepthFormat();
+    VkFormat FindSupportedFormat(const std::vector<VkFormat>& candidates, VkImageTiling tiling, VkFormatFeatureFlags features);
+    SwapChainSupportDetails QuerySwapChainSupport(VkPhysicalDevice device);
+    VkSurfaceFormatKHR ChooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& availableFormats);
+    VkPresentModeKHR ChooseSwapPresentMode(const std::vector<VkPresentModeKHR>& availablePresentModes);
+    VkExtent2D ChooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities);
+
 public:
     void DrawFrame();
 
 private:
-    Settings currentSettings;  // tracks what is currently applied
+    Settings currentSettings;
     bool wireframeMode = false;
 
     void RecreateGraphicsPipeline();
@@ -293,19 +211,8 @@ public:
     void ApplySettings();
 
 private:
-    static std::vector<char> ReadFile(const std::string& filename);
-    VkShaderModule CreateShaderModule(const std::vector<char>& code);
-
-private:
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     VkPipeline graphicsPipeline = VK_NULL_HANDLE;
-
-    VkPipeline skyboxPipeline = VK_NULL_HANDLE;
-    VkPipelineLayout skyboxPipelineLayout = VK_NULL_HANDLE;
-    VkShaderModule skyboxVertModule = VK_NULL_HANDLE;
-    VkShaderModule skyboxFragModule = VK_NULL_HANDLE;
-
-    Texture m_skyboxTexture;
 
     VkBuffer globalVertexBuffer = VK_NULL_HANDLE;
     VkDeviceMemory globalVertexBufferMemory = VK_NULL_HANDLE;
@@ -316,35 +223,9 @@ private:
     const VkDeviceSize MAX_GLOBAL_VERTICES = 5'000'000;
     const VkDeviceSize MAX_GLOBAL_INDICES = 10'000'000;
     const VkDeviceSize MAX_GLOBAL_SUBMESHES = 1'000;
-    
-    VkBuffer globalTerrainVertexBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory globalTerrainVertexMemory = VK_NULL_HANDLE;
-
-    VkBuffer globalTerrainIndexBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory globalTerrainIndexMemory = VK_NULL_HANDLE;
-
-    std::atomic<uint32_t> nextTerrainVertexOffset{ 0 };
-    std::atomic<uint32_t> nextTerrainIndexOffset{ 0 };
-    std::mutex terrainAllocMutex;
 
     std::vector<FreeSpan> freeVertexSpans;
     std::vector<FreeSpan> freeIndexSpans;
-
-    const VkDeviceSize MAX_TERRAIN_VERTICES = 5'000'000;
-    const VkDeviceSize MAX_TERRAIN_INDICES = 10'000'000;
-
-    std::unordered_map<int64_t, TerrainChunkGPU> terrainChunks;
-    std::vector<ChunkSlot> chunkSlots;
-
-    float m_terrainChunkSize = 512.0f; // Is set in chunk::Init
-
-    VkBuffer m_globalStagingBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory m_globalStagingMemory = VK_NULL_HANDLE;
-    void* m_stagingBufferMapped = nullptr;
-
-    uint32_t m_stagingRingOffset = 0;
-    const uint32_t STAGING_BUFFER_SIZE = 32 * 1024 * 1024; // 32MB is plenty for rolling chunks
-    std::mutex m_stagingBufferMutex;
 
     VkDescriptorSetLayout descriptorSetLayout;
     VkDescriptorPool descriptorPool;
@@ -354,13 +235,6 @@ private:
     VkDeviceMemory uniformBufferMemory;
 
     void* uniformBufferMapped = nullptr;
-
-    VkBuffer lightBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory lightBufferMemory = VK_NULL_HANDLE;
-    std::vector<Light> currentLights;
-    const uint32_t MAX_LIGHTS = 256;
-
-    void* lightBufferMapped = nullptr;
 
     std::vector<SceneObject> currentSceneObjects;
     std::vector<SubMesh> currentSceneSubMeshes;
@@ -381,37 +255,80 @@ private:
     std::vector<std::string> m_lastInstanceMeshNames;
     std::vector<std::vector<uint32_t>> m_objectDrawEntryIndices;
 
+    std::vector<PendingUpload> pendingUploads;
+    VkCommandPool uploadCommandPool;
+
+    uint32_t FindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);
+
+    void CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory);
+    void DestroyBuffer(VkBuffer& buffer, VkDeviceMemory& memory);
+
+    void CreateDescriptorSetLayout();
+    void CreateDescriptorPool();
+    void CreateDescriptorSet();
+    void CreateGraphicsPipeline();
+    void CreateGlobalBuffers();
+    void CreateUniformBuffer();
+
+    static std::vector<char> ReadFile(const std::string& filename);
+    VkShaderModule CreateShaderModule(const std::vector<char>& code);
+
+    void DrawStaticMeshes(VkCommandBuffer commandBuffer);
+
+public:
+    void UpdateUniformBuffer(const CameraData& cam);
+    void UploadStaticSceneData(const std::vector<ModelVertex>& verts, const std::vector<uint32_t>& idxs);
+
+private:
+    VkBuffer lightBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory lightBufferMemory = VK_NULL_HANDLE;
+    std::vector<Light> currentLights;
+    const uint32_t MAX_LIGHTS = 256;
+
+    void* lightBufferMapped = nullptr;
+
+    void CreateLightBuffer();
+
+public:
+    void SetLights(const std::vector<Light>& lights);
+
+private:
+    VkBuffer m_globalStagingBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_globalStagingMemory = VK_NULL_HANDLE;
+    void* m_stagingBufferMapped = nullptr;
+
+    uint32_t m_stagingRingOffset = 0;
+    const uint32_t STAGING_BUFFER_SIZE = 32 * 1024 * 1024; // 32MB 
+    std::mutex m_stagingBufferMutex;
+
+    VkBuffer globalTerrainVertexBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory globalTerrainVertexMemory = VK_NULL_HANDLE;
+
+    VkBuffer globalTerrainIndexBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory globalTerrainIndexMemory = VK_NULL_HANDLE;
+
+    std::atomic<uint32_t> nextTerrainVertexOffset{ 0 };
+    std::atomic<uint32_t> nextTerrainIndexOffset{ 0 };
+    std::mutex terrainAllocMutex;
+
+    const VkDeviceSize MAX_TERRAIN_VERTICES = 5'000'000;
+    const VkDeviceSize MAX_TERRAIN_INDICES = 10'000'000;
+
+    std::unordered_map<int64_t, TerrainChunkGPU> terrainChunks;
+    std::vector<ChunkSlot> chunkSlots;
+
+    float m_terrainChunkSize; // Is set in chunk::Init
+
     std::unordered_set<VkBuffer> m_allocatedTerrainBuffers;
     std::unordered_set<VkDeviceMemory> m_allocatedTerrainMemory;
 
     std::vector<DrawEntry> terrainDrawList;
     std::vector<DrawEntry> visibleTerrainDrawList;
 
-    std::vector<PendingUpload> pendingUploads;
-    VkCommandPool uploadCommandPool;
-
-    void CreateGraphicsPipeline(VkPolygonMode polygonMode);
-
-    void CreateSkyboxPipeline();
-    void DrawSkybox(VkCommandBuffer commandBuffer);
-    void CreateSkyboxTexture();
-
-	uint32_t FindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);
-    void CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory);
-
-    void CreateDescriptorSetLayout();
-    void CreateDescriptorPool();
-    void CreateDescriptorSet();
-
     void UpdateTextureDescriptors(const Scene& scene);
-    void UpdateSkyboxDescriptor();
 
-    void CreateGlobalBuffers();
-    void CreateUniformBuffer();
-    void CreateLightBuffer();
     void CreateTerrainBuffers();
 
-    void DrawStaticMeshes(VkCommandBuffer commandBuffer);
     void DrawTerrain(VkCommandBuffer commandBuffer);
     void UploadTerrainChunkAsync(
         TerrainChunkGPU& chunk,
@@ -420,11 +337,6 @@ private:
     bool IsChunkOccluded(const glm::vec3& chunkCenter, float chunkRadius);
 
 public:
-    void UpdateUniformBuffer(const CameraData& cam);
-    void SetLights(const std::vector<Light>& lights);
-
-    void UploadStaticSceneData(const std::vector<ModelVertex>& verts, const std::vector<uint32_t>& idxs);
-    
     void AddTerrainChunk(
         int64_t key,
         int cx,
@@ -434,8 +346,21 @@ public:
         const std::vector<uint32_t>& indices);
     void RemoveTerrainChunk(
         int64_t key);
-
     void SetTerrainChunkSize(float size) { m_terrainChunkSize = size; }
+
+private:
+    VkPipeline skyboxPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout skyboxPipelineLayout = VK_NULL_HANDLE;
+    VkShaderModule skyboxVertModule = VK_NULL_HANDLE;
+    VkShaderModule skyboxFragModule = VK_NULL_HANDLE;
+
+    Texture m_skyboxTexture;
+
+    void CreateSkyboxTexture();
+    void UpdateSkyboxDescriptor();
+
+    void CreateSkyboxPipeline();
+    void DrawSkybox(VkCommandBuffer commandBuffer);
 
 private:
     bool showSettingsPanel = false;
@@ -459,7 +384,7 @@ public:
         return IsSphereInFrustum(center, radius);
     }
 
-private: 
+private:
     float m_fogStart = 1600.0f;
     float m_fogEnd = 1700.0f;
 
@@ -491,6 +416,19 @@ public:
         float tiling = 8.0f, float waveStrength = 0.15f);
     void RemoveWaterBody(int64_t chunkKey);
     void AddWaterBody(const WaterMesh& mesh, const std::string& normalMapTexturePath, float tiling = 8.0f, float waveStrength = 0.15f);
+
+private:
+    VkPipeline grassPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout grassPipelineLayout = VK_NULL_HANDLE;
+
+    std::unordered_map<int64_t, GrassChunkGPU> m_grassChunks;
+    std::vector<PendingGrassUpload> pendingGrassUploads;
+
+    void CreateGrassPipeline();
+    void DrawGrass(VkCommandBuffer commandBuffer);
+
+public:
+    void AddGrass(int64_t key, const std::vector<GrassInstance>& grassInstances);
 
 #ifdef NDEBUG
     const bool enableValidationLayers = false;

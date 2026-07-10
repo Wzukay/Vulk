@@ -9,16 +9,10 @@ struct Settings {
     bool vsync = false;                       // enable V-Sync (FIFO present mode)
     bool anisotropicFiltering = true;        // enable anisotropic filtering
     float maxAnisotropy = 16.0f;             // max anisotropy level (if supported)
-
-    // --- Scene ---
-    bool showTerrain = true;
-    bool showModels = true;
-    float terrainScale = 1.0f;
+    int msaaSamples = 4;
 
     // --- Debug ---
     bool showStats = true;
-    bool wireframe = false;                  // for debugging (requires pipeline change)
-    bool frustumCulling = true;
 
     // --- Window ---
     int windowWidth = 1280;

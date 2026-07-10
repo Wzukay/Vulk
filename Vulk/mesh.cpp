@@ -96,6 +96,66 @@ WaterMesh WaterMeshGen::GenerateLake(const std::vector<glm::vec2>& footprintXZ, 
     return mesh;
 }
 
+WaterMesh WaterMeshGen::GenerateLakeFromMask(
+    const std::vector<bool>& cellMask,
+    int width, int height,
+    float originX, float originZ, float cellSize,
+    float waterHeight)
+{
+    WaterMesh mesh;
+    mesh.waterHeight = waterHeight;
+
+    if (width <= 0 || height <= 0 || cellSize <= 0.0f) return mesh;
+    if ((int)cellMask.size() != width * height) return mesh;
+
+    int vertsX = width + 1;
+    int vertsZ = height + 1;
+
+    // Shared corner vertices, only allocated where at least one adjacent
+    // lake cell touches them, so the mesh follows the mask's exact outline
+    // (no convex-hull inflation over dry ground).
+    std::vector<int> vertIndexLookup(vertsX * vertsZ, -1);
+
+    auto cellIsLake = [&](int cx, int cz) -> bool {
+        if (cx < 0 || cx >= width || cz < 0 || cz >= height) return false;
+        return cellMask[cz * width + cx];
+        };
+
+    auto getOrAddVertex = [&](int vx, int vz) -> uint32_t {
+        int idx = vz * vertsX + vx;
+        if (vertIndexLookup[idx] != -1) return (uint32_t)vertIndexLookup[idx];
+
+        WaterVertex v{};
+        v.pos = glm::vec3(originX + vx * cellSize, waterHeight, originZ + vz * cellSize);
+        v.uv = glm::vec2((float)vx / (float)width, (float)vz / (float)height);
+
+        vertIndexLookup[idx] = (int)mesh.vertices.size();
+        mesh.vertices.push_back(v);
+        return (uint32_t)vertIndexLookup[idx];
+        };
+
+    for (int z = 0; z < height; ++z) {
+        for (int x = 0; x < width; ++x) {
+            if (!cellIsLake(x, z)) continue;
+
+            uint32_t i00 = getOrAddVertex(x, z);
+            uint32_t i10 = getOrAddVertex(x + 1, z);
+            uint32_t i01 = getOrAddVertex(x, z + 1);
+            uint32_t i11 = getOrAddVertex(x + 1, z + 1);
+
+            mesh.indices.push_back(i00);
+            mesh.indices.push_back(i10);
+            mesh.indices.push_back(i11);
+
+            mesh.indices.push_back(i00);
+            mesh.indices.push_back(i11);
+            mesh.indices.push_back(i01);
+        }
+    }
+
+    return mesh;
+}
+
 WaterMesh WaterMeshGen::GenerateRiver(const std::vector<glm::vec3>& centerline, float width, int segmentsPerPoint) {
     WaterMesh mesh;
     if (centerline.size() < 2 || width <= 0.0f) return mesh;

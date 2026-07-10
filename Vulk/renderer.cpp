@@ -244,6 +244,34 @@ VkFormat VulkanRenderer::FindDepthFormat() {
 		VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT
 	);
 }
+VkSampleCountFlagBits VulkanRenderer::GetMaxUsableSampleCount() {
+	VkPhysicalDeviceProperties props;
+	vkGetPhysicalDeviceProperties(physicalDevice, &props);
+
+	VkSampleCountFlags counts = props.limits.framebufferColorSampleCounts &
+		props.limits.framebufferDepthSampleCounts;
+
+	if (counts & VK_SAMPLE_COUNT_64_BIT) return VK_SAMPLE_COUNT_64_BIT;
+	if (counts & VK_SAMPLE_COUNT_32_BIT) return VK_SAMPLE_COUNT_32_BIT;
+	if (counts & VK_SAMPLE_COUNT_16_BIT) return VK_SAMPLE_COUNT_16_BIT;
+	if (counts & VK_SAMPLE_COUNT_8_BIT)  return VK_SAMPLE_COUNT_8_BIT;
+	if (counts & VK_SAMPLE_COUNT_4_BIT)  return VK_SAMPLE_COUNT_4_BIT;
+	if (counts & m_currentMsaaSamples)  return m_currentMsaaSamples;
+	return VK_SAMPLE_COUNT_1_BIT;
+}
+
+VkSampleCountFlagBits VulkanRenderer::IntToSampleCount(int samples) {
+	switch (samples) {
+	case 1:  return VK_SAMPLE_COUNT_1_BIT;
+	case 2:  return m_currentMsaaSamples;
+	case 4:  return VK_SAMPLE_COUNT_4_BIT;
+	case 8:  return VK_SAMPLE_COUNT_8_BIT;
+	case 16: return VK_SAMPLE_COUNT_16_BIT;
+	case 32: return VK_SAMPLE_COUNT_32_BIT;
+	case 64: return VK_SAMPLE_COUNT_64_BIT;
+	default: return VK_SAMPLE_COUNT_1_BIT;
+	}
+}
 
 bool VulkanRenderer::ShouldClose() { return glfwWindowShouldClose(window); }
 void VulkanRenderer::PollEvents() { glfwPollEvents(); }
@@ -281,9 +309,22 @@ void VulkanRenderer::InitVulkan() {
 	PickPhysicalDevice();
 	CreateLogicalDevice();
 
+	if (g_Settings.msaaSamples == 0) {
+		m_currentMsaaSamples = GetMaxUsableSampleCount();
+	}
+	else {
+		m_currentMsaaSamples = IntToSampleCount(g_Settings.msaaSamples);
+		VkSampleCountFlagBits maxSupported = GetMaxUsableSampleCount();
+		if (static_cast<int>(m_currentMsaaSamples) > static_cast<int>(maxSupported)) {
+			m_currentMsaaSamples = maxSupported;
+			g_Settings.msaaSamples = static_cast<int>(m_currentMsaaSamples);
+		}
+	}
+
 	CreateSwapChain();
 	CreateImageViews();
 	CreateDepthResources();
+	CreateColorResources();
 	CreateRenderPass();
 	CreateFrameBuffers();
 
@@ -293,11 +334,11 @@ void VulkanRenderer::InitVulkan() {
 
 	CreateDescriptorSetLayout();
 
-	CreateUniformBuffer();     
-	CreateLightBuffer();     
+	CreateUniformBuffer();
+	CreateLightBuffer();
 
 	CreateDescriptorPool();
-	CreateDescriptorSet();  
+	CreateDescriptorSet();
 
 	CreateGlobalBuffers();
 	CreateImGui();
@@ -308,11 +349,13 @@ void VulkanRenderer::InitVulkan() {
 	g_AssetManager.CreateDefaultTexture();
 	g_AssetManager.CreateDefaultNormalTexture();
 
-	CreateGraphicsPipeline(g_Settings.wireframe ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL);
+	CreateGraphicsPipeline();
 
 	CreateSkyboxTexture();
 	UpdateSkyboxDescriptor();
 	CreateSkyboxPipeline();
+
+	CreateGrassPipeline();
 
 	CreateWaterPipeline();
 
@@ -509,6 +552,10 @@ void VulkanRenderer::RecreateSwapChain() {
 		depthImageMemory = VK_NULL_HANDLE;
 	}
 
+	if (colorImageView != VK_NULL_HANDLE) vkDestroyImageView(logicalDevice, colorImageView, nullptr);
+	if (colorImage != VK_NULL_HANDLE) vkDestroyImage(logicalDevice, colorImage, nullptr);
+	if (colorImageMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, colorImageMemory, nullptr);
+
 	// Destroy swapchain
 	if (swapChain != VK_NULL_HANDLE) {
 		vkDestroySwapchainKHR(logicalDevice, swapChain, nullptr);
@@ -533,6 +580,7 @@ void VulkanRenderer::RecreateSwapChain() {
 	// 3. Recreate swapchain and its dependent resources
 	CreateSwapChain();      // re-creates swapChainImages, swapChainImageFormat, swapChainExtent
 	CreateImageViews();
+	CreateColorResources();
 	CreateDepthResources();
 	CreateFrameBuffers();
 
@@ -559,7 +607,7 @@ void VulkanRenderer::RecreateSwapChain() {
 	init_info.Allocator = nullptr;
 	init_info.PipelineInfoMain.RenderPass = renderPass;
 	init_info.PipelineInfoMain.Subpass = 0;
-	init_info.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+	init_info.PipelineInfoMain.MSAASamples = m_currentMsaaSamples;
 
 	ImGui_ImplVulkan_Init(&init_info);
 }
@@ -593,68 +641,111 @@ void VulkanRenderer::CreateImageViews() {
 	}
 }
 void VulkanRenderer::CreateRenderPass() {
-	VkAttachmentDescription colorAttachment{};
-	colorAttachment.format = swapChainImageFormat;
-	colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-	colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; // Clear screen before drawing
-	colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-	colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-	colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-	colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR; // Ready for swapchain presentation
+	std::vector<VkAttachmentDescription> attachments;
+	VkAttachmentReference colorRef{};
+	VkAttachmentReference resolveRef{};
+	VkAttachmentReference depthRef{};
 
+	// --- Color attachment ---
+	if (m_currentMsaaSamples != VK_SAMPLE_COUNT_1_BIT) {
+		// Multisampled intermediate attachment
+		VkAttachmentDescription multisampledAttachment{};
+		multisampledAttachment.format = swapChainImageFormat;
+		multisampledAttachment.samples = m_currentMsaaSamples;
+		multisampledAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+		multisampledAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+		multisampledAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		multisampledAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		multisampledAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		multisampledAttachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		attachments.push_back(multisampledAttachment);
+
+		// Resolve attachment (single‑sampled, to swapchain image)
+		VkAttachmentDescription resolveAttachment{};
+		resolveAttachment.format = swapChainImageFormat;
+		resolveAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+		resolveAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		resolveAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+		resolveAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		resolveAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		resolveAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		resolveAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+		attachments.push_back(resolveAttachment);
+
+		colorRef.attachment = 0;
+		colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+		resolveRef.attachment = 1;
+		resolveRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+	}
+	else {
+		// No MSAA: render directly to the swapchain image (presentable)
+		VkAttachmentDescription colorAttachment{};
+		colorAttachment.format = swapChainImageFormat;
+		colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+		colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+		colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+		colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+		attachments.push_back(colorAttachment);
+
+		colorRef.attachment = 0;
+		colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+		// No resolve attachment
+		resolveRef.attachment = VK_ATTACHMENT_UNUSED;
+	}
+
+	// --- Depth attachment ---
 	VkAttachmentDescription depthAttachment{};
 	depthAttachment.format = FindDepthFormat();
-	depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+	depthAttachment.samples = m_currentMsaaSamples;
 	depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
 	depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
 	depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 	depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
 	depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 	depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+	attachments.push_back(depthAttachment);
 
-	VkAttachmentReference colorAttachmentRef{};
-	colorAttachmentRef.attachment = 0;
-	colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+	depthRef.attachment = static_cast<uint32_t>(attachments.size() - 1);
+	depthRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
-	VkAttachmentReference depthAttachmentRef{};
-	depthAttachmentRef.attachment = 1;
-	depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
+	// --- Subpass ---
 	VkSubpassDescription subpass{};
 	subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
 	subpass.colorAttachmentCount = 1;
-	subpass.pColorAttachments = &colorAttachmentRef;
-	subpass.pDepthStencilAttachment = &depthAttachmentRef;
+	subpass.pColorAttachments = &colorRef;
+	subpass.pResolveAttachments = (m_currentMsaaSamples != VK_SAMPLE_COUNT_1_BIT) ? &resolveRef : nullptr;
+	subpass.pDepthStencilAttachment = &depthRef;
 
-	VkSubpassDependency dependency{};
-	dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
-	dependency.dstSubpass = 0;
-	dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-	dependency.srcAccessMask = 0;
-	dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-	dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-
-	std::array<VkAttachmentDescription, 2> attachments = { colorAttachment, depthAttachment };
-
+	// --- Render pass creation ---
 	VkRenderPassCreateInfo renderPassInfo{};
 	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
 	renderPassInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
 	renderPassInfo.pAttachments = attachments.data();
 	renderPassInfo.subpassCount = 1;
 	renderPassInfo.pSubpasses = &subpass;
-	renderPassInfo.dependencyCount = 1;
-	renderPassInfo.pDependencies = &dependency;
 
 	if (vkCreateRenderPass(logicalDevice, &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS) {
-		throw std::runtime_error("Failed to create clear render pass layout.");
+		throw std::runtime_error("Failed to create render pass");
 	}
 }
 void VulkanRenderer::CreateFrameBuffers() {
+
 	swapChainFramebuffers.resize(swapChainImageViews.size());
 
 	for (size_t i = 0; i < swapChainImageViews.size(); i++) {
-		std::array<VkImageView, 2> attachments = { swapChainImageViews[i], depthImageView };
+		std::vector<VkImageView> attachments;
+
+		if (m_currentMsaaSamples != VK_SAMPLE_COUNT_1_BIT) {
+			attachments = { colorImageView, swapChainImageViews[i], depthImageView };
+		}
+		else {
+			attachments = { swapChainImageViews[i], depthImageView };
+		}
 
 		VkFramebufferCreateInfo framebufferInfo{};
 		framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
@@ -665,9 +756,8 @@ void VulkanRenderer::CreateFrameBuffers() {
 		framebufferInfo.height = swapChainExtent.height;
 		framebufferInfo.layers = 1;
 
-		if (vkCreateFramebuffer(logicalDevice, &framebufferInfo, nullptr, &swapChainFramebuffers[i]) != VK_SUCCESS) {
-			throw std::runtime_error("Failed to map pipeline framebuffers.");
-		}
+		if (vkCreateFramebuffer(logicalDevice, &framebufferInfo, nullptr, &swapChainFramebuffers[i]) != VK_SUCCESS)
+			throw std::runtime_error("Failed to create framebuffer");
 	}
 }
 void VulkanRenderer::CreateCommandPool() {
@@ -766,10 +856,18 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 	renderPassInfo.renderArea.offset = { 0, 0 };
 	renderPassInfo.renderArea.extent = swapChainExtent;
 
-	std::array<VkClearValue, 2> clearValues{};
-	clearValues[0].color = { {0.1f, 0.15f, 0.25f, 1.0f} };
-	clearValues[1].depthStencil = { 1.0f, 0 };
-
+	std::vector<VkClearValue> clearValues;
+	if (m_currentMsaaSamples != VK_SAMPLE_COUNT_1_BIT) {
+		clearValues.resize(3);
+		clearValues[0].color = { {0.0f, 0.0f, 0.0f, 1.0f} };  // MSAA color
+		clearValues[1].color = { {0.0f, 0.0f, 0.0f, 1.0f} };  // resolve
+		clearValues[2].depthStencil = { 1.0f, 0 };
+	}
+	else {
+		clearValues.resize(2);
+		clearValues[0].color = { {0.0f, 0.0f, 0.0f, 1.0f} };  // swapchain color
+		clearValues[1].depthStencil = { 1.0f, 0 };
+	}
 	renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
 	renderPassInfo.pClearValues = clearValues.data();
 
@@ -841,6 +939,8 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 			DrawTerrain(commandBuffer);
 
 			DrawWater(commandBuffer);
+
+			DrawGrass(commandBuffer);
 		}
 		else {
 			if (globalVertexBuffer == VK_NULL_HANDLE) {
@@ -1218,8 +1318,20 @@ void VulkanRenderer::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, V
 
 	vkBindBufferMemory(logicalDevice, buffer, bufferMemory, 0);
 }
+void VulkanRenderer::DestroyBuffer(VkBuffer& buffer, VkDeviceMemory& memory) {
+	if (buffer != VK_NULL_HANDLE) {
+		vkDestroyBuffer(logicalDevice, buffer, nullptr);
+		buffer = VK_NULL_HANDLE;
+	}
+	if (memory != VK_NULL_HANDLE) {
+		vkFreeMemory(logicalDevice, memory, nullptr);
+		memory = VK_NULL_HANDLE;
+	}
+}
 
-void VulkanRenderer::CreateGraphicsPipeline(VkPolygonMode polygonMode) {
+void VulkanRenderer::CreateGraphicsPipeline() {
+	std::cout << "[DEBUG] Creating Graphics Pipeline..." << std::endl;
+
 	// 1. Read our compiled binary shader files from disk
 	auto vertShaderCode = ReadFile("shaders/vert.spv");
 	auto fragShaderCode = ReadFile("shaders/frag.spv");
@@ -1286,7 +1398,7 @@ void VulkanRenderer::CreateGraphicsPipeline(VkPolygonMode polygonMode) {
 	rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
 	rasterizer.depthClampEnable = VK_FALSE;
 	rasterizer.rasterizerDiscardEnable = VK_FALSE;
-	rasterizer.polygonMode = polygonMode; // Solid geometry fill mode
+	rasterizer.polygonMode = VK_POLYGON_MODE_FILL; // Solid geometry fill mode
 	rasterizer.lineWidth = 1.0f;
 	rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;    // Back-face culling enabled
 	rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
@@ -1296,7 +1408,7 @@ void VulkanRenderer::CreateGraphicsPipeline(VkPolygonMode polygonMode) {
 	VkPipelineMultisampleStateCreateInfo multisampling{};
 	multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
 	multisampling.sampleShadingEnable = VK_FALSE;
-	multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+	multisampling.rasterizationSamples = m_currentMsaaSamples;
 
 	// 8. Fixed Function: Color Blending (Controls alpha blending transparency mechanics)
 	VkPipelineColorBlendAttachmentState colorBlendAttachment{};
@@ -1341,23 +1453,6 @@ void VulkanRenderer::CreateGraphicsPipeline(VkPolygonMode polygonMode) {
 	}
 
 	std::vector<char> cacheData;
-	std::ifstream cacheFile("pipeline.cache", std::ios::ate | std::ios::binary);
-	if (cacheFile.is_open()) {
-		size_t size = cacheFile.tellg();
-		cacheFile.seekg(0);
-		cacheData.resize(size);
-		cacheFile.read(cacheData.data(), size);
-		cacheFile.close();
-	}
-
-	VkPipelineCacheCreateInfo cacheInfo{};
-	cacheInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
-	cacheInfo.initialDataSize = cacheData.size();
-	cacheInfo.pInitialData = cacheData.empty() ? nullptr : cacheData.data();
-
-	if (vkCreatePipelineCache(logicalDevice, &cacheInfo, nullptr, &pipelineCache) != VK_SUCCESS) {
-		throw std::runtime_error("Failed to create pipeline cache.");
-	}
 
 	auto createPipeline = [&](VkBool32 blendEnable, VkBool32 depthWriteEnable) -> VkPipeline {
 		// Color blend attachment
@@ -1401,31 +1496,20 @@ void VulkanRenderer::CreateGraphicsPipeline(VkPolygonMode polygonMode) {
 
 		VkPipeline pipeline;
 		// Create pipeline using the cache
-		if (vkCreateGraphicsPipelines(logicalDevice, pipelineCache, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {
+		if(vkCreateGraphicsPipelines(logicalDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {
 			throw std::runtime_error("Failed to create graphics pipeline.");
 		}
 		return pipeline;
 		};
 
 	graphicsPipeline = createPipeline(VK_FALSE, VK_TRUE);          // Opaque
-	//graphicsPipelineTransparent = createPipeline(VK_TRUE, VK_FALSE); // Transparent
-
-	size_t dataSize;
-	if (vkGetPipelineCacheData(logicalDevice, pipelineCache, &dataSize, nullptr) == VK_SUCCESS && dataSize > 0) {
-		std::vector<char> newCacheData(dataSize);
-		if (vkGetPipelineCacheData(logicalDevice, pipelineCache, &dataSize, newCacheData.data()) == VK_SUCCESS) {
-			std::ofstream outFile("pipeline.cache", std::ios::binary);
-			if (outFile) {
-				outFile.write(newCacheData.data(), dataSize);
-				outFile.close();
-			}
-		}
-	}
 
 	vkDestroyShaderModule(logicalDevice, fragShaderModule, nullptr);
 	vkDestroyShaderModule(logicalDevice, vertShaderModule, nullptr);
 }
 void VulkanRenderer::CreateSkyboxPipeline() {
+	std::cout << "[DEBUG] Creating Skybox Pipeline..." << std::endl;
+
 	auto vertCode = ReadFile("shaders/skybox_vert.spv");
 	auto fragCode = ReadFile("shaders/skybox_frag.spv");
 	skyboxVertModule = CreateShaderModule(vertCode);
@@ -1480,7 +1564,7 @@ void VulkanRenderer::CreateSkyboxPipeline() {
 	VkPipelineMultisampleStateCreateInfo multisample = {};
 	multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
 	multisample.sampleShadingEnable = VK_FALSE;
-	multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+	multisample.rasterizationSamples = m_currentMsaaSamples;
 
 	// Depth/stencil: depth test on, depth write off, compare op <=
 	VkPipelineDepthStencilStateCreateInfo depthStencil = {};
@@ -1536,11 +1620,13 @@ void VulkanRenderer::CreateSkyboxPipeline() {
 	pipelineInfo.renderPass = renderPass;
 	pipelineInfo.subpass = 0;
 
-	if (vkCreateGraphicsPipelines(logicalDevice, pipelineCache, 1, &pipelineInfo, nullptr, &skyboxPipeline) != VK_SUCCESS) {
+	if (vkCreateGraphicsPipelines(logicalDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &skyboxPipeline) != VK_SUCCESS) {
 		throw std::runtime_error("Failed to create skybox pipeline");
 	}
 }
 void VulkanRenderer::CreateWaterPipeline() {
+	std::cout << "[DEBUG] Creating Water Pipeline..." << std::endl;
+
 	auto vertCode = ReadFile("shaders/water_vert.spv");
 	auto fragCode = ReadFile("shaders/water_frag.spv");
 	waterVertModule = CreateShaderModule(vertCode);
@@ -1608,7 +1694,7 @@ void VulkanRenderer::CreateWaterPipeline() {
 	VkPipelineMultisampleStateCreateInfo multisample = {};
 	multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
 	multisample.sampleShadingEnable = VK_FALSE;
-	multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+	multisample.rasterizationSamples = m_currentMsaaSamples;
 
 	// Depth test on (so terrain/objects occlude water), depth write OFF (translucent, like skybox).
 	VkPipelineDepthStencilStateCreateInfo depthStencil = {};
@@ -1672,7 +1758,7 @@ void VulkanRenderer::CreateWaterPipeline() {
 	pipelineInfo.renderPass = renderPass;
 	pipelineInfo.subpass = 0;
 
-	if (vkCreateGraphicsPipelines(logicalDevice, pipelineCache, 1, &pipelineInfo, nullptr, &waterPipeline) != VK_SUCCESS) {
+	if (vkCreateGraphicsPipelines(logicalDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &waterPipeline) != VK_SUCCESS) {
 		throw std::runtime_error("Failed to create water pipeline");
 	}
 }
@@ -1681,8 +1767,7 @@ void VulkanRenderer::RecreateGraphicsPipeline() {
 		vkDestroyPipeline(logicalDevice, graphicsPipeline, nullptr);
 		graphicsPipeline = VK_NULL_HANDLE;
 	}
-	VkPolygonMode mode = g_Settings.wireframe ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
-	CreateGraphicsPipeline(mode);
+	CreateGraphicsPipeline();
 }
 
 void VulkanRenderer::CreateDescriptorSetLayout() {
@@ -1851,7 +1936,7 @@ void VulkanRenderer::CreateUniformBuffer() {
 	CreateBuffer(bufferSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
 		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
 		uniformBuffer, uniformBufferMemory);
-	
+
 	if (vkMapMemory(logicalDevice, uniformBufferMemory, 0, bufferSize, 0, &uniformBufferMapped) != VK_SUCCESS) {
 		throw std::runtime_error("Failed to persistently map Uniform Buffer memory.");
 	}
@@ -1968,9 +2053,9 @@ void VulkanRenderer::CreateTerrainBuffers() {
 void VulkanRenderer::CreateImGuiDescriptorPool() {
 	VkDescriptorPoolSize pool_sizes[2] = {};
 	pool_sizes[0].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-	pool_sizes[0].descriptorCount = 100; 
+	pool_sizes[0].descriptorCount = 100;
 	pool_sizes[1].type = VK_DESCRIPTOR_TYPE_SAMPLER;
-	pool_sizes[1].descriptorCount = 100; 
+	pool_sizes[1].descriptorCount = 100;
 
 	VkDescriptorPoolCreateInfo pool_info = {};
 	pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -2010,7 +2095,7 @@ void VulkanRenderer::CreateImGui() {
 
 	init_info.PipelineInfoMain.RenderPass = renderPass;
 	init_info.PipelineInfoMain.Subpass = 0;
-	init_info.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+	init_info.PipelineInfoMain.MSAASamples = m_currentMsaaSamples;
 
 	ImGui_ImplVulkan_Init(&init_info);
 }
@@ -2082,54 +2167,94 @@ void VulkanRenderer::EndSingleTimeCommands(VkCommandBuffer commandBuffer) {
 	vkFreeCommandBuffers(logicalDevice, commandPool, 1, &commandBuffer);
 }
 
-void VulkanRenderer::CreateDepthResources() {
-	VkFormat depthFormat = FindDepthFormat();
-
+void VulkanRenderer::CreateImage(uint32_t width, uint32_t height, uint32_t mipLevels,
+	VkSampleCountFlagBits numSamples, VkFormat format,
+	VkImageTiling tiling, VkImageUsageFlags usage,
+	VkMemoryPropertyFlags properties, VkImage& image,
+	VkDeviceMemory& imageMemory) {
 	VkImageCreateInfo imageInfo{};
 	imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
 	imageInfo.imageType = VK_IMAGE_TYPE_2D;
-	imageInfo.extent.width = swapChainExtent.width;
-	imageInfo.extent.height = swapChainExtent.height;
+	imageInfo.extent.width = width;
+	imageInfo.extent.height = height;
 	imageInfo.extent.depth = 1;
-	imageInfo.mipLevels = 1;
+	imageInfo.mipLevels = mipLevels;
 	imageInfo.arrayLayers = 1;
-	imageInfo.format = depthFormat;
-	imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+	imageInfo.format = format;
+	imageInfo.tiling = tiling;
 	imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-	imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+	imageInfo.usage = usage;
+	imageInfo.samples = numSamples;
 	imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-	if (vkCreateImage(logicalDevice, &imageInfo, nullptr, &depthImage) != VK_SUCCESS) {
-		throw std::runtime_error("Failed to create depth image.");
+	if (vkCreateImage(logicalDevice, &imageInfo, nullptr, &image) != VK_SUCCESS) {
+		throw std::runtime_error("Failed to create image!");
 	}
 
 	VkMemoryRequirements memRequirements;
-	vkGetImageMemoryRequirements(logicalDevice, depthImage, &memRequirements);
+	vkGetImageMemoryRequirements(logicalDevice, image, &memRequirements);
 
 	VkMemoryAllocateInfo allocInfo{};
 	allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
 	allocInfo.allocationSize = memRequirements.size;
-	allocInfo.memoryTypeIndex = FindMemoryType(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+	allocInfo.memoryTypeIndex = FindMemoryType(memRequirements.memoryTypeBits, properties);
 
-	if (vkAllocateMemory(logicalDevice, &allocInfo, nullptr, &depthImageMemory) != VK_SUCCESS) {
-		throw std::runtime_error("Failed to allocate depth image memory.");
+	if (vkAllocateMemory(logicalDevice, &allocInfo, nullptr, &imageMemory) != VK_SUCCESS) {
+		throw std::runtime_error("Failed to allocate image memory!");
 	}
-	vkBindImageMemory(logicalDevice, depthImage, depthImageMemory, 0);
 
+	vkBindImageMemory(logicalDevice, image, imageMemory, 0);
+}
+
+VkImageView VulkanRenderer::CreateImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags, uint32_t mipLevels) {
 	VkImageViewCreateInfo viewInfo{};
 	viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-	viewInfo.image = depthImage;
+	viewInfo.image = image;
 	viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-	viewInfo.format = depthFormat;
-	viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+	viewInfo.format = format;
+	viewInfo.subresourceRange.aspectMask = aspectFlags;
 	viewInfo.subresourceRange.baseMipLevel = 0;
-	viewInfo.subresourceRange.levelCount = 1;
+	viewInfo.subresourceRange.levelCount = mipLevels;
 	viewInfo.subresourceRange.baseArrayLayer = 0;
 	viewInfo.subresourceRange.layerCount = 1;
 
-	if (vkCreateImageView(logicalDevice, &viewInfo, nullptr, &depthImageView) != VK_SUCCESS) {
-		throw std::runtime_error("Failed to create depth image view.");
+	VkImageView imageView;
+	if (vkCreateImageView(logicalDevice, &viewInfo, nullptr, &imageView) != VK_SUCCESS) {
+		throw std::runtime_error("Failed to create texture image view!");
+	}
+
+	return imageView;
+}
+
+void VulkanRenderer::CreateDepthResources() {
+	VkFormat depthFormat = FindDepthFormat();
+
+	CreateImage(
+		swapChainExtent.width,
+		swapChainExtent.height,
+		1,
+		m_currentMsaaSamples,
+		depthFormat,
+		VK_IMAGE_TILING_OPTIMAL,
+		VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+		depthImage,
+		depthImageMemory
+	);
+
+	depthImageView = CreateImageView(depthImage, depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT, 1);
+}
+void VulkanRenderer::CreateColorResources() {
+	if (m_currentMsaaSamples != VK_SAMPLE_COUNT_1_BIT) {
+		VkFormat colorFormat = swapChainImageFormat;
+		CreateImage(swapChainExtent.width, swapChainExtent.height, 1,
+			m_currentMsaaSamples, colorFormat, VK_IMAGE_TILING_OPTIMAL,
+			VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, colorImage, colorImageMemory);
+		colorImageView = CreateImageView(colorImage, colorFormat, VK_IMAGE_ASPECT_COLOR_BIT, 1);
+	}
+	else {
+		// no separate MSAA image needed; colorImage / colorImageView remain VK_NULL_HANDLE
 	}
 }
 
@@ -2202,16 +2327,12 @@ void VulkanRenderer::UploadStaticSceneData(const std::vector<ModelVertex>& verts
 		vkCmdCopyBuffer(cmd, stagingInd, globalIndexBuffer, 1, &indCopy);
 		EndSingleTimeCommands(cmd);
 
-		vkDestroyBuffer(logicalDevice, stagingVert, nullptr);
-		vkFreeMemory(logicalDevice, stagingVertMem, nullptr);
-		vkDestroyBuffer(logicalDevice, stagingInd, nullptr);
-		vkFreeMemory(logicalDevice, stagingIndMem, nullptr);
+		DestroyBuffer(stagingVert, stagingVertMem);
+		DestroyBuffer(stagingInd, stagingIndMem);
 	}
 	catch (...) {
-		if (stagingVert != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, stagingVert, nullptr);
-		if (stagingVertMem != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, stagingVertMem, nullptr);
-		if (stagingIndex != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, stagingIndex, nullptr);
-		if (stagingIndexMem != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, stagingIndexMem, nullptr);
+		DestroyBuffer(stagingVert, stagingVertMem);
+		DestroyBuffer(stagingIndex, stagingIndexMem);
 		throw; // rethrow the exception
 	}
 }
@@ -2228,8 +2349,24 @@ void VulkanRenderer::AddTerrainChunk(
 		return;
 	}
 
-	TerrainChunkGPU chunk{};
+	if (m_grassChunks.count(key)) {
+		PendingDeletion del;
+		del.buffers = { m_grassChunks[key].instanceBuffer };
+		del.memories = { m_grassChunks[key].instanceMemory };
+		del.safeFrame = m_globalFrameCounter + MAX_FRAMES_IN_FLIGHT;
+		m_pendingDeletionsGlobal.push_back(del);
+		m_grassChunks.erase(key);
+	}
+	// Also supersede any grass upload for this key that's still in flight
+	// (e.g. a rapid LOD repair firing again before the previous grass
+	// upload finished) so it can't land after this newer one.
+	for (auto& upload : pendingGrassUploads) {
+		if (upload.chunkKey == key) {
+			upload.cancelled = true;
+		}
+	}
 
+	TerrainChunkGPU chunk{};
 	chunk.key = key;
 
 	glm::vec3 minBound(FLT_MAX), maxBound(-FLT_MAX);
@@ -2267,6 +2404,37 @@ void VulkanRenderer::UploadTerrainChunkAsync(
 
 		auto vIt = std::find_if(freeVertexSpans.begin(), freeVertexSpans.end(),
 			[&](const FreeSpan& s) { return s.count >= verts.size(); });
+		auto iIt = std::find_if(freeIndexSpans.begin(), freeIndexSpans.end(),
+			[&](const FreeSpan& s) { return s.count >= indices.size(); });
+
+		// Check capacity BEFORE committing either allocation. Previously
+		// nextTerrainVertexOffset/nextTerrainIndexOffset just kept
+		// climbing with fetch_add and no bound check — once they passed
+		// MAX_TERRAIN_VERTICES/MAX_TERRAIN_INDICES, the resulting offsets
+		// pointed past the actual buffer, and the later vkCmdCopyBuffer /
+		// vkCmdDrawIndexed calls silently read/wrote out of bounds
+		// (corruption, not a clean crash — looks like "LOD updates just
+		// stop working correctly").
+		bool needsNewVertexSpace = (vIt == freeVertexSpans.end());
+		bool needsNewIndexSpace = (iIt == freeIndexSpans.end());
+
+		uint64_t projectedVertexEnd = needsNewVertexSpace
+			? (uint64_t)nextTerrainVertexOffset.load() + verts.size()
+			: 0;
+		uint64_t projectedIndexEnd = needsNewIndexSpace
+			? (uint64_t)nextTerrainIndexOffset.load() + indices.size()
+			: 0;
+
+		if ((needsNewVertexSpace && projectedVertexEnd > MAX_TERRAIN_VERTICES) ||
+			(needsNewIndexSpace && projectedIndexEnd > MAX_TERRAIN_INDICES)) {
+			std::cerr << "[Terrain] Global terrain buffer capacity exceeded "
+				<< "(vertices " << projectedVertexEnd << "/" << MAX_TERRAIN_VERTICES
+				<< ", indices " << projectedIndexEnd << "/" << MAX_TERRAIN_INDICES
+				<< "). Dropping this chunk upload instead of corrupting the buffer.\n";
+			chunk.ready = false;
+			return;
+		}
+
 		if (vIt != freeVertexSpans.end()) {
 			vertexOffset = vIt->offset;
 			freeVertexSpans.erase(vIt);
@@ -2275,8 +2443,6 @@ void VulkanRenderer::UploadTerrainChunkAsync(
 			vertexOffset = nextTerrainVertexOffset.fetch_add(static_cast<uint32_t>(verts.size()));
 		}
 
-		auto iIt = std::find_if(freeIndexSpans.begin(), freeIndexSpans.end(),
-			[&](const FreeSpan& s) { return s.count >= indices.size(); });
 		if (iIt != freeIndexSpans.end()) {
 			indexOffset = iIt->offset;
 			freeIndexSpans.erase(iIt);
@@ -2367,16 +2533,46 @@ void VulkanRenderer::UploadTerrainChunkAsync(
 	pendingUploads.push_back(upload);
 }
 void VulkanRenderer::RemoveTerrainChunk(int64_t key) {
+	// Cancel any upload still in flight for this key, non-blockingly. The
+	// actual cleanup (freeing spans/staging) happens in DrawFrame's fence
+	// poll once the GPU is actually done, same as the normal path. Without
+	// this, a chunk removed while its upload was still in flight would get
+	// silently re-inserted into terrainChunks once the fence signals later,
+	// "resurrecting" a chunk the CPU side already considers unloaded.
+	for (auto& upload : pendingUploads) {
+		if (upload.chunkKey == key) {
+			upload.cancelled = true;
+		}
+	}
+
+	auto grassIt = m_grassChunks.find(key);
+	if (grassIt != m_grassChunks.end()) {
+
+		PendingDeletion del;
+		del.buffers = { grassIt->second.instanceBuffer };
+		del.memories = { grassIt->second.instanceMemory };
+		del.safeFrame = m_globalFrameCounter + MAX_FRAMES_IN_FLIGHT;
+		m_pendingDeletionsGlobal.push_back(del);
+		m_grassChunks.erase(grassIt);
+	}
+
 	auto it = terrainChunks.find(key);
 	if (it == terrainChunks.end()) return;
 
 	TerrainChunkGPU& chunk = it->second;
 
-	// Return the offsets to the free lists
+	// Don't return this span to the free list immediately: a command
+	// buffer from a previous frame (up to MAX_FRAMES_IN_FLIGHT) may still
+	// be executing a vkCmdDrawIndexed that reads from it. If we hand the
+	// span to a new chunk's upload right away, that copy can land while
+	// the old draw is still in flight -> flicker/corruption. Defer the
+	// same way buffer deletions already are.
 	{
-		std::lock_guard<std::mutex> lock(terrainAllocMutex);
-		freeVertexSpans.push_back({ chunk.vertexOffset, chunk.vertexCount });
-		freeIndexSpans.push_back({ chunk.indexOffset, chunk.indexCount });
+		PendingSpanReturn ret;
+		ret.vertexSpan = { chunk.vertexOffset, chunk.vertexCount };
+		ret.indexSpan = { chunk.indexOffset, chunk.indexCount };
+		ret.safeFrame = m_globalFrameCounter + MAX_FRAMES_IN_FLIGHT;
+		m_pendingTerrainSpanReturns.push_back(ret);
 	}
 
 	// Remove from the map
@@ -2525,6 +2721,223 @@ void VulkanRenderer::RemoveWaterBody(int64_t chunkKey) {
 	m_waterBodyLookup.erase(it);
 }
 
+void VulkanRenderer::CreateGrassPipeline() {
+	std::cout << "[DEBUG] Creating Grass Pipeline..." << std::endl;
+
+	auto vertShaderCode = ReadFile("shaders/grass_vert.spv");
+	auto fragShaderCode = ReadFile("shaders/grass_frag.spv");
+
+	VkShaderModule vertModule = CreateShaderModule(vertShaderCode);
+	VkShaderModule fragModule = CreateShaderModule(fragShaderCode);
+
+	VkPipelineShaderStageCreateInfo stages[2]{};
+	stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+	stages[0].module = vertModule;
+	stages[0].pName = "main";
+
+	stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+	stages[1].module = fragModule;
+	stages[1].pName = "main";
+
+	// Bind instance data attributes to layout location slots
+	VkVertexInputBindingDescription bindingDesc{};
+	bindingDesc.binding = 0;
+	bindingDesc.stride = sizeof(GrassInstance);
+	bindingDesc.inputRate = VK_VERTEX_INPUT_RATE_INSTANCE; // Progress per instance, not vertex!
+
+	std::array<VkVertexInputAttributeDescription, 4> attribs{};
+	attribs[0] = { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(GrassInstance, position) };
+	attribs[1] = { 1, 0, VK_FORMAT_R32_SFLOAT,       offsetof(GrassInstance, rotation) };
+	attribs[2] = { 2, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(GrassInstance, scale) };
+	attribs[3] = { 3, 0, VK_FORMAT_R32_SFLOAT,       offsetof(GrassInstance, windOffset) };
+
+	VkPipelineVertexInputStateCreateInfo vertexInput{};
+	vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+	vertexInput.vertexBindingDescriptionCount = 1;
+	vertexInput.pVertexBindingDescriptions = &bindingDesc;
+	vertexInput.vertexAttributeDescriptionCount = static_cast<uint32_t>(attribs.size());
+	vertexInput.pVertexAttributeDescriptions = attribs.data();
+
+	VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+	inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+	inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+	VkPipelineViewportStateCreateInfo viewportState{};
+	viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+	viewportState.viewportCount = 1;
+	viewportState.scissorCount = 1;
+
+	VkPipelineRasterizationStateCreateInfo rasterizer{};
+	rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+	rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+	rasterizer.lineWidth = 1.0f;
+	rasterizer.cullMode = VK_CULL_MODE_NONE; // IMPORTANT: Render both front/back faces of blade quads
+	rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+
+	VkPipelineMultisampleStateCreateInfo multisampling{};
+	multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+	multisampling.rasterizationSamples = m_currentMsaaSamples;
+	multisampling.sampleShadingEnable = VK_FALSE;
+	multisampling.alphaToCoverageEnable = VK_TRUE;
+	multisampling.alphaToOneEnable = VK_FALSE;
+
+	VkPipelineDepthStencilStateCreateInfo depthStencil{};
+	depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+	depthStencil.depthTestEnable = VK_TRUE;
+	depthStencil.depthWriteEnable = VK_TRUE; // Enable depth writing for crisp occlusion filtering
+	depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+
+	VkPipelineColorBlendAttachmentState blendAttachment{};
+	blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+	blendAttachment.blendEnable = VK_FALSE; // Alpha discard used, blending is false
+
+	VkPipelineColorBlendStateCreateInfo colorBlending{};
+	colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+	colorBlending.attachmentCount = 1;
+	colorBlending.pAttachments = &blendAttachment;
+
+	std::vector<VkDynamicState> dynamicStates = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+	VkPipelineDynamicStateCreateInfo dynamicState{};
+	dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+	dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+	dynamicState.pDynamicStates = dynamicStates.data();
+
+	VkPushConstantRange pushRange{};
+	pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+	pushRange.offset = 0;
+	pushRange.size = sizeof(GrassPushConstants);
+
+	VkPipelineLayoutCreateInfo layoutInfo{};
+	layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+	layoutInfo.setLayoutCount = 1;
+	layoutInfo.pSetLayouts = &descriptorSetLayout; // Re-use global descriptor layout containing UBO matrices
+	layoutInfo.pushConstantRangeCount = 1;
+	layoutInfo.pPushConstantRanges = &pushRange;
+
+	vkCreatePipelineLayout(logicalDevice, &layoutInfo, nullptr, &grassPipelineLayout);
+
+	VkGraphicsPipelineCreateInfo pipelineInfo{};
+	pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+	pipelineInfo.stageCount = 2;
+	pipelineInfo.pStages = stages;
+	pipelineInfo.pVertexInputState = &vertexInput;
+	pipelineInfo.pInputAssemblyState = &inputAssembly;
+	pipelineInfo.pViewportState = &viewportState;
+	pipelineInfo.pRasterizationState = &rasterizer;
+	pipelineInfo.pMultisampleState = &multisampling;
+	pipelineInfo.pDepthStencilState = &depthStencil;
+	pipelineInfo.pColorBlendState = &colorBlending;
+	pipelineInfo.pDynamicState = &dynamicState;
+	pipelineInfo.pMultisampleState = &multisampling;
+	pipelineInfo.layout = grassPipelineLayout;
+	pipelineInfo.renderPass = renderPass;
+
+	VkResult result = vkCreateGraphicsPipelines(logicalDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &grassPipeline);
+	assert(result == VK_SUCCESS);
+
+	vkDestroyShaderModule(logicalDevice, fragModule, nullptr);
+	vkDestroyShaderModule(logicalDevice, vertModule, nullptr);
+}
+void VulkanRenderer::AddGrass(int64_t key, const std::vector<GrassInstance>& grassInstances) {
+	if (grassInstances.empty()) return;
+
+	GrassChunkGPU grassChunk{};
+	grassChunk.instanceCount = static_cast<uint32_t>(grassInstances.size());
+
+	// ---- Compute tight bounding sphere ----
+	glm::vec3 minP(FLT_MAX), maxP(-FLT_MAX);
+	for (const auto& inst : grassInstances) {
+		glm::vec3 p = inst.position;               // make sure GrassInstance has a 'position' field
+		minP = glm::min(minP, p);
+		maxP = glm::max(maxP, p);
+	}
+	grassChunk.center = (minP + maxP) * 0.5f;
+	float r2 = 0.0f;
+	for (const auto& inst : grassInstances) {
+		float d2 = glm::length2(inst.position - grassChunk.center);
+		if (d2 > r2) r2 = d2;
+	}
+	grassChunk.radius = sqrt(r2) + 0.5f;
+
+	VkDeviceSize bufferSize = grassInstances.size() * sizeof(GrassInstance);
+
+	// Create staging buffer to push data up to GPU
+	VkBuffer stagingBuffer;
+	VkDeviceMemory stagingBufferMemory;
+	CreateBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+
+	void* data;
+	vkMapMemory(logicalDevice, stagingBufferMemory, 0, bufferSize, 0, &data);
+	memcpy(data, grassInstances.data(), bufferSize);
+	vkUnmapMemory(logicalDevice, stagingBufferMemory);
+
+	// Create High-Performance Device-Local Buffer for Instance Attribute inputs
+	CreateBuffer(bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, grassChunk.instanceBuffer, grassChunk.instanceMemory);
+
+	// Allocate an asynchronous transfer command buffer from the transient upload command pool
+	VkCommandBufferAllocateInfo allocInfo{};
+	allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+	allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	allocInfo.commandPool = uploadCommandPool;
+	allocInfo.commandBufferCount = 1;
+
+	VkCommandBuffer cb;
+	if (vkAllocateCommandBuffers(logicalDevice, &allocInfo, &cb) != VK_SUCCESS) {
+		throw std::runtime_error("Failed to allocate grass upload command buffer");
+	}
+
+	VkCommandBufferBeginInfo beginInfo{};
+	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	vkBeginCommandBuffer(cb, &beginInfo);
+
+	VkBufferCopy copyRegion{};
+	copyRegion.size = bufferSize;
+	vkCmdCopyBuffer(cb, stagingBuffer, grassChunk.instanceBuffer, 1, &copyRegion);
+
+	vkEndCommandBuffer(cb);
+
+	// Create the tracking fence
+	VkFenceCreateInfo fenceInfo{};
+	fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+	fenceInfo.flags = 0; // Starts unsignaled
+
+	VkFence uploadFence;
+	if (vkCreateFence(logicalDevice, &fenceInfo, nullptr, &uploadFence) != VK_SUCCESS) {
+		throw std::runtime_error("Failed to create grass upload fence");
+	}
+
+	// Immediately fire the submission over to the graphics queue without waiting on the main thread
+	VkSubmitInfo submitInfo{};
+	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	submitInfo.commandBufferCount = 1;
+	submitInfo.pCommandBuffers = &cb;
+
+	if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, uploadFence) != VK_SUCCESS) {
+		throw std::runtime_error("Failed to submit grass async transfer command queue");
+	}
+
+	// Flag any existing upload for this key that's still in flight as cancelled
+	for (auto& upload : pendingGrassUploads) {
+		if (upload.chunkKey == key) {
+			upload.cancelled = true;
+		}
+	}
+
+	// Push everything to the pending queue to be reaped inside DrawFrame() asynchronously
+	PendingGrassUpload pending{};
+	pending.fence = uploadFence;
+	pending.commandBuffer = cb;
+	pending.stagingBuffer = stagingBuffer;
+	pending.stagingMemory = stagingBufferMemory;
+	pending.chunkKey = key;
+	pending.grassChunk = grassChunk;
+
+	pendingGrassUploads.push_back(pending);
+}
+
 void VulkanRenderer::ApplySettings() {
 	bool needSwapchainRecreate = false;
 
@@ -2538,7 +2951,20 @@ void VulkanRenderer::ApplySettings() {
 		needSwapchainRecreate = true;
 	}
 
-	// Only check window size if not fullscreen (fullscreen size is handled by monitor)
+	if (g_Settings.msaaSamples != currentSettings.msaaSamples) {
+		// Clamp and convert
+		VkSampleCountFlagBits newSamples = IntToSampleCount(g_Settings.msaaSamples);
+		VkSampleCountFlagBits maxSupported = GetMaxUsableSampleCount();
+		if (static_cast<int>(newSamples) > static_cast<int>(maxSupported))
+			newSamples = maxSupported;
+
+		if (newSamples != m_currentMsaaSamples) {
+			m_currentMsaaSamples = newSamples;
+			currentSettings.msaaSamples = g_Settings.msaaSamples;
+			needSwapchainRecreate = true;
+		}
+	}
+
 	if (!g_Settings.fullscreen) {
 		int currentWidth, currentHeight;
 		glfwGetWindowSize(window, &currentWidth, &currentHeight);
@@ -2552,17 +2978,9 @@ void VulkanRenderer::ApplySettings() {
 		RecreateSwapChain();
 	}
 
-	if (g_Settings.wireframe != currentSettings.wireframe) {
-		RecreateGraphicsPipeline();
-		currentSettings.wireframe = g_Settings.wireframe;
-	}
-
 	currentSettings.anisotropicFiltering = g_Settings.anisotropicFiltering;
 	currentSettings.maxAnisotropy = g_Settings.maxAnisotropy;
 	currentSettings.renderDistance = g_Settings.renderDistance;
-	currentSettings.frustumCulling = g_Settings.frustumCulling;
-	currentSettings.showTerrain = g_Settings.showTerrain;
-	currentSettings.showModels = g_Settings.showModels;
 	currentSettings.showStats = g_Settings.showStats;
 }
 void VulkanRenderer::ToggleFullscreen() {
@@ -2584,6 +3002,55 @@ void VulkanRenderer::ToggleFullscreen() {
 		g_Settings.windowWidth = windowedWidth;
 		g_Settings.windowHeight = windowedHeight;
 	}
+}
+
+void VulkanRenderer::CreateSkyboxTexture() {
+	std::string base = "assets/skybox/";
+	m_skyboxTexture = g_AssetManager.LoadCubemapFromFaces(
+		base + "right.tga",
+		base + "left.tga",
+		base + "top.tga",
+		base + "bottom.tga",
+		base + "back.tga",
+		base + "front.tga"
+	);
+
+	if (m_skyboxTexture.imageView == VK_NULL_HANDLE) {
+		std::cerr << "[Skybox] Failed to load skybox faces.\n";
+	}
+}
+void VulkanRenderer::UpdateSkyboxDescriptor() {
+	if (descriptorSet == VK_NULL_HANDLE) return;
+
+	VkDescriptorImageInfo info{};
+	info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+	Texture& defaultTex = g_AssetManager.GetDefaultTexture();
+
+	if (m_skyboxTexture.imageView != VK_NULL_HANDLE && m_skyboxTexture.sampler != VK_NULL_HANDLE) {
+		info.imageView = m_skyboxTexture.imageView;
+		info.sampler = m_skyboxTexture.sampler;
+	}
+	else {
+		info.imageView = defaultTex.imageView;
+		info.sampler = defaultTex.sampler;
+	}
+
+	VkWriteDescriptorSet write{};
+	write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	write.dstSet = descriptorSet;
+	write.dstBinding = 4;
+	write.dstArrayElement = 0;
+	write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	write.descriptorCount = 1;
+	write.pImageInfo = &info;
+
+	vkUpdateDescriptorSets(logicalDevice, 1, &write, 0, nullptr);
+}
+
+void VulkanRenderer::SetFogParams(float start, float end) {
+	m_fogStart = start;
+	m_fogEnd = end;
 }
 
 void VulkanRenderer::DrawFrame() {
@@ -2610,6 +3077,59 @@ void VulkanRenderer::DrawFrame() {
 		}
 	}
 
+	for (auto it = m_pendingTerrainSpanReturns.begin(); it != m_pendingTerrainSpanReturns.end(); ) {
+		if (m_globalFrameCounter >= it->safeFrame) {
+			{
+				std::lock_guard<std::mutex> lock(terrainAllocMutex);
+				freeVertexSpans.push_back(it->vertexSpan);
+				freeIndexSpans.push_back(it->indexSpan);
+			}
+			it = m_pendingTerrainSpanReturns.erase(it);
+		}
+		else {
+			++it;
+		}
+	}
+
+	for (auto it = pendingGrassUploads.begin(); it != pendingGrassUploads.end(); ) {
+		VkResult status = vkGetFenceStatus(logicalDevice, it->fence);
+		if (status == VK_SUCCESS) {
+			// The transfer operation is officially complete on the GPU
+			if (!it->cancelled) {
+				// If it wasn't superseded by an LOD update or repair, we can safely swap or free old grass resources
+				auto oldGrassIt = m_grassChunks.find(it->chunkKey);
+				if (oldGrassIt != m_grassChunks.end()) {
+					// Queue old device buffers up for safe multi-buffered frame-delayed deletion 
+					// to ensure that no active in-flight rendering command buffers are sampling from them
+					PendingDeletion deletion{};
+					deletion.buffers = { oldGrassIt->second.instanceBuffer };
+					deletion.memories = { oldGrassIt->second.instanceMemory };
+					deletion.safeFrame = m_globalFrameCounter + MAX_FRAMES_IN_FLIGHT;
+					m_pendingDeletionsGlobal.push_back(deletion);
+				}
+
+				// Bind the completed buffer to the main rendering map
+				m_grassChunks[it->chunkKey] = it->grassChunk;
+			}
+			else {
+				// If the transfer was cancelled/superseded before it could finish, discard its device target buffers immediately
+				DestroyBuffer(it->grassChunk.instanceBuffer, it->grassChunk.instanceMemory);
+			}
+
+			// Cleanup staging buffer and transfer objects safely
+			DestroyBuffer(it->stagingBuffer, it->stagingMemory);
+			vkDestroyFence(logicalDevice, it->fence, nullptr);
+			vkFreeCommandBuffers(logicalDevice, uploadCommandPool, 1, &it->commandBuffer);
+
+			it = pendingGrassUploads.erase(it);
+		}
+		else if (status == VK_NOT_READY) {
+			++it; // Still executing on the GPU, pass to next loop iteration
+		}
+		else {
+			throw std::runtime_error("vkGetFenceStatus failed for grass upload");
+		}
+	}
 
 	DrawGUI();
 
@@ -2617,10 +3137,8 @@ void VulkanRenderer::DrawFrame() {
 
 	for (auto it = m_staleWaterQueue.begin(); it != m_staleWaterQueue.end(); ) {
 		if (it->safeFrameIndex == currentFrame) {
-			if (it->vertexBuffer != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, it->vertexBuffer, nullptr);
-			if (it->vertexMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, it->vertexMemory, nullptr);
-			if (it->indexBuffer != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, it->indexBuffer, nullptr);
-			if (it->indexMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, it->indexMemory, nullptr);
+			DestroyBuffer(it->vertexBuffer, it->vertexMemory);
+			DestroyBuffer(it->indexBuffer, it->indexMemory);
 			it = m_staleWaterQueue.erase(it);
 		}
 		else {
@@ -2632,21 +3150,40 @@ void VulkanRenderer::DrawFrame() {
 	for (auto it = pendingUploads.begin(); it != pendingUploads.end(); ) {
 		VkResult status = vkGetFenceStatus(logicalDevice, it->fence);
 		if (status == VK_SUCCESS) {
-			auto existingIt = terrainChunks.find(it->chunkKey);
-			if (existingIt != terrainChunks.end()) {
-				std::lock_guard<std::mutex> lock(terrainAllocMutex);
-				freeVertexSpans.push_back({ existingIt->second.vertexOffset, existingIt->second.vertexCount });
-				freeIndexSpans.push_back({ existingIt->second.indexOffset, existingIt->second.indexCount });
+			if (it->cancelled) {
+				// Chunk was removed while this upload was in flight. Don't
+				// resurrect it into terrainChunks — just reclaim the span
+				// and staging resources now that the GPU is actually done.
+				// Safe to free immediately: this span was never drawn from
+				// (the chunk never made it into terrainChunks).
+				{
+					std::lock_guard<std::mutex> lock(terrainAllocMutex);
+					freeVertexSpans.push_back({ it->chunk.vertexOffset, it->chunk.vertexCount });
+					freeIndexSpans.push_back({ it->chunk.indexOffset, it->chunk.indexCount });
+				}
+			}
+			else {
+				auto existingIt = terrainChunks.find(it->chunkKey);
+				if (existingIt != terrainChunks.end()) {
+					// This is an LOD-upgrade replace: the old chunk here
+					// WAS drawn, and frames up to MAX_FRAMES_IN_FLIGHT old
+					// may still be executing a draw against its span.
+					// Defer the return instead of freeing immediately.
+					PendingSpanReturn ret;
+					ret.vertexSpan = { existingIt->second.vertexOffset, existingIt->second.vertexCount };
+					ret.indexSpan = { existingIt->second.indexOffset, existingIt->second.indexCount };
+					ret.safeFrame = m_globalFrameCounter + MAX_FRAMES_IN_FLIGHT;
+					m_pendingTerrainSpanReturns.push_back(ret);
+				}
+
+				it->chunk.ready = true;
+				terrainChunks[it->chunkKey] = it->chunk;
 			}
 
-			it->chunk.ready = true;
-			terrainChunks[it->chunkKey] = it->chunk;
-
 			// Upload finished – destroy staging buffers and free command buffer
-			vkDestroyBuffer(logicalDevice, it->stagingVertexBuffer, nullptr);
-			vkFreeMemory(logicalDevice, it->stagingVertexMemory, nullptr);
-			vkDestroyBuffer(logicalDevice, it->stagingIndexBuffer, nullptr);
-			vkFreeMemory(logicalDevice, it->stagingIndexMemory, nullptr);
+			DestroyBuffer(it->stagingVertexBuffer, it->stagingVertexMemory);
+			DestroyBuffer(it->stagingIndexBuffer, it->stagingIndexMemory);
+
 			vkDestroyFence(logicalDevice, it->fence, nullptr);
 			vkFreeCommandBuffers(logicalDevice, uploadCommandPool, 1, &it->commandBuffer);
 			it = pendingUploads.erase(it);
@@ -2757,54 +3294,58 @@ void VulkanRenderer::DrawWater(VkCommandBuffer commandBuffer) {
 		drawCallCount++;
 	}
 }
+void VulkanRenderer::DrawGrass(VkCommandBuffer commandBuffer) {
+	if (m_grassChunks.empty()) return;
 
-void VulkanRenderer::CreateSkyboxTexture() {
-	std::string base = "assets/skybox/";
-	m_skyboxTexture = g_AssetManager.LoadCubemapFromFaces(
-		base + "right.tga",
-		base + "left.tga",
-		base + "top.tga",
-		base + "bottom.tga",
-		base + "back.tga",
-		base + "front.tga"
-	);
+	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, grassPipeline);
+	vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+		grassPipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
 
-	if (m_skyboxTexture.imageView == VK_NULL_HANDLE) {
-		std::cerr << "[Skybox] Failed to load skybox faces.\n";
+	static auto startTime = std::chrono::high_resolution_clock::now();
+	float time = std::chrono::duration<float>(
+		std::chrono::high_resolution_clock::now() - startTime).count();
+
+	for (const auto& [key, grassChunk] : m_grassChunks) {
+		// 1. Frustum & occlusion culling (keep your existing checks)
+		auto terrainIt = terrainChunks.find(key);
+		if (terrainIt != terrainChunks.end()) {
+			if (terrainIt->second.cachedOccluded ||
+				!IsSphereInFrustum(terrainIt->second.center, terrainIt->second.radius))
+				continue;
+		}
+
+		// 2. Compute distance and LOD for this chunk
+		float dist = glm::length(grassChunk.center - cameraPosition);
+
+		// Smooth transition range
+		float lodStart = 100.0f;   // where to begin reducing quality
+		float lodEnd = 250.0f;   // full simplification reached here
+
+		float lodFactor = std::clamp((dist - lodStart) / (lodEnd - lodStart), 0.0f, 1.0f);
+
+		// 3. Fill push constants with LOD
+		GrassPushConstants push{};
+		push.time = time;
+		push.textureId = 1;   // your grass texture index
+		push.windStrength = 2.0f;
+		push.windSpeed = 2.5f;
+		push.lodFactor = lodFactor;
+
+		vkCmdPushConstants(commandBuffer,
+			grassPipelineLayout,
+			VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+			0,
+			sizeof(GrassPushConstants),
+			&push);
+
+		// 4. Bind instance buffer and draw
+		VkBuffer buffers[] = { grassChunk.instanceBuffer };
+		VkDeviceSize offsets[] = { 0 };
+		vkCmdBindVertexBuffers(commandBuffer, 0, 1, buffers, offsets);
+
+		vkCmdDraw(commandBuffer, 24, grassChunk.instanceCount, 0, 0);
+		drawCallCount++;
 	}
-}
-void VulkanRenderer::UpdateSkyboxDescriptor() {
-	if (descriptorSet == VK_NULL_HANDLE) return;
-
-	VkDescriptorImageInfo info{};
-	info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-	Texture& defaultTex = g_AssetManager.GetDefaultTexture();
-
-	if (m_skyboxTexture.imageView != VK_NULL_HANDLE && m_skyboxTexture.sampler != VK_NULL_HANDLE) {
-		info.imageView = m_skyboxTexture.imageView;
-		info.sampler = m_skyboxTexture.sampler;
-	}
-	else {
-		info.imageView = defaultTex.imageView;
-		info.sampler = defaultTex.sampler;
-	}
-
-	VkWriteDescriptorSet write{};
-	write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	write.dstSet = descriptorSet;
-	write.dstBinding = 4;
-	write.dstArrayElement = 0;
-	write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	write.descriptorCount = 1;
-	write.pImageInfo = &info;
-
-	vkUpdateDescriptorSets(logicalDevice, 1, &write, 0, nullptr);
-}
-
-void VulkanRenderer::SetFogParams(float start, float end) {
-	m_fogStart = start;
-	m_fogEnd = end;
 }
 
 void VulkanRenderer::Cleanup() {
@@ -2825,18 +3366,13 @@ void VulkanRenderer::Cleanup() {
 	}
 
 	// 2. Clean up Swapchain and dependent resources
-	if (depthImageView != VK_NULL_HANDLE) {
-		vkDestroyImageView(logicalDevice, depthImageView, nullptr);
-		depthImageView = VK_NULL_HANDLE;
-	}
-	if (depthImage != VK_NULL_HANDLE) {
-		vkDestroyImage(logicalDevice, depthImage, nullptr);
-		depthImage = VK_NULL_HANDLE;
-	}
-	if (depthImageMemory != VK_NULL_HANDLE) {
-		vkFreeMemory(logicalDevice, depthImageMemory, nullptr);
-		depthImageMemory = VK_NULL_HANDLE;
-	}
+	if (colorImageView != VK_NULL_HANDLE) vkDestroyImageView(logicalDevice, colorImageView, nullptr);
+	if (colorImage != VK_NULL_HANDLE) vkDestroyImage(logicalDevice, colorImage, nullptr);
+	if (colorImageMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, colorImageMemory, nullptr);
+
+	if (depthImageView != VK_NULL_HANDLE) vkDestroyImageView(logicalDevice, depthImageView, nullptr);
+	if (depthImage != VK_NULL_HANDLE) vkDestroyImage(logicalDevice, depthImage, nullptr);
+	if (depthImageMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, depthImageMemory, nullptr);
 
 	for (auto framebuffer : swapChainFramebuffers) {
 		if (framebuffer != VK_NULL_HANDLE) {
@@ -2857,14 +3393,29 @@ void VulkanRenderer::Cleanup() {
 		swapChain = VK_NULL_HANDLE;
 	}
 
+	// Clean up grass
+	if (logicalDevice != VK_NULL_HANDLE) {
+		for (auto& [key, grassChunk] : m_grassChunks) {
+			DestroyBuffer(grassChunk.instanceBuffer, grassChunk.instanceMemory);
+		}
+		m_grassChunks.clear();
+
+		if (grassPipeline != VK_NULL_HANDLE) {
+			vkDestroyPipeline(logicalDevice, grassPipeline, nullptr);
+			grassPipeline = VK_NULL_HANDLE;
+		}
+		if (grassPipelineLayout != VK_NULL_HANDLE) {
+			vkDestroyPipelineLayout(logicalDevice, grassPipelineLayout, nullptr);
+			grassPipelineLayout = VK_NULL_HANDLE;
+		}
+	}
+
 	// 3. Process remaining pending uploads/deletions immediately
 	if (logicalDevice != VK_NULL_HANDLE) {
 		for (auto& upload : pendingUploads) {
 			if (upload.fence != VK_NULL_HANDLE) vkDestroyFence(logicalDevice, upload.fence, nullptr);
-			if (upload.stagingVertexBuffer != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, upload.stagingVertexBuffer, nullptr);
-			if (upload.stagingVertexMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, upload.stagingVertexMemory, nullptr);
-			if (upload.stagingIndexBuffer != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, upload.stagingIndexBuffer, nullptr);
-			if (upload.stagingIndexMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, upload.stagingIndexMemory, nullptr);
+			DestroyBuffer(upload.stagingVertexBuffer, upload.stagingVertexMemory);
+			DestroyBuffer(upload.stagingIndexBuffer, upload.stagingIndexMemory);
 		}
 		pendingUploads.clear();
 	}
@@ -2887,9 +3438,6 @@ void VulkanRenderer::Cleanup() {
 		if (waterVertModule != VK_NULL_HANDLE) vkDestroyShaderModule(logicalDevice, waterVertModule, nullptr);
 		if (waterFragModule != VK_NULL_HANDLE) vkDestroyShaderModule(logicalDevice, waterFragModule, nullptr);
 
-		// Pipeline cache
-		if (pipelineCache != VK_NULL_HANDLE) vkDestroyPipelineCache(logicalDevice, pipelineCache, nullptr);
-
 		if (renderPass != VK_NULL_HANDLE) {
 			vkDestroyRenderPass(logicalDevice, renderPass, nullptr);
 			renderPass = VK_NULL_HANDLE;
@@ -2899,19 +3447,15 @@ void VulkanRenderer::Cleanup() {
 	// 5. Clean up individual Water bodies that haven't been queued for deletion
 	if (logicalDevice != VK_NULL_HANDLE) {
 		for (auto& water : m_waterBodies) {
-			if (water.vertexBuffer != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, water.vertexBuffer, nullptr);
-			if (water.vertexMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, water.vertexMemory, nullptr);
-			if (water.indexBuffer != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, water.indexBuffer, nullptr);
-			if (water.indexMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, water.indexMemory, nullptr);
+			DestroyBuffer(water.vertexBuffer, water.vertexMemory);
+			DestroyBuffer(water.indexBuffer, water.indexMemory);
 		}
 		m_waterBodies.clear();
 
 		// Wipe out any stale water buffers that were left waiting in the queue
 		for (auto& stale : m_staleWaterQueue) {
-			if (stale.vertexBuffer != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, stale.vertexBuffer, nullptr);
-			if (stale.vertexMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, stale.vertexMemory, nullptr);
-			if (stale.indexBuffer != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, stale.indexBuffer, nullptr);
-			if (stale.indexMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, stale.indexMemory, nullptr);
+			DestroyBuffer(stale.vertexBuffer, stale.vertexMemory);
+			DestroyBuffer(stale.indexBuffer, stale.indexMemory);
 		}
 		m_staleWaterQueue.clear();
 	}
@@ -2938,25 +3482,19 @@ void VulkanRenderer::Cleanup() {
 	if (logicalDevice != VK_NULL_HANDLE) {
 		// Uniform Buffer
 		if (uniformBufferMapped != nullptr) vkUnmapMemory(logicalDevice, uniformBufferMemory);
-		if (uniformBuffer != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, uniformBuffer, nullptr);
-		if (uniformBufferMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, uniformBufferMemory, nullptr);
+		DestroyBuffer(uniformBuffer, uniformBufferMemory);
 
 		// Light Buffer
 		if (lightBufferMapped != nullptr) vkUnmapMemory(logicalDevice, lightBufferMemory);
-		if (lightBuffer != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, lightBuffer, nullptr);
-		if (lightBufferMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, lightBufferMemory, nullptr);
+		DestroyBuffer(lightBuffer, lightBufferMemory);
 
 		// Global Static Meshes Buffer
-		if (globalVertexBuffer != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, globalVertexBuffer, nullptr);
-		if (globalVertexBufferMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, globalVertexBufferMemory, nullptr);
-		if (globalIndexBuffer != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, globalIndexBuffer, nullptr);
-		if (globalIndexBufferMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, globalIndexBufferMemory, nullptr);
+		DestroyBuffer(globalVertexBuffer, globalVertexBufferMemory);
+		DestroyBuffer(globalIndexBuffer, globalIndexBufferMemory);
 
 		// Global Terrain Buffer
-		if (globalTerrainVertexBuffer != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, globalTerrainVertexBuffer, nullptr);
-		if (globalTerrainVertexMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, globalTerrainVertexMemory, nullptr);
-		if (globalTerrainIndexBuffer != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, globalTerrainIndexBuffer, nullptr);
-		if (globalTerrainIndexMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, globalTerrainIndexMemory, nullptr);
+		DestroyBuffer(globalTerrainVertexBuffer, globalTerrainVertexMemory);
+		DestroyBuffer(globalTerrainIndexBuffer, globalTerrainIndexMemory);
 
 		// Dynamic extra allocated terrain buffers
 		for (auto buf : m_allocatedTerrainBuffers) vkDestroyBuffer(logicalDevice, buf, nullptr);
@@ -2964,8 +3502,7 @@ void VulkanRenderer::Cleanup() {
 
 		// Persistent Staging Ring Buffer
 		if (m_stagingBufferMapped != nullptr) vkUnmapMemory(logicalDevice, m_globalStagingMemory);
-		if (m_globalStagingBuffer != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, m_globalStagingBuffer, nullptr);
-		if (m_globalStagingMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, m_globalStagingMemory, nullptr);
+		DestroyBuffer(m_globalStagingBuffer, m_globalStagingMemory);
 	}
 
 	// 8. Clean up Sync Objects (Semaphores & Fences)

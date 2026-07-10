@@ -185,6 +185,7 @@
     <ClInclude Include="chunk.h" />
     <ClInclude Include="FastNoiseLite.h" />
     <ClInclude Include="game.h" />
+    <ClInclude Include="gpu_instances.h" />
     <ClInclude Include="input.h" />
     <ClInclude Include="logger.h" />
     <ClInclude Include="mesh.h" />
@@ -199,6 +200,8 @@
     <ClInclude Include="tiny_obj_loader.h" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="shaders\grass.frag" />
+    <None Include="shaders\grass.vert" />
     <None Include="shaders\shader.frag" />
     <None Include="shaders\shader.vert" />
     <None Include="shaders\skybox.frag" />

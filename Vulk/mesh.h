@@ -120,7 +120,20 @@ public:
     static WaterMesh GenerateLake(const std::vector<glm::vec2>& footprintXZ, float waterHeight, float gridSpacing);
     static WaterMesh GenerateRiver(const std::vector<glm::vec3>& centerline, float width, int segmentsPerPoint = 1);
 
+    // Builds a lake mesh directly from a boolean "is this cell part of the
+    // lake" mask on a regular grid, instead of approximating the basin's
+    // footprint with a convex hull. A hull inflates concave/irregular basin
+    // shapes into a convex blob, which makes the water spill out over
+    // higher ground at the edges instead of hugging the actual depression.
+    // `cellMask` is width*height, row-major, true where that grid cell
+    // belongs to the lake. `originX/originZ` is the world position of
+    // mask cell (0,0), and `cellSize` is the spacing between mask cells.
+    static WaterMesh GenerateLakeFromMask(
+        const std::vector<bool>& cellMask,
+        int width, int height,
+        float originX, float originZ, float cellSize,
+        float waterHeight);
+
 private:
     static bool PointInPolygon(const glm::vec2& p, const std::vector<glm::vec2>& poly);
 };
-
