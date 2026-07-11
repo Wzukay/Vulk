@@ -17,16 +17,16 @@ void Chunk::Init(VulkanRenderer& renderer) {
     m_chunkSize = chunkSize;
 }
 
-static int64_t Key(int cx, int cz) {
-    return (static_cast<int64_t>(cx) << 32) | (static_cast<uint32_t>(cz));
-}
-static void Unkey(int64_t key, int& cx, int& cz) {
-    cx = static_cast<int32_t>(key >> 32);
-    cz = static_cast<int32_t>(key & 0xFFFFFFFF);
-}
-
 std::string ChunkName(int cx, int cz) {
     return "terrain_chunk_" + std::to_string(cx) + "_" + std::to_string(cz);
+}
+
+int Chunk::DesiredLodForDistance(float distance) const {
+    if (distance < chunkSize * 2.0f)  return 0;
+    if (distance < chunkSize * 4.0f)  return 1;
+    if (distance < chunkSize * 8.0f)  return 2;
+    if (distance < chunkSize * 16.0f) return 3;
+    return 4;
 }
 
 bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& renderer) {
@@ -35,20 +35,15 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
     {
         bool anyMismatch = false;
         for (auto const& [key, lod] : loadedChunks) {
-            int cx, cz; Unkey(key, cx, cz);
-            glm::vec3 center = ChunkBoundsCenter(cx, cz);
+            ChunkCoord coord = ChunkCoord::FromKey(key);
+            glm::vec3 center = ChunkBoundsCenter(coord.cx, coord.cz);
             float deltaX = center.x - camPos.x;
             float deltaY = center.y - camPos.y;
             float deltaZ = center.z - camPos.z;
             float distSq = deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ;
             float true3DDistance = std::sqrt(distSq);
 
-            int desiredLod = 0;
-            if (true3DDistance < chunkSize * 2.0f)      desiredLod = 0;
-            else if (true3DDistance < chunkSize * 4.0f)  desiredLod = 1;
-            else if (true3DDistance < chunkSize * 8.0f)  desiredLod = 2;
-            else if (true3DDistance < chunkSize * 16.0f) desiredLod = 3;
-            else                                         desiredLod = 4;
+            int desiredLod = DesiredLodForDistance(true3DDistance);
 
             if (lod > desiredLod) {
                 anyMismatch = true;
@@ -83,41 +78,42 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
     for (auto it = asyncResults.begin(); it != asyncResults.end(); ) {
         if (it->future.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
             ChunkJobResult result = it->future.get();
+            int64_t resultKey = result.coord.Key();
 
-            auto loadingIt = loadingChunks.find(result.key);
+            auto loadingIt = loadingChunks.find(resultKey);
             if (loadingIt == loadingChunks.end() || loadingIt->second != result.lod) {
                 m_bufferPool.Release({ std::move(result.vertices), std::move(result.indices) });
                 it = asyncResults.erase(it);
                 continue;
             }
 
-            if (loadedChunks.find(result.key) != loadedChunks.end()) {
-                scene.RemoveChunk(result.key);
+            if (loadedChunks.find(resultKey) != loadedChunks.end()) {
+                scene.RemoveChunk(resultKey);
             }
 
-            renderer.AddTerrainChunk(result.key, result.cx, result.cz, result.lod, result.vertices, result.indices);
-            renderer.AddGrass(result.key, result.grassInstances);
+            renderer.AddTerrainChunk(resultKey, result.coord.cx, result.coord.cz, result.lod, result.vertices, result.indices);
+            renderer.AddGrass(resultKey, result.grassInstances);
 
-            //if (result.hasWater) {
+            //if (result.waterMesh) {
             //    renderer.AddWaterBodyForChunk(
-            //        result.key,
-            //        result.waterMesh,
+            //        resultKey,
+            //        *result.waterMesh,
             //        "",
             //        8.0f,
             //        0.15f
             //    );
             //}
-            //if (result.hasRiver) {
-            //    for (auto& river : result.rivers) {
+            //if (result.rivers) {
+            //    for (auto& river : *result.rivers) {
             //        WaterMesh riverMesh = WaterMeshGen::GenerateRiver(river.path, river.width, 4);
             //        if (!riverMesh.indices.empty()) {
-            //            renderer.AddWaterBodyForChunk(result.key, riverMesh, "", 8.0f, 0.15f);
+            //            renderer.AddWaterBodyForChunk(resultKey, riverMesh, "", 8.0f, 0.15f);
             //        }
             //    }
             //}
 
-            loadedChunks[result.key] = result.lod;
-            loadingChunks.erase(result.key);
+            loadedChunks[resultKey] = result.lod;
+            loadingChunks.erase(resultKey);
             m_bufferPool.Release({ std::move(result.vertices), std::move(result.indices) });
             it = asyncResults.erase(it);
         }
@@ -148,12 +144,11 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
 
         for (int dz = -viewDistanceChunks; dz <= viewDistanceChunks; ++dz) {
             for (int dx = -viewDistanceChunks; dx <= viewDistanceChunks; ++dx) {
-                int cx = camChunkX + dx;
-                int cz = camChunkZ + dz;
-                int64_t k = Key(cx, cz);
+                ChunkCoord coord{ camChunkX + dx, camChunkZ + dz };
+                int64_t k = coord.Key();
                 m_desiredKeys.push_back(k);
                 m_desiredKeysLookup.insert(k);
-                m_desiredList.emplace_back(k, std::make_pair(cx, cz));
+                m_desiredList.emplace_back(k, std::make_pair(coord.cx, coord.cz));
             }
         }
 
@@ -171,8 +166,9 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
             processedCount++;
 
             int64_t key = item.first;
-            int cx = item.second.first;
-            int cz = item.second.second;
+            ChunkCoord coord{ item.second.first, item.second.second };
+            int cx = coord.cx;
+            int cz = coord.cz;
 
             int dx = cx - camChunkX;
             int dz = cz - camChunkZ;
@@ -184,12 +180,7 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
             float distSq = deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ;
             float true3DDistance = std::sqrt(distSq);
 
-            int desiredLod = 0;
-            if (true3DDistance < chunkSize * 2.0f)      desiredLod = 0;
-            else if (true3DDistance < chunkSize * 4.0f)  desiredLod = 1;
-            else if (true3DDistance < chunkSize * 8.0f)  desiredLod = 2;
-            else if (true3DDistance < chunkSize * 16.0f) desiredLod = 3;
-            else                                         desiredLod = 4;
+            int desiredLod = DesiredLodForDistance(true3DDistance);
 
             int divisor = 1 << desiredLod;
             int targetResolution = ((resolution - 1) / divisor) + 1;
@@ -205,7 +196,7 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
 
             bool isImmediateRing = (std::abs(dx) <= immediateViewChunks && std::abs(dz) <= immediateViewChunks);
             if (isImmediateRing) {
-                chunksToLoadThisFrame.push_back({ cx, cz, key, distSq, desiredLod, targetResolution, true });
+                chunksToLoadThisFrame.push_back({ coord, distSq, desiredLod, targetResolution, true });
             }
             else {
                 float radius = ChunkBoundsRadius();
@@ -214,7 +205,7 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
                 if (!isInCloseRangeCircle && !renderer.IsWorldSphereInFrustum(center, radius))
                     continue;
 
-                chunksToLoadThisFrame.push_back({ cx, cz, key, distSq, desiredLod, targetResolution, false });
+                chunksToLoadThisFrame.push_back({ coord, distSq, desiredLod, targetResolution, false });
             }
         }
 
@@ -226,27 +217,26 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
                 [](const ChunkSortItem& a, const ChunkSortItem& b) { return a.distanceSq < b.distanceSq; });
 
             auto dispatchChunk = [&](const ChunkSortItem& item) {
-                if (loadingChunks.find(item.key) != loadingChunks.end()) {
+                int64_t itemKey = item.coord.Key();
+                if (loadingChunks.find(itemKey) != loadingChunks.end()) {
                     for (auto& activeJob : asyncResults) {
-                        if (activeJob.key == item.key) {
+                        if (activeJob.key == itemKey) {
                             activeJob.cancelToken->store(true, std::memory_order_relaxed);
                         }
                     }
                 }
 
-                loadingChunks[item.key] = item.desiredLod;
-                int cx = item.cx; int cz = item.cz; int res = item.targetResolution;
+                loadingChunks[itemKey] = item.desiredLod;
+                int cx = item.coord.cx; int cz = item.coord.cz; int res = item.targetResolution;
                 float size = chunkSize;
-                int64_t k = item.key;
+                int64_t k = itemKey;
                 int lod = item.desiredLod;
 
                 auto cancelToken = std::make_shared<std::atomic<bool>>(false);
 
                 auto future = threadPool.Enqueue([cx, cz, res, size, k, lod, cancelToken, this]() {
                     ChunkJobResult jobData;
-                    jobData.cx = cx;
-                    jobData.cz = cz;
-                    jobData.key = k;
+                    jobData.coord = ChunkCoord{ cx, cz };
                     jobData.lod = lod;
 
                     // Acquire pooled buffers (reuses heap capacity)
@@ -259,7 +249,7 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
                     return jobData;
                     });
 
-                asyncResults.push_back({ std::move(future), cancelToken, item.key });
+                asyncResults.push_back({ std::move(future), cancelToken, itemKey });
                 };
 
             size_t distantDispatched = 0;
@@ -293,10 +283,9 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
 
     int preGenRadius = viewDistanceChunks + 2;
     for (auto it = loadingChunks.begin(); it != loadingChunks.end(); ) {
-        int cx, cz;
-        Unkey(it->first, cx, cz);
-        int dx = std::abs(cx - camChunkX);
-        int dz = std::abs(cz - camChunkZ);
+        ChunkCoord coord = ChunkCoord::FromKey(it->first);
+        int dx = std::abs(coord.cx - camChunkX);
+        int dz = std::abs(coord.cz - camChunkZ);
         if (dx > preGenRadius || dz > preGenRadius) {
             int64_t keyToCancel = it->first;
             for (auto& job : asyncResults) {
@@ -335,7 +324,7 @@ void Chunk::PreGenerateChunks(const glm::vec3& camPos, Scene& scene, VulkanRende
 
             int cx = camChunkX + dx;
             int cz = camChunkZ + dz;
-            int64_t key = Key(cx, cz);
+            int64_t key = ChunkCoord{ cx, cz }.Key();
 
             if (m_desiredKeysLookup.find(key) != m_desiredKeysLookup.end()) continue;
 
@@ -372,9 +361,7 @@ void Chunk::PreGenerateChunks(const glm::vec3& camPos, Scene& scene, VulkanRende
 
             auto future = threadPool.Enqueue([cx, cz, targetResolution, size, key, desiredLod, cancelToken, this]() {
                 ChunkJobResult jobData;
-                jobData.cx = cx;
-                jobData.cz = cz;
-                jobData.key = key;
+                jobData.coord = ChunkCoord{ cx, cz };
                 jobData.lod = desiredLod;
 
                 PooledMeshBuffers buffers = m_bufferPool.Acquire();
@@ -504,11 +491,8 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
     outResult.vertices.clear();
     outResult.indices.clear();
     outResult.grassInstances.clear();
-    outResult.hasWater = false;
-    outResult.waterMesh.vertices.clear();
-    outResult.waterMesh.indices.clear();
-    outResult.hasRiver = false;
-    outResult.rivers.clear();
+    outResult.waterMesh.reset();
+    outResult.rivers.reset();
 
     outResult.vertices.reserve(resolution * resolution + (resolution - 1) * 8);
     outResult.indices.reserve(((resolution - 1) * (resolution - 1) * 6) + ((resolution - 1) * 4 * 6));
@@ -663,21 +647,20 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
     outResult.vertices = std::move(rearrangedVertices);
 
     int stride = 1;
-    int bladesPerVertex = 4; // Reduced baseline from 6 to 4 (Cross-quads are already thick)
+    int bladesPerVertex = 2; // Reduced baseline from 6 to 4 (Cross-quads are already thick)
     float widthMultiplier = 1;
 
-    if (outResult.lod == 1) {
-        stride = 5;
-        bladesPerVertex = 2;       // 50% fewer instances...
-        widthMultiplier = 2;    // ...but 50% wider
+    if (outResult.lod > 0) {
+        stride = 5 * outResult.lod;
+        bladesPerVertex = 1;
+        widthMultiplier = outResult.lod;
     }
-    else if (outResult.lod >= 2) {
-        stride = 10;
-        bladesPerVertex = 1;       // 75% fewer instances...
-        widthMultiplier = 3;    // ...but massive width to fake a distant field
+    else if (outResult.lod > 5) {
+        outResult.grassInstances.clear();
+        return;
     }
 
-    const float JITTER_RADIUS = 4.5f;
+    const float JITTER_RADIUS = 6;
 
     outResult.grassInstances.reserve((outResult.vertices.size() / stride) * bladesPerVertex);
 
@@ -692,7 +675,7 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
         const auto& v = outResult.vertices[i];
 
         // Only grow grass on flat terrain (check normal) and above water height
-        if (v.normal.y > 0.8f && v.pos.y > -5.0f && v.color.y >= 0.8f) {
+        if (v.normal.y > 0.5f && v.pos.y > -5.0f && v.color.y >= 0.8f) {
             for (int n = 0; n < bladesPerVertex; n++) {
                 GrassInstance inst;
 
@@ -821,10 +804,10 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
     //    );
 
     //    if (!lakeMesh.indices.empty()) {
-    //        outResult.hasWater = true;
-    //        uint32_t vOffset = (uint32_t)outResult.waterMesh.vertices.size();
-    //        outResult.waterMesh.vertices.insert(outResult.waterMesh.vertices.end(), lakeMesh.vertices.begin(), lakeMesh.vertices.end());
-    //        for (auto idx : lakeMesh.indices) outResult.waterMesh.indices.push_back(idx + vOffset);
+    //        if (!outResult.waterMesh) outResult.waterMesh = WaterMesh{};
+    //        uint32_t vOffset = (uint32_t)outResult.waterMesh->vertices.size();
+    //        outResult.waterMesh->vertices.insert(outResult.waterMesh->vertices.end(), lakeMesh.vertices.begin(), lakeMesh.vertices.end());
+    //        for (auto idx : lakeMesh.indices) outResult.waterMesh->indices.push_back(idx + vOffset);
     //    }
     //}
 
@@ -903,7 +886,6 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
     //}
 
     //if (!rivers.empty()) {
-    //    outResult.hasRiver = true;
     //    outResult.rivers = std::move(rivers);
     //}
 }

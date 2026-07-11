@@ -1,0 +1,111 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+struct ChunkData {
+    vec2 origin;
+    float chunkSize;
+    int lod;
+};
+
+struct GrassInstance {
+    vec3 position;
+    float rotation;
+    vec3 scale;
+    float windOffset;
+};
+
+struct DrawIndirectCommand {
+    uint vertexCount;
+    uint instanceCount;
+    uint firstVertex;
+    uint firstInstance;
+};
+
+layout(std140, binding = 0) uniform UniformBufferObject {
+    mat4 view;
+    mat4 proj;
+    mat4 inverseViewProj;
+    mat4 inverseProj;
+    mat4 inverseView;
+    vec3 cameraPos;
+    float fogStart;
+    float fogEnd;
+    vec2 screenSize;
+    float ambient;
+    float specularPower;
+    uint lightCount;
+} ubo;
+
+layout(std430, binding = 1) readonly buffer ChunkBuffer {
+    ChunkData chunks[];
+};
+
+layout(std430, binding = 2) writeonly buffer InstanceBuffer {
+    GrassInstance culledInstances[];
+};
+
+layout(std430, binding = 3) buffer IndirectBuffer {
+    DrawIndirectCommand cmd;
+};
+
+// Fast GPU Hash for procedural jittering and rotation
+float Hash(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+
+// Simple noise approximation matching your terrain base curves
+float GetTerrainHeight(vec2 worldPos) {
+    // Replace with a heightmap texture sampler if you bake terrain to textures,
+    // or evaluate your Simplex/FBm noise equation here.
+    return 0.0; 
+}
+
+void main() {
+    uint chunkIdx = gl_WorkGroupID.z;
+    ChunkData chunk = chunks[chunkIdx];
+
+    // Only generate grass on LOD 0 and LOD 1 chunks
+    if (chunk.lod > 1) return;
+
+    uint x = gl_GlobalInvocationID.x;
+    uint z = gl_GlobalInvocationID.y;
+    uint resolution = 65; // Match terrain grid resolution
+
+    if (x >= resolution || z >= resolution) return;
+
+    float stepSize = chunk.chunkSize / float(resolution - 1);
+    vec2 basePos = chunk.origin + vec2(x * stepSize, z * stepSize);
+
+    // Procedural Jitter within the cell
+    float jitterX = (Hash(basePos) - 0.5) * stepSize * 0.8;
+    float jitterZ = (Hash(basePos + vec2(13.1, 47.3)) - 0.5) * stepSize * 0.8;
+    vec2 worldXZ = basePos + vec2(jitterX, jitterZ);
+
+    float height = GetTerrainHeight(worldXZ);
+    vec3 worldPos = vec3(worldXZ.x, height, worldXZ.y);
+
+    // Distance Culling
+    float dist = distance(worldPos, ubo.cameraPos);
+    if (dist > 600.0) return;
+
+    // LOD Density Thinning: Skip every other blade beyond 300 meters
+    if (dist > 300.0 && (x % 2 == 0 || z % 2 == 0)) return;
+
+    // Append to GPU Storage Buffer via Atomic Increment
+    uint outIndex = atomicAdd(cmd.instanceCount, 1);
+
+    GrassInstance inst;
+    inst.position = worldPos;
+    inst.rotation = Hash(worldXZ * 2.0) * 6.2831853;
+    
+    float randVal = Hash(worldXZ * 3.0);
+    float bladeHeight = 2.0 + (randVal * 1.0);
+    float baseWidth = 0.25 + (randVal * 0.15);
+    inst.scale = vec3(baseWidth, bladeHeight, baseWidth);
+    inst.windOffset = Hash(worldXZ * 4.0) * 50.0;
+
+    culledInstances[outIndex] = inst;
+}

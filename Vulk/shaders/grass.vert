@@ -33,27 +33,22 @@ layout(location = 1) out vec3 outWorldPos;
 layout(location = 2) out vec3 outNormal;
 layout(location = 3) out float outBladeRand;
 
-// ---- 24‑vertex subdivided blade (2 segments) ----
-const vec3 VERT_POSITIONS[24] = vec3[](
-    vec3(-0.5, 0.0, 0.0), vec3( 0.5, 0.0, 0.0), vec3(-0.5, 0.5, 0.0),
-    vec3( 0.5, 0.0, 0.0), vec3( 0.5, 0.5, 0.0), vec3(-0.5, 0.5, 0.0),
-    vec3(-0.5, 0.5, 0.0), vec3( 0.5, 0.5, 0.0), vec3(-0.5, 1.0, 0.0),
-    vec3( 0.5, 0.5, 0.0), vec3( 0.5, 1.0, 0.0), vec3(-0.5, 1.0, 0.0),
-    vec3(0.0, 0.0, -0.5), vec3(0.0, 0.0,  0.5), vec3(0.0, 0.5, -0.5),
-    vec3(0.0, 0.0,  0.5), vec3(0.0, 0.5,  0.5), vec3(0.0, 0.5, -0.5),
-    vec3(0.0, 0.5, -0.5), vec3(0.0, 0.5,  0.5), vec3(0.0, 1.0, -0.5),
-    vec3(0.0, 0.5,  0.5), vec3(0.0, 1.0,  0.5), vec3(0.0, 1.0, -0.5)
+const vec3 VERT_POSITIONS[12] = vec3[12](
+    // Front‑back quad (6 vertices)
+    vec3(-0.5, 0.0, 0.0), vec3( 0.5, 0.0, 0.0), vec3( 0.5, 1.0, 0.0),
+    vec3(-0.5, 0.0, 0.0), vec3( 0.5, 1.0, 0.0), vec3(-0.5, 1.0, 0.0),
+    // Left‑right quad (6 vertices)
+    vec3(0.0, 0.0, -0.5), vec3(0.0, 0.0,  0.5), vec3(0.0, 1.0,  0.5),
+    vec3(0.0, 0.0, -0.5), vec3(0.0, 1.0,  0.5), vec3(0.0, 1.0, -0.5)
 );
 
-const vec2 VERT_UVS[24] = vec2[](
-    vec2(0.0, 1.0), vec2(1.0, 1.0), vec2(0.0, 0.5),
-    vec2(1.0, 1.0), vec2(1.0, 0.5), vec2(0.0, 0.5),
-    vec2(0.0, 0.5), vec2(1.0, 0.5), vec2(0.0, 0.0),
-    vec2(1.0, 0.5), vec2(1.0, 0.0), vec2(0.0, 0.0),
-    vec2(0.0, 1.0), vec2(1.0, 1.0), vec2(0.0, 0.5),
-    vec2(1.0, 1.0), vec2(1.0, 0.5), vec2(0.0, 0.5),
-    vec2(0.0, 0.5), vec2(1.0, 0.5), vec2(0.0, 0.0),
-    vec2(1.0, 0.5), vec2(1.0, 0.0), vec2(0.0, 0.0)
+const vec2 VERT_UVS[12] = vec2[12](
+    // Front‑back quad (6 UVs)
+    vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(1.0, 1.0),
+    vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 1.0),
+    // Left‑right quad (6 UVs)
+    vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(1.0, 1.0),
+    vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 1.0)
 );
 
 void main() {
@@ -110,12 +105,12 @@ void main() {
     // ---- Gust envelope ----
     float gustTime = push.time * 0.15 + inInstancePos.x * 0.005 + inInstancePos.z * 0.007;
     float gust = sin(gustTime) * 0.5 + 0.5;
-    gust = gust * 0.4 + 0.8;          // 0.8..1.2
+    gust = gust * 0.4 + 0.8;
     float finalWindStrength = push.windStrength * gust;
 
     // Per‑blade wind multiplier
     float windMultiplier = 0.7 + 0.6 * bladeRand;
-    float windScale = 1.0 - push.lodFactor * 0.8;
+    float windScale = 1.0 - push.lodFactor;
 
     rotatedPos.x += totalWave * finalWindStrength * windScale * bendFactor * windMultiplier;
     rotatedPos.z += totalWave * finalWindStrength * 0.4  * windScale * bendFactor * windMultiplier;

@@ -13,10 +13,14 @@
 #include <atomic>
 #include <algorithm>
 #include <queue>
+#include <optional>
 
 #include "assetManager.h"
 #include "scene.h"
+
 #include "renderer.h"
+#include "renderer_grass.h"
+
 #include "threadPool.h"
 #include "mesh.h"
 #include "FastNoiseLite.h"
@@ -38,16 +42,23 @@ struct BiomeProperties {
 };
 
 inline BiomeProperties GetBiomeProperties(BiomeType type) {
-    switch (type) {
-        // Smooth transition from flat lowlands to high alpine peaks
-    case BiomeType::Plains:         return { 20.0f,  1.0f, glm::vec3(0.0f, 1.0f, 0.0f) };
-    case BiomeType::TallPlains:     return { 40.0f,  1.1f, glm::vec3(0.0f, 0.8f, 0.2f) };
-    case BiomeType::Foothills:      return { 80.0f,  1.3f, glm::vec3(0.0f, 0.5f, 0.5f) };
-    case BiomeType::LowMountain:    return { 100.0f, 1.6f, glm::vec3(0.4f, 0.f, 0.6f) };
-    case BiomeType::MediumMountain: return { 150.0f, 2.0f, glm::vec3(0.2f, 0.0f, 0.8f) };
-    case BiomeType::HighMountain:   return { 200.0f, 2.5f, glm::vec3(0.0f, 0.0f, 1.0f) };
-    }
-    return { 40.0f, 1.0f, glm::vec3(0.0f, 1.0f, 0.0f) };
+    // Indexed by BiomeType. The old switch had a silent fallback to a
+    // default BiomeProperties for any unhandled case — which meant adding a
+    // new BiomeType without a matching case would compile fine and just
+    // quietly return wrong values. The static_assert below turns that into
+    // a compile error instead.
+    static const BiomeProperties table[] = {
+        { 20.0f,  1.0f, glm::vec3(0.0f, 1.0f, 0.0f) }, // Plains: flat lowlands
+        { 40.0f,  1.1f, glm::vec3(0.0f, 0.8f, 0.2f) }, // TallPlains
+        { 80.0f,  1.3f, glm::vec3(0.0f, 0.5f, 0.5f) }, // Foothills
+        { 100.0f, 1.6f, glm::vec3(0.4f, 0.0f, 0.6f) }, // LowMountain
+        { 150.0f, 2.0f, glm::vec3(0.2f, 0.0f, 0.8f) }, // MediumMountain
+        { 200.0f, 2.5f, glm::vec3(0.0f, 0.0f, 1.0f) }, // HighMountain: alpine peaks
+    };
+    static_assert(sizeof(table) / sizeof(table[0]) == static_cast<size_t>(BiomeType::HighMountain) + 1,
+        "GetBiomeProperties table must have exactly one entry per BiomeType, in enum order");
+
+    return table[static_cast<size_t>(type)];
 }
 
 inline BiomeType DetermineBiome(float temperature, float moisture) {
@@ -76,6 +87,26 @@ inline BiomeType DetermineBiome(float temperature, float moisture) {
     return BiomeType::TallPlains;
 }
 
+// A chunk's grid coordinate. Replaces the (cx, cz, key) triple that used to
+// be stored separately — and could drift out of sync — in ChunkJobResult,
+// ChunkSortItem, and the ad-hoc Key()/Unkey() free functions in chunk.cpp.
+// key is always derivable from (cx, cz), so there's only one source of
+// truth now.
+struct ChunkCoord {
+    int cx = 0;
+    int cz = 0;
+
+    int64_t Key() const {
+        return (static_cast<int64_t>(cx) << 32) | static_cast<uint32_t>(cz);
+    }
+    static ChunkCoord FromKey(int64_t key) {
+        return { static_cast<int32_t>(key >> 32), static_cast<int32_t>(key & 0xFFFFFFFF) };
+    }
+    bool operator==(const ChunkCoord& other) const {
+        return cx == other.cx && cz == other.cz;
+    }
+};
+
 struct TerrainSample
 {
     float height;
@@ -88,34 +119,31 @@ struct RiverSegment {
 };
 
 struct ChunkJobResult {
-    int cx = 0, cz = 0;
-    int64_t key = 0;
+    ChunkCoord coord;
     std::vector<ModelVertex> vertices;
     std::vector<uint32_t> indices;
     int lod;
 
     std::vector<GrassInstance> grassInstances;
 
-    bool hasWater = false;
-    WaterMesh waterMesh;
-
-    bool hasRiver = false;
-    std::vector<RiverSegment> rivers;
+    // Present only if this chunk actually generated water/rivers — replaces
+    // the old hasWater/waterMesh and hasRiver/rivers bool+data pairs, so
+    // there's no separate flag that can fall out of sync with the data.
+    std::optional<WaterMesh> waterMesh;
+    std::optional<std::vector<RiverSegment>> rivers;
+};
+struct ChunkSortItem {
+    ChunkCoord coord;
+    float distanceSq;
+    int desiredLod;
+    int targetResolution;
+    bool isImmediate;
 };
 
 struct ActiveJob {
     std::future<ChunkJobResult> future;
     std::shared_ptr<std::atomic<bool>> cancelToken;
     int64_t key;
-};
-
-struct ChunkSortItem {
-    int cx, cz;
-    int64_t key;
-    float distanceSq;
-    int desiredLod;
-    int targetResolution;
-    bool isImmediate;
 };
 
 struct PooledMeshBuffers {
@@ -168,7 +196,6 @@ public:
 
 private:
     bool m_shuttingDown = false;
-    bool batch = false;
     const float MOVE_THRESHOLD = 64.0f;       // Trigger if moved more than 16 meters (e.g., 1/8th of a chunk)
     const float ROTATE_THRESHOLD = 0.965f;
 
@@ -194,9 +221,6 @@ private:
     glm::vec3 m_lastPreGenCamPos = glm::vec3(std::numeric_limits<float>::max());
     glm::vec3 m_lastPreGenCamForward = glm::vec3(0.0f);
 
-    std::chrono::steady_clock::time_point firstChunkReadyTime;
-    std::chrono::steady_clock::time_point lastChunkReadyTime;
-
     void UpdateFogParamsBasedOnData(VulkanRenderer& renderer);
     glm::vec3 ChunkBoundsCenter(int cx, int cz) const;
     bool HasCameraShiftedNoticeably(const glm::vec3& camPos, const glm::vec3& camForward);
@@ -206,7 +230,12 @@ private:
         std::shared_ptr<std::atomic<bool>> cancelToken = nullptr);
     static std::vector<glm::vec2> ConvexHull(std::vector<glm::vec2> points);
     static std::pair<float, glm::vec3> CalculateHeightAndColor(float worldX, float worldZ);
-	float GetChunkSize() const { return chunkSize; }
+
+    // Single source of truth for the distance->LOD bucketing used both when
+    // detecting stale-LOD chunks and when deciding what to dispatch. Was
+    // previously duplicated inline in both places with identical thresholds
+    // that could silently drift apart.
+    int DesiredLodForDistance(float distance) const;
 
 public:
     static float GetHeight(float worldX, float worldZ);

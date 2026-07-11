@@ -14,6 +14,12 @@ private:
 
     mutable bool hasModifiedLights = false;
 
+    template <typename Predicate>
+    void EraseInstancesIf(Predicate pred)
+    {
+        instances.erase(std::remove_if(instances.begin(), instances.end(), pred), instances.end());
+    }
+
 public:
     void AddInstance(
         const std::string& meshName,
@@ -31,22 +37,7 @@ public:
 
     void RemoveChunk(int64_t key)
     {
-        instances.erase(
-            std::remove_if(
-                instances.begin(),
-                instances.end(),
-                [&](const MeshInstance& inst)
-                {
-                    return inst.chunkKey == key;
-                }),
-            instances.end());
-    }
-
-    void RemoveInstance(const std::string& meshName) { // NEW
-        instances.erase(
-            std::remove_if(instances.begin(), instances.end(),
-                [&](const MeshInstance& inst) { return inst.meshName == meshName; }),
-            instances.end());
+        EraseInstancesIf([&](const MeshInstance& inst) { return inst.chunkKey == key; });
     }
 
     void AddLight(const SceneLight& light) { lights.push_back(light); hasModifiedLights = true; }

@@ -197,27 +197,30 @@ std::vector<char> VulkanRenderer::ReadFile(const std::string& filename) {
 
 	return buffer;
 }
-VkShaderModule VulkanRenderer::CreateShaderModule(const std::vector<char>& code) {
+VkShaderModule VulkanRenderer::CreateShaderModule(VkDevice device, const std::vector<char>& code) {
+	// same as before, but now takes device as parameter
 	VkShaderModuleCreateInfo createInfo{};
 	createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
 	createInfo.codeSize = code.size();
-
-	// Vulkan expects the bytecode pointer to be typed as uint32_t words rather than raw chars
 	createInfo.pCode = reinterpret_cast<const uint32_t*>(code.data());
 
 	VkShaderModule shaderModule;
-	if (vkCreateShaderModule(logicalDevice, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
+	if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
 		throw std::runtime_error("Critical Failure: Failed to map graphics shader module bytecode allocation.");
 	}
-
 	return shaderModule;
 }
 uint32_t VulkanRenderer::FindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {
+	uint64_t key = (static_cast<uint64_t>(typeFilter) << 32) | properties;
+	auto it = m_memoryTypeCache.find(key);
+	if (it != m_memoryTypeCache.end()) return it->second;
+
 	VkPhysicalDeviceMemoryProperties memProperties;
 	vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
 
 	for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
 		if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+			m_memoryTypeCache[key] = i;
 			return i;
 		}
 	}
@@ -259,7 +262,9 @@ VkSampleCountFlagBits VulkanRenderer::GetMaxUsableSampleCount() {
 	if (counts & m_currentMsaaSamples)  return m_currentMsaaSamples;
 	return VK_SAMPLE_COUNT_1_BIT;
 }
-
+void VulkanRenderer::DeferBufferDeletion(BufferDeletion&& del) {
+	m_pendingDeletionsGlobal.Push(std::move(del), m_globalFrameCounter + MAX_FRAMES_IN_FLIGHT);
+}
 VkSampleCountFlagBits VulkanRenderer::IntToSampleCount(int samples) {
 	switch (samples) {
 	case 1:  return VK_SAMPLE_COUNT_1_BIT;
@@ -332,6 +337,8 @@ void VulkanRenderer::InitVulkan() {
 	CreateCommandBuffers();
 	CreateSyncObjects();
 
+	m_uploader.Init(this, 32 * 1024 * 1024);
+
 	CreateDescriptorSetLayout();
 
 	CreateUniformBuffer();
@@ -339,10 +346,7 @@ void VulkanRenderer::InitVulkan() {
 
 	CreateDescriptorPool();
 	CreateDescriptorSet();
-
-	CreateGlobalBuffers();
 	CreateImGui();
-	CreateTerrainBuffers();
 
 	g_AssetManager.SetRenderer(this);
 	g_AssetManager.SetDescriptorSet(descriptorSet);
@@ -351,13 +355,17 @@ void VulkanRenderer::InitVulkan() {
 
 	CreateGraphicsPipeline();
 
-	CreateSkyboxTexture();
-	UpdateSkyboxDescriptor();
-	CreateSkyboxPipeline();
+	m_staticMeshRenderer.Init(logicalDevice, this);
 
-	CreateGrassPipeline();
+	m_skybox.Init(logicalDevice, renderPass, descriptorSetLayout, m_currentMsaaSamples);
+	m_skybox.LoadTexture();
+	m_skybox.UpdateDescriptor(logicalDevice, descriptorSet);
 
-	CreateWaterPipeline();
+	m_waterRenderer.Init(logicalDevice, renderPass, descriptorSetLayout, m_currentMsaaSamples, this);
+
+	m_terrainRenderer.Init(logicalDevice, this, &m_uploader, 5'000'000, 10'000'000);
+
+	m_grassRenderer.Init(logicalDevice, this, &m_uploader, renderPass, descriptorSetLayout, m_currentMsaaSamples);
 
 	currentSettings = g_Settings;
 }
@@ -770,14 +778,6 @@ void VulkanRenderer::CreateCommandPool() {
 	if (vkCreateCommandPool(logicalDevice, &poolInfo, nullptr, &commandPool) != VK_SUCCESS) {
 		throw std::runtime_error("Failed to create command pool");
 	}
-
-	VkCommandPoolCreateInfo uploadPoolInfo{};
-	uploadPoolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-	uploadPoolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
-	uploadPoolInfo.queueFamilyIndex = queueFamilyIndices.graphicsFamily.value();
-	if (vkCreateCommandPool(logicalDevice, &uploadPoolInfo, nullptr, &uploadCommandPool) != VK_SUCCESS) {
-		throw std::runtime_error("Failed to create upload command pool");
-	}
 }
 void VulkanRenderer::CreateCommandBuffers() {
 	commandBuffers.resize(swapChainFramebuffers.size());
@@ -815,19 +815,62 @@ void VulkanRenderer::CreateSyncObjects() {
 		}
 	}
 }
-void VulkanRenderer::CreateGlobalBuffers() {
-	VkDeviceSize vertexBufferSize = sizeof(ModelVertex) * MAX_GLOBAL_VERTICES;
-	VkDeviceSize indexBufferSize = sizeof(uint32_t) * MAX_GLOBAL_INDICES;
 
-	// 1. Allocate continuous GPU memory space for all combined scene vertices
-	CreateBuffer(vertexBufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, globalVertexBuffer, globalVertexBufferMemory);
+void VulkanRenderer::UpdateTextureDescriptors(const Scene& scene) {
+	if (descriptorSet == VK_NULL_HANDLE) {
+		std::cerr << "[Renderer] descriptorSet is null in UpdateTextureDescriptors!\n";
+		return;
+	}
 
-	// 2. Allocate continuous GPU memory space for all combined scene indices
-	CreateBuffer(indexBufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, globalIndexBuffer, globalIndexBufferMemory);
+	// Collect all unique texture paths used by the scene's instances
+	std::unordered_set<std::string> uniquePaths;
+	const auto& instances = scene.GetInstances();
+	for (const auto& inst : instances) {
+		const MeshAsset* mesh = g_AssetManager.GetMesh(inst.meshName);
+		if (!mesh) continue;
+		for (const auto& texPath : mesh->materialTextures) {
+			if (!texPath.empty()) uniquePaths.insert(texPath);
+		}
+	}
 
-	std::cout << "[Memory Manager] Pre-allocated global monolithic vertex/index buffers successfully.\n";
+	// Ensure all textures are loaded
+	for (const auto& path : uniquePaths) {
+		g_AssetManager.GetTexture(path);
+	}
+
+	// Write descriptor sets for all textures in the asset manager's registry
+	const auto& textureMap = g_AssetManager.GetTextureMap();
+
+	std::vector<VkWriteDescriptorSet> writes;
+	std::deque<VkDescriptorImageInfo> imageInfos;
+
+	for (const auto& pair : textureMap) {
+		const std::string& path = pair.first;
+		if (path == "default") continue;
+		uint32_t id = pair.second;
+		const Texture* tex = g_AssetManager.GetTexture(pair.first);
+		if (!tex) continue;
+
+		VkDescriptorImageInfo info{};
+		info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		info.imageView = tex->imageView;
+		info.sampler = tex->sampler;
+		imageInfos.push_back(info);
+
+		VkWriteDescriptorSet write{};
+		write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		write.dstSet = descriptorSet;
+		write.dstBinding = 2; // texture array binding
+		write.dstArrayElement = id;
+		write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		write.descriptorCount = 1;
+		write.pImageInfo = &imageInfos.back();
+		writes.push_back(write);
+	}
+
+	if (!writes.empty()) {
+		vkUpdateDescriptorSets(logicalDevice, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+	}
 }
 
 void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex) {
@@ -836,11 +879,6 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 	if (currentScene == nullptr) {
 		std::cout << "[DEBUG] Scene is null" << std::endl;
 	}
-
-	drawCallCount = 0;
-	sceneTotalVertices = 0;
-	sceneTotalIndices = 0;
-	culledCount = 0;
 
 	VkCommandBufferBeginInfo beginInfo{};
 	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -887,8 +925,8 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 	scissor.extent = swapChainExtent;
 	vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-	if (skyboxPipeline != VK_NULL_HANDLE && currentScene != nullptr) {
-		DrawSkybox(commandBuffer);
+	if (currentScene != nullptr) {
+		m_skybox.Draw(commandBuffer, descriptorSet);
 	}
 
 	if (graphicsPipeline != VK_NULL_HANDLE && currentScene != nullptr) {
@@ -897,58 +935,17 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 			pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
 
 		if (currentScene != nullptr) {
+			m_staticMeshRenderer.Draw(commandBuffer, pipelineLayout, descriptorSet,
+				cameraPosition, frustumPlanes,
+				drawCallCount, culledCount,
+				sceneTotalVertices, sceneTotalIndices);
 
-			visibleStaticDrawList.clear();
+			m_terrainRenderer.Draw(commandBuffer, pipelineLayout, descriptorSet,
+				cameraPosition, drawCallCount, culledCount,
+				sceneTotalVertices, sceneTotalIndices);
 
-			for (const DrawEntry& original : staticDrawList)
-			{
-				const auto& obj = currentSceneObjects[original.objectIndex];
-				const auto& sub = currentSceneSubMeshes[original.subMeshIndex];
-
-				float maxScale = original.cachedMaxScale;
-
-				glm::vec3 worldCenter =
-					glm::vec3(obj.modelMatrix *
-						glm::vec4(sub.boundingCenterLocal, 1.0f));
-
-				float worldRadius =
-					sub.boundingRadiusLocal * maxScale;
-
-				if (!IsSphereInFrustum(worldCenter, worldRadius))
-				{
-					culledCount++;
-					continue;
-				}
-
-				DrawEntry entry = original;
-				entry.worldCenter = worldCenter;
-				entry.worldRadius = worldRadius;
-				entry.distSq =
-					glm::length2(worldCenter - cameraPosition);
-
-				visibleStaticDrawList.push_back(entry);
-			}
-
-			std::sort(visibleStaticDrawList.begin(), visibleStaticDrawList.end(),
-				[](const DrawEntry& a, const DrawEntry& b) {
-					return a.distSq < b.distSq;
-				});
-
-			DrawStaticMeshes(commandBuffer);
-
-			DrawTerrain(commandBuffer);
-
-			DrawWater(commandBuffer);
-
-			DrawGrass(commandBuffer);
-		}
-		else {
-			if (globalVertexBuffer == VK_NULL_HANDLE) {
-				std::cerr << "[VULKAN RUNTIME] Global vertex buffer is not initialized yet. Skipping scene geometry draw calls.\n";
-			}
-			else if (globalIndexBuffer == VK_NULL_HANDLE) {
-				std::cerr << "[VULKAN RUNTIME] Global index buffer is not initialized yet. Skipping scene geometry draw calls.\n";
-			}
+			m_waterRenderer.Draw(commandBuffer, descriptorSet, drawCallCount);
+			m_grassRenderer.Draw(commandBuffer, descriptorSet, drawCallCount);
 		}
 	}
 	else {
@@ -966,256 +963,21 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 
 	vkCmdEndRenderPass(commandBuffer);
 
-	m_lastDrawCallCount = drawCallCount;
-	m_lastCulledCount = culledCount;
-	m_lastTotalVertices = sceneTotalVertices;
-	m_lastTotalIndices = sceneTotalIndices;
-
 	if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
 		throw std::runtime_error("Failed to record layout command instructions.");
 	}
 }
 
-void VulkanRenderer::DrawTerrain(VkCommandBuffer commandBuffer) {
-	if (terrainChunks.empty()) return;
-
-	if (globalTerrainVertexBuffer == VK_NULL_HANDLE || globalTerrainIndexBuffer == VK_NULL_HANDLE) {
-		std::cerr << "Global terrain buffers are null!\n";
-		return;
-	}
-
-	VkBuffer vertexBuffers[] = { globalTerrainVertexBuffer };
-	VkDeviceSize offsets[] = { 0 };
-	vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
-	vkCmdBindIndexBuffer(commandBuffer, globalTerrainIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-
-	const float occlusionRefreshDist = m_terrainChunkSize * 0.25f;
-	bool refreshOcclusion = m_firstOcclusionUpdate ||
-		glm::length2(cameraPosition - m_lastOcclusionCameraPos) > (occlusionRefreshDist * occlusionRefreshDist);
-
-	if (refreshOcclusion) {
-		m_lastOcclusionCameraPos = cameraPosition;
-		m_firstOcclusionUpdate = false;
-	}
-
-	for (auto& [key, chunk] : terrainChunks) {
-		if (!chunk.ready) continue;
-
-		// Frustum culling
-		if (!IsSphereInFrustum(chunk.center, chunk.radius)) {
-			culledCount++;
-			continue;
-		}
-
-		// Occlusion culling 
-		if (refreshOcclusion) {
-			chunk.cachedOccluded = IsChunkOccluded(chunk.center, chunk.radius);
-		}
-		if (chunk.cachedOccluded) {
-			culledCount++;
-			continue;
-		}
-
-		// Update stats
-		sceneTotalVertices += chunk.vertexCount;
-		sceneTotalIndices += chunk.indexCount;
-
-		// ── LOD morphing ──
-		float dist = glm::length(chunk.center - cameraPosition);
-		float blend = 0.0f;
-
-		if (chunk.lod == 0) {
-			// Morph from LOD0 to LOD1 over the range 0 → terrainChunkSize * 2.0f
-			float morphEnd = m_terrainChunkSize * 2.0f;
-			float t = glm::clamp(dist / morphEnd, 0.0f, 1.0f);
-			blend = t * t * (3.0f - 2.0f * t);   // smoothstep
-		}
-		// For LOD1 and LOD2, blend stays 0 (they already use coarse positions)
-
-		// Build push constants
-		PushConstants constants{};
-		constants.modelMatrix = glm::mat4(1.0f);
-		constants.textureId = 0;
-		constants.normalTextureId = 0;
-		constants.objectId = 0;
-		constants.lodBlend = blend;
-
-		vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
-			0, sizeof(PushConstants), &constants);
-
-		// Draw
-		vkCmdDrawIndexed(commandBuffer,
-			chunk.indexCount,
-			1,
-			chunk.indexOffset,
-			chunk.vertexOffset,
-			0);
-
-		drawCallCount++;
-	}
-}
-void VulkanRenderer::DrawStaticMeshes(VkCommandBuffer commandBuffer)
-{
-	VkBuffer vertexBuffers[] = { globalVertexBuffer };
-	VkDeviceSize offsets[] = { 0 };
-
-	vkCmdBindVertexBuffers(
-		commandBuffer,
-		0,
-		1,
-		vertexBuffers,
-		offsets);
-
-	vkCmdBindIndexBuffer(
-		commandBuffer,
-		globalIndexBuffer,
-		0,
-		VK_INDEX_TYPE_UINT32);
-
-	for (const auto& entry : visibleStaticDrawList)
-	{
-		const auto& obj = currentSceneObjects[entry.objectIndex];
-		const auto& sub = currentSceneSubMeshes[entry.subMeshIndex];
-
-		PushConstants constants{};
-		constants.modelMatrix = obj.modelMatrix;
-		constants.objectId = obj.objectId;
-		constants.textureId = sub.textureId;
-		constants.normalTextureId = sub.normalTextureId;
-
-		vkCmdPushConstants(
-			commandBuffer,
-			pipelineLayout,
-			VK_SHADER_STAGE_VERTEX_BIT,
-			0,
-			sizeof(PushConstants),
-			&constants);
-
-		vkCmdDrawIndexed(
-			commandBuffer,
-			sub.indexCount,
-			1,
-			sub.firstIndex,
-			sub.vertexOffset,
-			0);
-
-		drawCallCount++;
-	}
-}
-
 void VulkanRenderer::UpdateScene(const Scene& scene) {
-	const auto& instances = scene.GetInstances();
+	m_staticMeshRenderer.UpdateScene(scene);
 
-	// Detect whether the actual set of meshes in the scene changed.
-	bool geometryChanged = (instances.size() != m_lastInstanceMeshNames.size());
-	if (!geometryChanged) {
-		for (size_t i = 0; i < instances.size(); ++i) {
-			if (instances[i].meshName != m_lastInstanceMeshNames[i]) {
-				geometryChanged = true;
-				break;
-			}
-		}
-	}
-
-	if (geometryChanged) {
-		// ---- Expensive path: only runs when instances are added/removed/swapped ----
-		std::vector<ModelVertex> allVerts;
-		std::vector<uint32_t> allIndices;
-		std::vector<SubMesh> allSubMeshes;
-		std::vector<SceneObject> objects;
-
-		staticDrawList.clear();
-		m_lastInstanceMeshNames.clear();
-		m_objectDrawEntryIndices.clear();
-		m_objectDrawEntryIndices.resize(instances.size());
-
-		uint32_t vertexOffset = 0;
-		uint32_t indexOffset = 0;
-
-		for (size_t instIdx = 0; instIdx < instances.size(); ++instIdx) {
-			const auto& inst = instances[instIdx];
-			m_lastInstanceMeshNames.push_back(inst.meshName);
-
-			MeshAsset* mesh = g_AssetManager.GetMesh(inst.meshName);
-			if (!mesh) {
-				std::cerr << "[UpdateScene] Mesh not found: " << inst.meshName << "\n";
-				continue;
-			}
-
-			allVerts.insert(allVerts.end(), mesh->vertices.begin(), mesh->vertices.end());
-			allIndices.insert(allIndices.end(), mesh->indices.begin(), mesh->indices.end());
-
-			SceneObject obj;
-			obj.modelMatrix = inst.transform;
-			obj.objectId = inst.objectId;
-			obj.type = inst.type;
-			obj.firstSubMesh = static_cast<uint32_t>(allSubMeshes.size());
-			obj.subMeshCount = static_cast<uint32_t>(mesh->subMeshes.size());
-
-			for (size_t subIdx = 0; subIdx < mesh->subMeshes.size(); ++subIdx) {
-				const auto& sub = mesh->subMeshes[subIdx];
-				SubMesh newSub = sub;
-				newSub.vertexOffset += vertexOffset;
-				newSub.firstIndex += indexOffset;
-
-				const std::string& texPath = mesh->materialTextures[subIdx];
-				newSub.textureId = g_AssetManager.GetTextureId(texPath);
-
-				const std::string& normalPath = mesh->normalMapTextures[subIdx];
-				newSub.normalTextureId = g_AssetManager.GetNormalTextureId(normalPath);
-
-				allSubMeshes.push_back(newSub);
-			}
-
-			objects.push_back(obj);
-
-			float scaleX = glm::length(glm::vec3(obj.modelMatrix[0]));
-			float scaleY = glm::length(glm::vec3(obj.modelMatrix[1]));
-			float scaleZ = glm::length(glm::vec3(obj.modelMatrix[2]));
-			float maxScale = std::max({ scaleX, scaleY, scaleZ });
-
-			uint32_t objIdx = static_cast<uint32_t>(objects.size()) - 1;
-			for (uint32_t sub = obj.firstSubMesh; sub < obj.firstSubMesh + obj.subMeshCount; sub++) {
-				DrawEntry entry{};
-				entry.objectIndex = objIdx;
-				entry.subMeshIndex = sub;
-				entry.cachedMaxScale = maxScale;
-
-				m_objectDrawEntryIndices[instIdx].push_back(static_cast<uint32_t>(staticDrawList.size()));
-				staticDrawList.push_back(entry);
-			}
-
-			vertexOffset += static_cast<uint32_t>(mesh->vertices.size());
-			indexOffset += static_cast<uint32_t>(mesh->indices.size());
-		}
-
-		UploadStaticSceneData(allVerts, allIndices);
-
-		currentSceneObjects = std::move(objects);
-		currentSceneSubMeshes = std::move(allSubMeshes);
-	}
-	else {
-		// ---- Cheap path: runs every frame, just refreshes transforms, no GPU upload ----
-		for (size_t i = 0; i < instances.size() && i < currentSceneObjects.size(); ++i) {
-			const glm::mat4& xform = instances[i].transform;
-			currentSceneObjects[i].modelMatrix = xform;
-
-			float scaleX = glm::length(glm::vec3(xform[0]));
-			float scaleY = glm::length(glm::vec3(xform[1]));
-			float scaleZ = glm::length(glm::vec3(xform[2]));
-			float maxScale = std::max({ scaleX, scaleY, scaleZ });
-
-			for (uint32_t drawIdx : m_objectDrawEntryIndices[i]) {
-				staticDrawList[drawIdx].cachedMaxScale = maxScale;
-			}
-		}
-	}
-
+	// Handle texture updates
 	if (g_AssetManager.IsTextureDirty()) {
 		UpdateTextureDescriptors(scene);
 		g_AssetManager.ClearTextureDirty();
 	}
 
+	// Handle light updates
 	if (scene.HasModifiedLights()) {
 		std::vector<Light> lights;
 		lights.reserve(scene.GetLights().size());
@@ -1224,69 +986,11 @@ void VulkanRenderer::UpdateScene(const Scene& scene) {
 				? Light::Point(sl.position, sl.color, sl.intensity, sl.range)
 				: Light::Directional(sl.direction, sl.color, sl.intensity));
 		}
-
 		SetLights(lights);
 		scene.ClearModifiedLightsFlag();
 	}
 
 	currentScene = &scene;
-}
-void VulkanRenderer::UpdateTextureDescriptors(const Scene& scene) {
-	if (descriptorSet == VK_NULL_HANDLE) {
-		std::cerr << "[Renderer] descriptorSet is null in UpdateTextureDescriptors!\n";
-		return;
-	}
-
-	// Collect all unique texture paths used by the scene's instances
-	std::unordered_set<std::string> uniquePaths;
-	const auto& instances = scene.GetInstances();
-	for (const auto& inst : instances) {
-		const MeshAsset* mesh = g_AssetManager.GetMesh(inst.meshName);
-		if (!mesh) continue;
-		for (const auto& texPath : mesh->materialTextures) {
-			if (!texPath.empty()) uniquePaths.insert(texPath);
-		}
-	}
-
-	// Ensure all textures are loaded
-	for (const auto& path : uniquePaths) {
-		g_AssetManager.GetTexture(path);
-	}
-
-	// Write descriptor sets for all textures in the asset manager's registry
-	const auto& registry = g_AssetManager.GetTextureRegistry();
-	const auto& textureMap = g_AssetManager.GetTextureMap();
-
-	std::vector<VkWriteDescriptorSet> writes;
-	std::deque<VkDescriptorImageInfo> imageInfos;
-
-	for (const auto& pair : textureMap) {
-		const std::string& path = pair.first;
-		if (path == "default") continue;
-		uint32_t id = pair.second;
-		const Texture* tex = g_AssetManager.GetTexture(pair.first); // returns pointer
-		if (!tex) continue;
-
-		VkDescriptorImageInfo info{};
-		info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		info.imageView = tex->imageView;
-		info.sampler = tex->sampler;
-		imageInfos.push_back(info);
-
-		VkWriteDescriptorSet write{};
-		write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		write.dstSet = descriptorSet;
-		write.dstBinding = 2;
-		write.dstArrayElement = id;
-		write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		write.descriptorCount = 1;
-		write.pImageInfo = &imageInfos.back();
-		writes.push_back(write);
-	}
-
-	if (!writes.empty()) {
-		vkUpdateDescriptorSets(logicalDevice, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
-	}
 }
 
 void VulkanRenderer::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory) {
@@ -1332,13 +1036,13 @@ void VulkanRenderer::DestroyBuffer(VkBuffer& buffer, VkDeviceMemory& memory) {
 void VulkanRenderer::CreateGraphicsPipeline() {
 	std::cout << "[DEBUG] Creating Graphics Pipeline..." << std::endl;
 
-	// 1. Read our compiled binary shader files from disk
-	auto vertShaderCode = ReadFile("shaders/vert.spv");
-	auto fragShaderCode = ReadFile("shaders/frag.spv");
+	// 1. Read our compiled binary shader files from disk and wrap them into
+	// hardware execution shader modules
+	auto vertCode = ReadFile("shaders/vert.spv");
+	auto fragCode = ReadFile("shaders/frag.spv");
 
-	// 2. Wrap them into hardware execution shader modules
-	VkShaderModule vertShaderModule = CreateShaderModule(vertShaderCode);
-	VkShaderModule fragShaderModule = CreateShaderModule(fragShaderCode);
+	VkShaderModule vertShaderModule = CreateShaderModule(logicalDevice, vertCode);
+	VkShaderModule fragShaderModule = CreateShaderModule(logicalDevice, fragCode);
 
 	// Assign Vertex Shader to the pipeline stage configuration
 	VkPipelineShaderStageCreateInfo vertShaderStageInfo{};
@@ -1496,7 +1200,7 @@ void VulkanRenderer::CreateGraphicsPipeline() {
 
 		VkPipeline pipeline;
 		// Create pipeline using the cache
-		if(vkCreateGraphicsPipelines(logicalDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {
+		if (vkCreateGraphicsPipelines(logicalDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {
 			throw std::runtime_error("Failed to create graphics pipeline.");
 		}
 		return pipeline;
@@ -1506,261 +1210,6 @@ void VulkanRenderer::CreateGraphicsPipeline() {
 
 	vkDestroyShaderModule(logicalDevice, fragShaderModule, nullptr);
 	vkDestroyShaderModule(logicalDevice, vertShaderModule, nullptr);
-}
-void VulkanRenderer::CreateSkyboxPipeline() {
-	std::cout << "[DEBUG] Creating Skybox Pipeline..." << std::endl;
-
-	auto vertCode = ReadFile("shaders/skybox_vert.spv");
-	auto fragCode = ReadFile("shaders/skybox_frag.spv");
-	skyboxVertModule = CreateShaderModule(vertCode);
-	skyboxFragModule = CreateShaderModule(fragCode);
-
-	VkPipelineShaderStageCreateInfo vertStage = {};
-	vertStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-	vertStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
-	vertStage.module = skyboxVertModule;
-	vertStage.pName = "main";
-
-	VkPipelineShaderStageCreateInfo fragStage = {};
-	fragStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-	fragStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-	fragStage.module = skyboxFragModule;
-	fragStage.pName = "main";
-
-	VkPipelineShaderStageCreateInfo stages[] = { vertStage, fragStage };
-
-	// No vertex input
-	VkPipelineVertexInputStateCreateInfo vertexInput = {};
-	vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-	vertexInput.vertexBindingDescriptionCount = 0;
-	vertexInput.pVertexBindingDescriptions = nullptr;
-	vertexInput.vertexAttributeDescriptionCount = 0;
-	vertexInput.pVertexAttributeDescriptions = nullptr;
-
-	// Input assembly: triangle list
-	VkPipelineInputAssemblyStateCreateInfo inputAssembly = {};
-	inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-	inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-	inputAssembly.primitiveRestartEnable = VK_FALSE;
-
-	// Viewport state (dynamic)
-	VkPipelineViewportStateCreateInfo viewportState = {};
-	viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-	viewportState.viewportCount = 1;
-	viewportState.scissorCount = 1;
-
-	// Rasterizer: back-face culling off, depth bias off, polygon mode fill
-	VkPipelineRasterizationStateCreateInfo rasterizer = {};
-	rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-	rasterizer.depthClampEnable = VK_FALSE;
-	rasterizer.rasterizerDiscardEnable = VK_FALSE;
-	rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
-	rasterizer.lineWidth = 1.0f;
-	rasterizer.cullMode = VK_CULL_MODE_NONE; // we want to see sky from inside
-	rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
-	rasterizer.depthBiasEnable = VK_FALSE;
-
-	// Multisample
-	VkPipelineMultisampleStateCreateInfo multisample = {};
-	multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-	multisample.sampleShadingEnable = VK_FALSE;
-	multisample.rasterizationSamples = m_currentMsaaSamples;
-
-	// Depth/stencil: depth test on, depth write off, compare op <=
-	VkPipelineDepthStencilStateCreateInfo depthStencil = {};
-	depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-	depthStencil.depthTestEnable = VK_TRUE;
-	depthStencil.depthWriteEnable = VK_FALSE;
-	depthStencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
-	depthStencil.stencilTestEnable = VK_FALSE;
-
-	// Color blending: disable
-	VkPipelineColorBlendAttachmentState colorBlendAttachment = {};
-	colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-	colorBlendAttachment.blendEnable = VK_FALSE;
-
-	VkPipelineColorBlendStateCreateInfo colorBlending = {};
-	colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-	colorBlending.attachmentCount = 1;
-	colorBlending.pAttachments = &colorBlendAttachment;
-
-	// Dynamic states: viewport and scissor
-	VkDynamicState dynamicStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
-	VkPipelineDynamicStateCreateInfo dynamicState = {};
-	dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-	dynamicState.dynamicStateCount = 2;
-	dynamicState.pDynamicStates = dynamicStates;
-
-	// Pipeline layout: we need the UBO binding for skybox (binding 0)
-	VkPipelineLayoutCreateInfo layoutInfo = {};
-	layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-	layoutInfo.setLayoutCount = 1;
-	layoutInfo.pSetLayouts = &descriptorSetLayout; // reuse the same layout as main
-	layoutInfo.pushConstantRangeCount = 0;
-	layoutInfo.pPushConstantRanges = nullptr;
-
-	if (vkCreatePipelineLayout(logicalDevice, &layoutInfo, nullptr, &skyboxPipelineLayout) != VK_SUCCESS) {
-		throw std::runtime_error("Failed to create skybox pipeline layout");
-	}
-
-	// Graphics pipeline
-	VkGraphicsPipelineCreateInfo pipelineInfo = {};
-	pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-	pipelineInfo.stageCount = 2;
-	pipelineInfo.pStages = stages;
-	pipelineInfo.pVertexInputState = &vertexInput;
-	pipelineInfo.pInputAssemblyState = &inputAssembly;
-	pipelineInfo.pViewportState = &viewportState;
-	pipelineInfo.pRasterizationState = &rasterizer;
-	pipelineInfo.pMultisampleState = &multisample;
-	pipelineInfo.pDepthStencilState = &depthStencil;
-	pipelineInfo.pColorBlendState = &colorBlending;
-	pipelineInfo.pDynamicState = &dynamicState;
-	pipelineInfo.layout = skyboxPipelineLayout;
-	pipelineInfo.renderPass = renderPass;
-	pipelineInfo.subpass = 0;
-
-	if (vkCreateGraphicsPipelines(logicalDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &skyboxPipeline) != VK_SUCCESS) {
-		throw std::runtime_error("Failed to create skybox pipeline");
-	}
-}
-void VulkanRenderer::CreateWaterPipeline() {
-	std::cout << "[DEBUG] Creating Water Pipeline..." << std::endl;
-
-	auto vertCode = ReadFile("shaders/water_vert.spv");
-	auto fragCode = ReadFile("shaders/water_frag.spv");
-	waterVertModule = CreateShaderModule(vertCode);
-	waterFragModule = CreateShaderModule(fragCode);
-
-	VkPipelineShaderStageCreateInfo vertStage = {};
-	vertStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-	vertStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
-	vertStage.module = waterVertModule;
-	vertStage.pName = "main";
-
-	VkPipelineShaderStageCreateInfo fragStage = {};
-	fragStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-	fragStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-	fragStage.module = waterFragModule;
-	fragStage.pName = "main";
-
-	VkPipelineShaderStageCreateInfo stages[] = { vertStage, fragStage };
-
-	// Vertex input: WaterVertex { vec3 pos; vec2 uv; }
-	VkVertexInputBindingDescription binding{};
-	binding.binding = 0;
-	binding.stride = sizeof(WaterVertex);
-	binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-
-	std::array<VkVertexInputAttributeDescription, 2> attributes{};
-	attributes[0].location = 0;
-	attributes[0].binding = 0;
-	attributes[0].format = VK_FORMAT_R32G32B32_SFLOAT;
-	attributes[0].offset = offsetof(WaterVertex, pos);
-
-	attributes[1].location = 1;
-	attributes[1].binding = 0;
-	attributes[1].format = VK_FORMAT_R32G32_SFLOAT;
-	attributes[1].offset = offsetof(WaterVertex, uv);
-
-	VkPipelineVertexInputStateCreateInfo vertexInput = {};
-	vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-	vertexInput.vertexBindingDescriptionCount = 1;
-	vertexInput.pVertexBindingDescriptions = &binding;
-	vertexInput.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributes.size());
-	vertexInput.pVertexAttributeDescriptions = attributes.data();
-
-	VkPipelineInputAssemblyStateCreateInfo inputAssembly = {};
-	inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-	inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-	inputAssembly.primitiveRestartEnable = VK_FALSE;
-
-	VkPipelineViewportStateCreateInfo viewportState = {};
-	viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-	viewportState.viewportCount = 1;
-	viewportState.scissorCount = 1;
-
-	// No culling: water can be seen from below (underwater) as well as above.
-	VkPipelineRasterizationStateCreateInfo rasterizer = {};
-	rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-	rasterizer.depthClampEnable = VK_FALSE;
-	rasterizer.rasterizerDiscardEnable = VK_FALSE;
-	rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
-	rasterizer.lineWidth = 1.0f;
-	rasterizer.cullMode = VK_CULL_MODE_NONE;
-	rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
-	rasterizer.depthBiasEnable = VK_FALSE;
-
-	VkPipelineMultisampleStateCreateInfo multisample = {};
-	multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-	multisample.sampleShadingEnable = VK_FALSE;
-	multisample.rasterizationSamples = m_currentMsaaSamples;
-
-	// Depth test on (so terrain/objects occlude water), depth write OFF (translucent, like skybox).
-	VkPipelineDepthStencilStateCreateInfo depthStencil = {};
-	depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-	depthStencil.depthTestEnable = VK_TRUE;
-	depthStencil.depthWriteEnable = VK_FALSE;
-	depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
-	depthStencil.stencilTestEnable = VK_FALSE;
-
-	// Alpha blending on, same factors as your other translucent pass.
-	VkPipelineColorBlendAttachmentState colorBlendAttachment = {};
-	colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-	colorBlendAttachment.blendEnable = VK_TRUE;
-	colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-	colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-	colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
-	colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-	colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
-	colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
-
-	VkPipelineColorBlendStateCreateInfo colorBlending = {};
-	colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-	colorBlending.attachmentCount = 1;
-	colorBlending.pAttachments = &colorBlendAttachment;
-
-	VkDynamicState dynamicStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
-	VkPipelineDynamicStateCreateInfo dynamicState = {};
-	dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-	dynamicState.dynamicStateCount = 2;
-	dynamicState.pDynamicStates = dynamicStates;
-
-	VkPushConstantRange pushConstantRange{};
-	pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-	pushConstantRange.offset = 0;
-	pushConstantRange.size = sizeof(WaterPushConstants);
-
-	VkPipelineLayoutCreateInfo layoutInfo = {};
-	layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-	layoutInfo.setLayoutCount = 1;
-	layoutInfo.pSetLayouts = &descriptorSetLayout; // reuse the same bindless layout as everything else
-	layoutInfo.pushConstantRangeCount = 1;
-	layoutInfo.pPushConstantRanges = &pushConstantRange;
-
-	if (vkCreatePipelineLayout(logicalDevice, &layoutInfo, nullptr, &waterPipelineLayout) != VK_SUCCESS) {
-		throw std::runtime_error("Failed to create water pipeline layout");
-	}
-
-	VkGraphicsPipelineCreateInfo pipelineInfo = {};
-	pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-	pipelineInfo.stageCount = 2;
-	pipelineInfo.pStages = stages;
-	pipelineInfo.pVertexInputState = &vertexInput;
-	pipelineInfo.pInputAssemblyState = &inputAssembly;
-	pipelineInfo.pViewportState = &viewportState;
-	pipelineInfo.pRasterizationState = &rasterizer;
-	pipelineInfo.pMultisampleState = &multisample;
-	pipelineInfo.pDepthStencilState = &depthStencil;
-	pipelineInfo.pColorBlendState = &colorBlending;
-	pipelineInfo.pDynamicState = &dynamicState;
-	pipelineInfo.layout = waterPipelineLayout;
-	pipelineInfo.renderPass = renderPass;
-	pipelineInfo.subpass = 0;
-
-	if (vkCreateGraphicsPipelines(logicalDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &waterPipeline) != VK_SUCCESS) {
-		throw std::runtime_error("Failed to create water pipeline");
-	}
 }
 void VulkanRenderer::RecreateGraphicsPipeline() {
 	if (graphicsPipeline != VK_NULL_HANDLE) {
@@ -1904,28 +1353,9 @@ void VulkanRenderer::CreateDescriptorSet() {
 
 	std::vector<VkWriteDescriptorSet> writes = { descriptorWrite, lightWrite };
 
-	// Only add cubemap write if texture is valid
-	if (m_skyboxTexture.imageView != VK_NULL_HANDLE && m_skyboxTexture.sampler != VK_NULL_HANDLE) {
-		VkDescriptorImageInfo cubemapInfo{};
-		cubemapInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		cubemapInfo.imageView = m_skyboxTexture.imageView;
-		cubemapInfo.sampler = m_skyboxTexture.sampler;
-
-		VkWriteDescriptorSet cubemapWrite{};
-		cubemapWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		cubemapWrite.dstSet = descriptorSet;
-		cubemapWrite.dstBinding = 4;
-		cubemapWrite.dstArrayElement = 0;
-		cubemapWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		cubemapWrite.descriptorCount = 1;
-		cubemapWrite.pImageInfo = &cubemapInfo;
-
-		writes.push_back(cubemapWrite);
-	}
-	else {
-		std::cout << "[Renderer] Warning: Skybox texture not set, skipping cubemap descriptor write.\n";
-	}
-
+	// Binding 4 (skybox cubemap) is written later by
+	// SkyboxRenderer::UpdateDescriptor, once the cubemap texture has
+	// actually been loaded - it doesn't exist yet at this point in Init.
 	vkUpdateDescriptorSets(logicalDevice, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 }
 
@@ -1995,61 +1425,6 @@ void VulkanRenderer::SetLights(const std::vector<Light>& lights) {
 	}
 }
 
-void VulkanRenderer::CreateTerrainBuffers() {
-	const VkDeviceSize maxTerrainVertices = 10'000'000;  // adjust to your needs
-	const VkDeviceSize maxTerrainIndices = 10'000'000;
-
-	VkDeviceSize vertexBufferSize = sizeof(ModelVertex) * maxTerrainVertices;
-	VkDeviceSize indexBufferSize = sizeof(uint32_t) * maxTerrainIndices;
-
-	VkBufferCreateInfo stagingInfo{};
-	stagingInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-	stagingInfo.size = STAGING_BUFFER_SIZE;
-	stagingInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-	stagingInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
-	if (vkCreateBuffer(logicalDevice, &stagingInfo, nullptr, &m_globalStagingBuffer) != VK_SUCCESS) {
-		throw std::runtime_error("Failed to create unified staging buffer!");
-	}
-
-	// 2. Query structural size requirements
-	VkMemoryRequirements memReqs;
-	vkGetBufferMemoryRequirements(logicalDevice, m_globalStagingBuffer, &memReqs);
-
-	// 3. Find correct memory type for Host-Visible & Host-Coherent RAM
-	VkMemoryAllocateInfo allocInfo{};
-	allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-	allocInfo.allocationSize = memReqs.size;
-	allocInfo.memoryTypeIndex = FindMemoryType(memReqs.memoryTypeBits,
-		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-
-	if (vkAllocateMemory(logicalDevice, &allocInfo, nullptr, &m_globalStagingMemory) != VK_SUCCESS) {
-		throw std::runtime_error("Failed to allocate unified staging memory!");
-	}
-
-	// 4. Bind driver memory to our buffer handle
-	vkBindBufferMemory(logicalDevice, m_globalStagingBuffer, m_globalStagingMemory, 0);
-
-	// 5. 🚀 THE CRITICAL OPTIMIZATION: Map the memory handle ONCE for the lifetime of the application
-	if (vkMapMemory(logicalDevice, m_globalStagingMemory, 0, STAGING_BUFFER_SIZE, 0, &m_stagingBufferMapped) != VK_SUCCESS) {
-		throw std::runtime_error("Failed to persistently map global staging buffer!");
-	}
-
-	// Clear the ring index offset
-	m_stagingRingOffset = 0;
-
-	CreateBuffer(vertexBufferSize,
-		VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-		globalTerrainVertexBuffer, globalTerrainVertexMemory);
-
-	CreateBuffer(indexBufferSize,
-		VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-		globalTerrainIndexBuffer, globalTerrainIndexMemory);
-
-	std::cout << "[Memory Manager] Pre-allocated global terrain buffers.\n";
-}
 void VulkanRenderer::CreateImGuiDescriptorPool() {
 	VkDescriptorPoolSize pool_sizes[2] = {};
 	pool_sizes[0].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
@@ -2104,7 +1479,7 @@ void VulkanRenderer::DrawGUI() {
 	ImGui_ImplGlfw_NewFrame();
 	ImGui::NewFrame();
 
-	uint32_t triangleCount = m_lastTotalIndices / 3;
+	uint32_t triangleCount = sceneTotalIndices / 3;
 	uint32_t texturesLoaded = static_cast<uint32_t>(g_AssetManager.GetTextureRegistry().size());
 
 	ImGui::SetNextWindowPos(ImVec2(1280 - 180, 10), ImGuiCond_Always);
@@ -2120,15 +1495,15 @@ void VulkanRenderer::DrawGUI() {
 	// GEOMETRY SECTION
 	ImGui::TextColored(ImVec4(0.0f, 0.7f, 1.0f, 1.0f), "GEOMETRY");
 	ImGui::Text("Triangles: %u", triangleCount);
-	ImGui::Text("Vertices:  %u", m_lastTotalVertices);
-	ImGui::Text("Indices:   %u", m_lastTotalIndices);
+	ImGui::Text("Vertices:  %u", sceneTotalVertices);
+	ImGui::Text("Indices:   %u", sceneTotalIndices);
 
 	ImGui::Separator();
 
 	// PIPELINE SECTION
 	ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "PIPELINE");
-	ImGui::Text("Draw Calls: %-8u", m_lastDrawCallCount);
-	ImGui::Text("Culled:     %-8u", m_lastCulledCount);
+	ImGui::Text("Draw Calls: %-8u", drawCallCount);
+	ImGui::Text("Culled:     %-8u", culledCount);
 	ImGui::Text("Textures:   %-8u", texturesLoaded);
 
 	ImGui::End();
@@ -2284,658 +1659,37 @@ bool VulkanRenderer::IsSphereInFrustum(const glm::vec3& center, float radius) co
 	return true;
 }
 
-void VulkanRenderer::UploadStaticSceneData(const std::vector<ModelVertex>& verts, const std::vector<uint32_t>& idxs) {
-	// Check size
-	if (verts.empty() || idxs.empty()) {
-		return;
-	}
-
-	if (verts.size() > MAX_GLOBAL_VERTICES || idxs.size() > MAX_GLOBAL_INDICES) {
-		throw std::runtime_error("Scene data exceeds pre-allocated buffer size!");
-	}
-
-	VkDeviceSize vertexSize = sizeof(ModelVertex) * verts.size();
-	VkDeviceSize indexSize = sizeof(uint32_t) * idxs.size();
-
-	// Staging buffers
-	VkBuffer stagingVert = VK_NULL_HANDLE;
-	VkDeviceMemory stagingVertMem = VK_NULL_HANDLE;
-	VkBuffer stagingIndex = VK_NULL_HANDLE;
-	VkDeviceMemory stagingIndexMem = VK_NULL_HANDLE;
-
-	try {
-		CreateBuffer(vertexSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-			stagingVert, stagingVertMem);
-		void* data;
-		vkMapMemory(logicalDevice, stagingVertMem, 0, vertexSize, 0, &data);
-		memcpy(data, verts.data(), vertexSize);
-		vkUnmapMemory(logicalDevice, stagingVertMem);
-
-		VkBuffer stagingInd; VkDeviceMemory stagingIndMem;
-		CreateBuffer(indexSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-			stagingInd, stagingIndMem);
-		vkMapMemory(logicalDevice, stagingIndMem, 0, indexSize, 0, &data);
-		memcpy(data, idxs.data(), indexSize);
-		vkUnmapMemory(logicalDevice, stagingIndMem);
-
-		VkCommandBuffer cmd = BeginSingleTimeCommands();
-		VkBufferCopy vertCopy{ 0, 0, vertexSize };
-		vkCmdCopyBuffer(cmd, stagingVert, globalVertexBuffer, 1, &vertCopy);
-		VkBufferCopy indCopy{ 0, 0, indexSize };
-		vkCmdCopyBuffer(cmd, stagingInd, globalIndexBuffer, 1, &indCopy);
-		EndSingleTimeCommands(cmd);
-
-		DestroyBuffer(stagingVert, stagingVertMem);
-		DestroyBuffer(stagingInd, stagingIndMem);
-	}
-	catch (...) {
-		DestroyBuffer(stagingVert, stagingVertMem);
-		DestroyBuffer(stagingIndex, stagingIndexMem);
-		throw; // rethrow the exception
-	}
-}
-void VulkanRenderer::AddTerrainChunk(
-	int64_t key,
-	int cx,
-	int cz,
-	int lod,
+void VulkanRenderer::AddTerrainChunk( int64_t key, int cx, int cz, int lod,
 	const std::vector<ModelVertex>& vertices,
 	const std::vector<uint32_t>& indices)
 {
-	if (m_isShuttingDown) {
-		std::cout << "[WARN] AddTerrainChunk called during shutdown, ignoring.\n";
-		return;
-	}
-
-	if (m_grassChunks.count(key)) {
-		PendingDeletion del;
-		del.buffers = { m_grassChunks[key].instanceBuffer };
-		del.memories = { m_grassChunks[key].instanceMemory };
-		del.safeFrame = m_globalFrameCounter + MAX_FRAMES_IN_FLIGHT;
-		m_pendingDeletionsGlobal.push_back(del);
-		m_grassChunks.erase(key);
-	}
-	// Also supersede any grass upload for this key that's still in flight
-	// (e.g. a rapid LOD repair firing again before the previous grass
-	// upload finished) so it can't land after this newer one.
-	for (auto& upload : pendingGrassUploads) {
-		if (upload.chunkKey == key) {
-			upload.cancelled = true;
-		}
-	}
-
-	TerrainChunkGPU chunk{};
-	chunk.key = key;
-
-	glm::vec3 minBound(FLT_MAX), maxBound(-FLT_MAX);
-	for (const auto& v : vertices) {
-		minBound = glm::min(minBound, v.pos);
-		maxBound = glm::max(maxBound, v.pos);
-	}
-	glm::vec3 center = (minBound + maxBound) * 0.5f;
-	float radius = 0.0f;
-	for (const auto& v : vertices) {
-		radius = glm::max(radius, glm::length(v.pos - center));
-	}
-	radius += 10.0f;  // margin for safety
-
-	chunk.center = center;
-	chunk.radius = radius;
-	chunk.lod = lod;
-
-	UploadTerrainChunkAsync(chunk, vertices, indices);
-}
-void VulkanRenderer::UploadTerrainChunkAsync(
-	TerrainChunkGPU& chunk,
-	const std::vector<ModelVertex>& verts,
-	const std::vector<uint32_t>& indices)
-{
-	VkDeviceSize vertexSize = sizeof(ModelVertex) * verts.size();
-	VkDeviceSize indexSize = sizeof(uint32_t) * indices.size();
-
-	if (vertexSize == 0 || indexSize == 0) return;
-
-	// Allocate space in the global discrete GPU buffers (Your un-altered memory strategy)
-	uint32_t vertexOffset, indexOffset;
-	{
-		std::lock_guard<std::mutex> lock(terrainAllocMutex);
-
-		auto vIt = std::find_if(freeVertexSpans.begin(), freeVertexSpans.end(),
-			[&](const FreeSpan& s) { return s.count >= verts.size(); });
-		auto iIt = std::find_if(freeIndexSpans.begin(), freeIndexSpans.end(),
-			[&](const FreeSpan& s) { return s.count >= indices.size(); });
-
-		// Check capacity BEFORE committing either allocation. Previously
-		// nextTerrainVertexOffset/nextTerrainIndexOffset just kept
-		// climbing with fetch_add and no bound check — once they passed
-		// MAX_TERRAIN_VERTICES/MAX_TERRAIN_INDICES, the resulting offsets
-		// pointed past the actual buffer, and the later vkCmdCopyBuffer /
-		// vkCmdDrawIndexed calls silently read/wrote out of bounds
-		// (corruption, not a clean crash — looks like "LOD updates just
-		// stop working correctly").
-		bool needsNewVertexSpace = (vIt == freeVertexSpans.end());
-		bool needsNewIndexSpace = (iIt == freeIndexSpans.end());
-
-		uint64_t projectedVertexEnd = needsNewVertexSpace
-			? (uint64_t)nextTerrainVertexOffset.load() + verts.size()
-			: 0;
-		uint64_t projectedIndexEnd = needsNewIndexSpace
-			? (uint64_t)nextTerrainIndexOffset.load() + indices.size()
-			: 0;
-
-		if ((needsNewVertexSpace && projectedVertexEnd > MAX_TERRAIN_VERTICES) ||
-			(needsNewIndexSpace && projectedIndexEnd > MAX_TERRAIN_INDICES)) {
-			std::cerr << "[Terrain] Global terrain buffer capacity exceeded "
-				<< "(vertices " << projectedVertexEnd << "/" << MAX_TERRAIN_VERTICES
-				<< ", indices " << projectedIndexEnd << "/" << MAX_TERRAIN_INDICES
-				<< "). Dropping this chunk upload instead of corrupting the buffer.\n";
-			chunk.ready = false;
-			return;
-		}
-
-		if (vIt != freeVertexSpans.end()) {
-			vertexOffset = vIt->offset;
-			freeVertexSpans.erase(vIt);
-		}
-		else {
-			vertexOffset = nextTerrainVertexOffset.fetch_add(static_cast<uint32_t>(verts.size()));
-		}
-
-		if (iIt != freeIndexSpans.end()) {
-			indexOffset = iIt->offset;
-			freeIndexSpans.erase(iIt);
-		}
-		else {
-			indexOffset = nextTerrainIndexOffset.fetch_add(static_cast<uint32_t>(indices.size()));
-		}
-	}
-
-	chunk.vertexOffset = vertexOffset;
-	chunk.indexOffset = indexOffset;
-	chunk.vertexCount = static_cast<uint32_t>(verts.size());
-	chunk.indexCount = static_cast<uint32_t>(indices.size());
-
-	// 🚀 OPTIMIZED RING PASS: Instead of allocations, roll the cursor inside the mapped 32MB pointer
-	uint32_t localStagingVertexOffset = 0;
-	uint32_t localStagingIndexOffset = 0;
-
-	{
-		std::lock_guard<std::mutex> lock(m_stagingBufferMutex);
-
-		// If the arriving sizes exceed remaining pool capacity, wrap back around to zero
-		if (m_stagingRingOffset + vertexSize + indexSize >= STAGING_BUFFER_SIZE) {
-			m_stagingRingOffset = 0;
-		}
-
-		// Write vertices straight to RAM via offset
-		localStagingVertexOffset = m_stagingRingOffset;
-		std::memcpy(static_cast<uint8_t*>(m_stagingBufferMapped) + localStagingVertexOffset, verts.data(), vertexSize);
-		m_stagingRingOffset += static_cast<uint32_t>(vertexSize);
-
-		// Write indices straight to RAM via offset
-		localStagingIndexOffset = m_stagingRingOffset;
-		std::memcpy(static_cast<uint8_t*>(m_stagingBufferMapped) + localStagingIndexOffset, indices.data(), indexSize);
-		m_stagingRingOffset += static_cast<uint32_t>(indexSize);
-	}
-
-	// --- Allocate a command buffer out of your existing pool ---
-	VkCommandBufferAllocateInfo allocInfo{};
-	allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-	allocInfo.commandPool = uploadCommandPool;
-	allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-	allocInfo.commandBufferCount = 1;
-	VkCommandBuffer cmdBuf;
-	if (vkAllocateCommandBuffers(logicalDevice, &allocInfo, &cmdBuf) != VK_SUCCESS)
-		throw std::runtime_error("Failed to allocate upload command buffer");
-
-	VkCommandBufferBeginInfo beginInfo{};
-	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-	vkBeginCommandBuffer(cmdBuf, &beginInfo);
-
-	// 🚀 UNIFIED COPIES: Pull from m_globalStagingBuffer via unique staging offset keys
-	VkBufferCopy vertCopy{ localStagingVertexOffset, vertexOffset * sizeof(ModelVertex), vertexSize };
-	vkCmdCopyBuffer(cmdBuf, m_globalStagingBuffer, globalTerrainVertexBuffer, 1, &vertCopy);
-
-	VkBufferCopy indexCopy{ localStagingIndexOffset, indexOffset * sizeof(uint32_t), indexSize };
-	vkCmdCopyBuffer(cmdBuf, m_globalStagingBuffer, globalTerrainIndexBuffer, 1, &indexCopy);
-
-	vkEndCommandBuffer(cmdBuf);
-
-	VkFenceCreateInfo fenceInfo{};
-	fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-	VkFence fence;
-	vkCreateFence(logicalDevice, &fenceInfo, nullptr, &fence);
-
-	VkSubmitInfo submitInfo{};
-	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-	submitInfo.commandBufferCount = 1;
-	submitInfo.pCommandBuffers = &cmdBuf;
-	if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, fence) != VK_SUCCESS)
-		throw std::runtime_error("Failed to submit upload command buffer");
-
-	// --- Store pending upload for tracking ---
-	chunk.ready = false;
-	PendingUpload upload;
-	upload.fence = fence;
-	upload.commandBuffer = cmdBuf;
-
-	// 🚀 ZERO ALLOCATION: Set these to VK_NULL_HANDLE so your cleanup loop skips destroying them!
-	upload.stagingVertexBuffer = VK_NULL_HANDLE;
-	upload.stagingVertexMemory = VK_NULL_HANDLE;
-	upload.stagingIndexBuffer = VK_NULL_HANDLE;
-	upload.stagingIndexMemory = VK_NULL_HANDLE;
-
-	upload.chunkKey = chunk.key;
-	upload.chunk = chunk;
-	pendingUploads.push_back(upload);
+	m_terrainRenderer.AddTerrainChunk(key, cx, cz, lod, vertices, indices);
 }
 void VulkanRenderer::RemoveTerrainChunk(int64_t key) {
-	// Cancel any upload still in flight for this key, non-blockingly. The
-	// actual cleanup (freeing spans/staging) happens in DrawFrame's fence
-	// poll once the GPU is actually done, same as the normal path. Without
-	// this, a chunk removed while its upload was still in flight would get
-	// silently re-inserted into terrainChunks once the fence signals later,
-	// "resurrecting" a chunk the CPU side already considers unloaded.
-	for (auto& upload : pendingUploads) {
-		if (upload.chunkKey == key) {
-			upload.cancelled = true;
-		}
-	}
-
-	auto grassIt = m_grassChunks.find(key);
-	if (grassIt != m_grassChunks.end()) {
-
-		PendingDeletion del;
-		del.buffers = { grassIt->second.instanceBuffer };
-		del.memories = { grassIt->second.instanceMemory };
-		del.safeFrame = m_globalFrameCounter + MAX_FRAMES_IN_FLIGHT;
-		m_pendingDeletionsGlobal.push_back(del);
-		m_grassChunks.erase(grassIt);
-	}
-
-	auto it = terrainChunks.find(key);
-	if (it == terrainChunks.end()) return;
-
-	TerrainChunkGPU& chunk = it->second;
-
-	// Don't return this span to the free list immediately: a command
-	// buffer from a previous frame (up to MAX_FRAMES_IN_FLIGHT) may still
-	// be executing a vkCmdDrawIndexed that reads from it. If we hand the
-	// span to a new chunk's upload right away, that copy can land while
-	// the old draw is still in flight -> flicker/corruption. Defer the
-	// same way buffer deletions already are.
-	{
-		PendingSpanReturn ret;
-		ret.vertexSpan = { chunk.vertexOffset, chunk.vertexCount };
-		ret.indexSpan = { chunk.indexOffset, chunk.indexCount };
-		ret.safeFrame = m_globalFrameCounter + MAX_FRAMES_IN_FLIGHT;
-		m_pendingTerrainSpanReturns.push_back(ret);
-	}
-
-	// Remove from the map
-	terrainChunks.erase(it);
+	m_terrainRenderer.RemoveTerrainChunk(key);
 }
-bool VulkanRenderer::IsChunkOccluded(const glm::vec3& chunkCenter, float chunkRadius) {
-	const glm::vec3& camPos = cameraPosition;
-
-	// If the camera is inside the chunk, don't occlude
-	float distToCenter = glm::length(chunkCenter - camPos);
-	if (distToCenter < chunkRadius) return false;
-
-	// Direction from camera to chunk center
-	glm::vec3 dir = glm::normalize(chunkCenter - camPos);
-
-	// Number of samples along the ray (more = more accurate, slower)
-	const int numSamples = 20;   // was 10
-	float step = distToCenter / (float)numSamples;
-
-	// Start slightly offset from the camera (avoid self‑occlusion)
-	float offset = 2.0f;
-	glm::vec3 samplePos = camPos + dir * offset;
-
-	// Height margin to avoid tiny bumps culling chunks (tune this)
-	const float heightMargin = 10.0f;
-
-	glm::vec3 up(0.0f, 1.0f, 0.0f);
-	glm::vec3 right = glm::normalize(glm::cross(dir, up));
-	glm::vec3 sampleOffsets[] = {
-		glm::vec3(0.0f, 0.0f, 0.0f),      // center
-		right * chunkRadius * 0.5f,        // right
-		-right * chunkRadius * 0.5f,       // left
-		up * chunkRadius * 0.5f,           // above
-		-up * chunkRadius * 0.5f           // below
-	};
-
-	for (int i = 0; i < numSamples; ++i) {
-		// Check the main ray
-		float terrainHeight = Chunk::GetHeight(samplePos.x, samplePos.z);
-		if (samplePos.y < terrainHeight + heightMargin) {
-			// Also check the offsets – if any offset point is above terrain, chunk is visible
-			for (const auto& offsetVec : sampleOffsets) {
-				glm::vec3 offsetPos = samplePos + offsetVec;
-				float offsetTerrain = Chunk::GetHeight(offsetPos.x, offsetPos.z);
-				if (offsetPos.y >= offsetTerrain + heightMargin) {
-					return false; // visible
-				}
-			}
-			return true; // all points are below terrain → occluded
-		}
-		samplePos += dir * step;
-	}
-
-	return false; // Not occluded
+void VulkanRenderer::SetTerrainChunkSize(float size) {
+	m_terrainRenderer.SetChunkSize(size);
+}
+void VulkanRenderer::ClearHeightCache() {
+	m_terrainRenderer.ClearHeightCache();
 }
 
-size_t VulkanRenderer::CreateWaterBodyGPU(const WaterMesh& mesh,
+void VulkanRenderer::AddWaterBodyForChunk(int64_t chunkKey, const WaterMesh& mesh,
 	const std::string& normalMapPath,
 	float tiling, float waveStrength) {
-	WaterBodyGPU body{};
-	body.indexCount = static_cast<uint32_t>(mesh.indices.size());
-	body.normalTextureId = g_AssetManager.GetNormalTextureId(normalMapPath);
-	body.tiling = tiling;
-	body.waveStrength = waveStrength;
-
-	VkDeviceSize vertexSize = sizeof(WaterVertex) * mesh.vertices.size();
-	VkDeviceSize indexSize = sizeof(uint32_t) * mesh.indices.size();
-
-	CreateBuffer(vertexSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-		body.vertexBuffer, body.vertexMemory);
-
-	void* data;
-	vkMapMemory(logicalDevice, body.vertexMemory, 0, vertexSize, 0, &data);
-	memcpy(data, mesh.vertices.data(), vertexSize);
-	vkUnmapMemory(logicalDevice, body.vertexMemory);
-
-	CreateBuffer(indexSize, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
-		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-		body.indexBuffer, body.indexMemory);
-
-	vkMapMemory(logicalDevice, body.indexMemory, 0, indexSize, 0, &data);
-	memcpy(data, mesh.indices.data(), indexSize);
-	vkUnmapMemory(logicalDevice, body.indexMemory);
-
-	m_waterBodies.push_back(body);
-	return m_waterBodies.size() - 1;
+	m_waterRenderer.AddWaterBodyForChunk(chunkKey, mesh, normalMapPath, tiling, waveStrength);
 }
-void VulkanRenderer::AddWaterBody(const WaterMesh& mesh,
-	const std::string& normalMapPath,
+void VulkanRenderer::AddWaterBody(const WaterMesh& mesh, const std::string& normalMapPath,
 	float tiling, float waveStrength) {
-	if (mesh.vertices.empty() || mesh.indices.empty()) return;
-	CreateWaterBodyGPU(mesh, normalMapPath, tiling, waveStrength);
-}
-void VulkanRenderer::AddWaterBodyForChunk(int64_t chunkKey,
-	const WaterMesh& mesh,
-	const std::string& normalMapPath,
-	float tiling, float waveStrength) {
-	if (mesh.vertices.empty() || mesh.indices.empty()) return;
-
-	// Remove any existing water for this chunk first
-	auto it = m_waterBodyLookup.find(chunkKey);
-	if (it != m_waterBodyLookup.end()) {
-		RemoveWaterBody(chunkKey);
-	}
-
-	size_t idx = CreateWaterBodyGPU(mesh, normalMapPath, tiling, waveStrength);
-	m_waterBodyLookup[chunkKey] = idx;
+	m_waterRenderer.AddWaterBody(mesh, normalMapPath, tiling, waveStrength);
 }
 void VulkanRenderer::RemoveWaterBody(int64_t chunkKey) {
-	auto it = m_waterBodyLookup.find(chunkKey);
-	if (it == m_waterBodyLookup.end()) {
-		return;
-	}
-
-	size_t targetIndex = it->second;
-	if (targetIndex >= m_waterBodies.size()) {
-		m_waterBodyLookup.erase(it);
-		return;
-	}
-
-	WaterBodyGPU& body = m_waterBodies[targetIndex];
-
-	PendingDeletion del;
-	del.buffers.push_back(body.vertexBuffer);
-	del.memories.push_back(body.vertexMemory);
-	del.buffers.push_back(body.indexBuffer);
-	del.memories.push_back(body.indexMemory);
-	// Ensure the buffers survive at least MAX_FRAMES_IN_FLIGHT frames
-	del.safeFrame = m_globalFrameCounter + MAX_FRAMES_IN_FLIGHT + 1;
-	m_pendingDeletionsGlobal.push_back(std::move(del));
-
-	// ---- Swap-and-pop pattern to remove from vector ----
-	if (targetIndex != m_waterBodies.size() - 1) {
-		m_waterBodies[targetIndex] = m_waterBodies.back();
-		// Update lookup for the moved entry
-		for (auto& pair : m_waterBodyLookup) {
-			if (pair.second == m_waterBodies.size() - 1) {
-				pair.second = targetIndex;
-				break;
-			}
-		}
-	}
-
-	m_waterBodies.pop_back();
-	m_waterBodyLookup.erase(it);
+	m_waterRenderer.RemoveWaterBody(chunkKey);
 }
 
-void VulkanRenderer::CreateGrassPipeline() {
-	std::cout << "[DEBUG] Creating Grass Pipeline..." << std::endl;
-
-	auto vertShaderCode = ReadFile("shaders/grass_vert.spv");
-	auto fragShaderCode = ReadFile("shaders/grass_frag.spv");
-
-	VkShaderModule vertModule = CreateShaderModule(vertShaderCode);
-	VkShaderModule fragModule = CreateShaderModule(fragShaderCode);
-
-	VkPipelineShaderStageCreateInfo stages[2]{};
-	stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-	stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-	stages[0].module = vertModule;
-	stages[0].pName = "main";
-
-	stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-	stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-	stages[1].module = fragModule;
-	stages[1].pName = "main";
-
-	// Bind instance data attributes to layout location slots
-	VkVertexInputBindingDescription bindingDesc{};
-	bindingDesc.binding = 0;
-	bindingDesc.stride = sizeof(GrassInstance);
-	bindingDesc.inputRate = VK_VERTEX_INPUT_RATE_INSTANCE; // Progress per instance, not vertex!
-
-	std::array<VkVertexInputAttributeDescription, 4> attribs{};
-	attribs[0] = { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(GrassInstance, position) };
-	attribs[1] = { 1, 0, VK_FORMAT_R32_SFLOAT,       offsetof(GrassInstance, rotation) };
-	attribs[2] = { 2, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(GrassInstance, scale) };
-	attribs[3] = { 3, 0, VK_FORMAT_R32_SFLOAT,       offsetof(GrassInstance, windOffset) };
-
-	VkPipelineVertexInputStateCreateInfo vertexInput{};
-	vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-	vertexInput.vertexBindingDescriptionCount = 1;
-	vertexInput.pVertexBindingDescriptions = &bindingDesc;
-	vertexInput.vertexAttributeDescriptionCount = static_cast<uint32_t>(attribs.size());
-	vertexInput.pVertexAttributeDescriptions = attribs.data();
-
-	VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
-	inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-	inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-
-	VkPipelineViewportStateCreateInfo viewportState{};
-	viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-	viewportState.viewportCount = 1;
-	viewportState.scissorCount = 1;
-
-	VkPipelineRasterizationStateCreateInfo rasterizer{};
-	rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-	rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
-	rasterizer.lineWidth = 1.0f;
-	rasterizer.cullMode = VK_CULL_MODE_NONE; // IMPORTANT: Render both front/back faces of blade quads
-	rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-
-	VkPipelineMultisampleStateCreateInfo multisampling{};
-	multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-	multisampling.rasterizationSamples = m_currentMsaaSamples;
-	multisampling.sampleShadingEnable = VK_FALSE;
-	multisampling.alphaToCoverageEnable = VK_TRUE;
-	multisampling.alphaToOneEnable = VK_FALSE;
-
-	VkPipelineDepthStencilStateCreateInfo depthStencil{};
-	depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-	depthStencil.depthTestEnable = VK_TRUE;
-	depthStencil.depthWriteEnable = VK_TRUE; // Enable depth writing for crisp occlusion filtering
-	depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
-
-	VkPipelineColorBlendAttachmentState blendAttachment{};
-	blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-	blendAttachment.blendEnable = VK_FALSE; // Alpha discard used, blending is false
-
-	VkPipelineColorBlendStateCreateInfo colorBlending{};
-	colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-	colorBlending.attachmentCount = 1;
-	colorBlending.pAttachments = &blendAttachment;
-
-	std::vector<VkDynamicState> dynamicStates = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
-	VkPipelineDynamicStateCreateInfo dynamicState{};
-	dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-	dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
-	dynamicState.pDynamicStates = dynamicStates.data();
-
-	VkPushConstantRange pushRange{};
-	pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-	pushRange.offset = 0;
-	pushRange.size = sizeof(GrassPushConstants);
-
-	VkPipelineLayoutCreateInfo layoutInfo{};
-	layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-	layoutInfo.setLayoutCount = 1;
-	layoutInfo.pSetLayouts = &descriptorSetLayout; // Re-use global descriptor layout containing UBO matrices
-	layoutInfo.pushConstantRangeCount = 1;
-	layoutInfo.pPushConstantRanges = &pushRange;
-
-	vkCreatePipelineLayout(logicalDevice, &layoutInfo, nullptr, &grassPipelineLayout);
-
-	VkGraphicsPipelineCreateInfo pipelineInfo{};
-	pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-	pipelineInfo.stageCount = 2;
-	pipelineInfo.pStages = stages;
-	pipelineInfo.pVertexInputState = &vertexInput;
-	pipelineInfo.pInputAssemblyState = &inputAssembly;
-	pipelineInfo.pViewportState = &viewportState;
-	pipelineInfo.pRasterizationState = &rasterizer;
-	pipelineInfo.pMultisampleState = &multisampling;
-	pipelineInfo.pDepthStencilState = &depthStencil;
-	pipelineInfo.pColorBlendState = &colorBlending;
-	pipelineInfo.pDynamicState = &dynamicState;
-	pipelineInfo.pMultisampleState = &multisampling;
-	pipelineInfo.layout = grassPipelineLayout;
-	pipelineInfo.renderPass = renderPass;
-
-	VkResult result = vkCreateGraphicsPipelines(logicalDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &grassPipeline);
-	assert(result == VK_SUCCESS);
-
-	vkDestroyShaderModule(logicalDevice, fragModule, nullptr);
-	vkDestroyShaderModule(logicalDevice, vertModule, nullptr);
-}
 void VulkanRenderer::AddGrass(int64_t key, const std::vector<GrassInstance>& grassInstances) {
-	if (grassInstances.empty()) return;
-
-	GrassChunkGPU grassChunk{};
-	grassChunk.instanceCount = static_cast<uint32_t>(grassInstances.size());
-
-	// ---- Compute tight bounding sphere ----
-	glm::vec3 minP(FLT_MAX), maxP(-FLT_MAX);
-	for (const auto& inst : grassInstances) {
-		glm::vec3 p = inst.position;               // make sure GrassInstance has a 'position' field
-		minP = glm::min(minP, p);
-		maxP = glm::max(maxP, p);
-	}
-	grassChunk.center = (minP + maxP) * 0.5f;
-	float r2 = 0.0f;
-	for (const auto& inst : grassInstances) {
-		float d2 = glm::length2(inst.position - grassChunk.center);
-		if (d2 > r2) r2 = d2;
-	}
-	grassChunk.radius = sqrt(r2) + 0.5f;
-
-	VkDeviceSize bufferSize = grassInstances.size() * sizeof(GrassInstance);
-
-	// Create staging buffer to push data up to GPU
-	VkBuffer stagingBuffer;
-	VkDeviceMemory stagingBufferMemory;
-	CreateBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
-
-	void* data;
-	vkMapMemory(logicalDevice, stagingBufferMemory, 0, bufferSize, 0, &data);
-	memcpy(data, grassInstances.data(), bufferSize);
-	vkUnmapMemory(logicalDevice, stagingBufferMemory);
-
-	// Create High-Performance Device-Local Buffer for Instance Attribute inputs
-	CreateBuffer(bufferSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, grassChunk.instanceBuffer, grassChunk.instanceMemory);
-
-	// Allocate an asynchronous transfer command buffer from the transient upload command pool
-	VkCommandBufferAllocateInfo allocInfo{};
-	allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-	allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-	allocInfo.commandPool = uploadCommandPool;
-	allocInfo.commandBufferCount = 1;
-
-	VkCommandBuffer cb;
-	if (vkAllocateCommandBuffers(logicalDevice, &allocInfo, &cb) != VK_SUCCESS) {
-		throw std::runtime_error("Failed to allocate grass upload command buffer");
-	}
-
-	VkCommandBufferBeginInfo beginInfo{};
-	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-	vkBeginCommandBuffer(cb, &beginInfo);
-
-	VkBufferCopy copyRegion{};
-	copyRegion.size = bufferSize;
-	vkCmdCopyBuffer(cb, stagingBuffer, grassChunk.instanceBuffer, 1, &copyRegion);
-
-	vkEndCommandBuffer(cb);
-
-	// Create the tracking fence
-	VkFenceCreateInfo fenceInfo{};
-	fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-	fenceInfo.flags = 0; // Starts unsignaled
-
-	VkFence uploadFence;
-	if (vkCreateFence(logicalDevice, &fenceInfo, nullptr, &uploadFence) != VK_SUCCESS) {
-		throw std::runtime_error("Failed to create grass upload fence");
-	}
-
-	// Immediately fire the submission over to the graphics queue without waiting on the main thread
-	VkSubmitInfo submitInfo{};
-	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-	submitInfo.commandBufferCount = 1;
-	submitInfo.pCommandBuffers = &cb;
-
-	if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, uploadFence) != VK_SUCCESS) {
-		throw std::runtime_error("Failed to submit grass async transfer command queue");
-	}
-
-	// Flag any existing upload for this key that's still in flight as cancelled
-	for (auto& upload : pendingGrassUploads) {
-		if (upload.chunkKey == key) {
-			upload.cancelled = true;
-		}
-	}
-
-	// Push everything to the pending queue to be reaped inside DrawFrame() asynchronously
-	PendingGrassUpload pending{};
-	pending.fence = uploadFence;
-	pending.commandBuffer = cb;
-	pending.stagingBuffer = stagingBuffer;
-	pending.stagingMemory = stagingBufferMemory;
-	pending.chunkKey = key;
-	pending.grassChunk = grassChunk;
-
-	pendingGrassUploads.push_back(pending);
+	m_grassRenderer.AddGrass(key, grassInstances);
 }
 
 void VulkanRenderer::ApplySettings() {
@@ -3003,198 +1757,38 @@ void VulkanRenderer::ToggleFullscreen() {
 		g_Settings.windowHeight = windowedHeight;
 	}
 }
-
-void VulkanRenderer::CreateSkyboxTexture() {
-	std::string base = "assets/skybox/";
-	m_skyboxTexture = g_AssetManager.LoadCubemapFromFaces(
-		base + "right.tga",
-		base + "left.tga",
-		base + "top.tga",
-		base + "bottom.tga",
-		base + "back.tga",
-		base + "front.tga"
-	);
-
-	if (m_skyboxTexture.imageView == VK_NULL_HANDLE) {
-		std::cerr << "[Skybox] Failed to load skybox faces.\n";
-	}
-}
-void VulkanRenderer::UpdateSkyboxDescriptor() {
-	if (descriptorSet == VK_NULL_HANDLE) return;
-
-	VkDescriptorImageInfo info{};
-	info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-	Texture& defaultTex = g_AssetManager.GetDefaultTexture();
-
-	if (m_skyboxTexture.imageView != VK_NULL_HANDLE && m_skyboxTexture.sampler != VK_NULL_HANDLE) {
-		info.imageView = m_skyboxTexture.imageView;
-		info.sampler = m_skyboxTexture.sampler;
-	}
-	else {
-		info.imageView = defaultTex.imageView;
-		info.sampler = defaultTex.sampler;
-	}
-
-	VkWriteDescriptorSet write{};
-	write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	write.dstSet = descriptorSet;
-	write.dstBinding = 4;
-	write.dstArrayElement = 0;
-	write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	write.descriptorCount = 1;
-	write.pImageInfo = &info;
-
-	vkUpdateDescriptorSets(logicalDevice, 1, &write, 0, nullptr);
-}
-
 void VulkanRenderer::SetFogParams(float start, float end) {
 	m_fogStart = start;
 	m_fogEnd = end;
 }
 
 void VulkanRenderer::DrawFrame() {
-	if (globalVertexBuffer == VK_NULL_HANDLE) {
-		std::cout << "CRITICAL: vertexBuffer is still null when drawing!" << std::endl;
-	}
-
 	ApplySettings();
-
-	m_globalFrameCounter++;
-
-	for (auto it = m_pendingDeletionsGlobal.begin(); it != m_pendingDeletionsGlobal.end(); ) {
-		if (m_globalFrameCounter >= it->safeFrame) {
-			for (auto buf : it->buffers) {
-				if (buf != VK_NULL_HANDLE) vkDestroyBuffer(logicalDevice, buf, nullptr);
-			}
-			for (auto mem : it->memories) {
-				if (mem != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, mem, nullptr);
-			}
-			it = m_pendingDeletionsGlobal.erase(it);
-		}
-		else {
-			++it;
-		}
-	}
-
-	for (auto it = m_pendingTerrainSpanReturns.begin(); it != m_pendingTerrainSpanReturns.end(); ) {
-		if (m_globalFrameCounter >= it->safeFrame) {
-			{
-				std::lock_guard<std::mutex> lock(terrainAllocMutex);
-				freeVertexSpans.push_back(it->vertexSpan);
-				freeIndexSpans.push_back(it->indexSpan);
-			}
-			it = m_pendingTerrainSpanReturns.erase(it);
-		}
-		else {
-			++it;
-		}
-	}
-
-	for (auto it = pendingGrassUploads.begin(); it != pendingGrassUploads.end(); ) {
-		VkResult status = vkGetFenceStatus(logicalDevice, it->fence);
-		if (status == VK_SUCCESS) {
-			// The transfer operation is officially complete on the GPU
-			if (!it->cancelled) {
-				// If it wasn't superseded by an LOD update or repair, we can safely swap or free old grass resources
-				auto oldGrassIt = m_grassChunks.find(it->chunkKey);
-				if (oldGrassIt != m_grassChunks.end()) {
-					// Queue old device buffers up for safe multi-buffered frame-delayed deletion 
-					// to ensure that no active in-flight rendering command buffers are sampling from them
-					PendingDeletion deletion{};
-					deletion.buffers = { oldGrassIt->second.instanceBuffer };
-					deletion.memories = { oldGrassIt->second.instanceMemory };
-					deletion.safeFrame = m_globalFrameCounter + MAX_FRAMES_IN_FLIGHT;
-					m_pendingDeletionsGlobal.push_back(deletion);
-				}
-
-				// Bind the completed buffer to the main rendering map
-				m_grassChunks[it->chunkKey] = it->grassChunk;
-			}
-			else {
-				// If the transfer was cancelled/superseded before it could finish, discard its device target buffers immediately
-				DestroyBuffer(it->grassChunk.instanceBuffer, it->grassChunk.instanceMemory);
-			}
-
-			// Cleanup staging buffer and transfer objects safely
-			DestroyBuffer(it->stagingBuffer, it->stagingMemory);
-			vkDestroyFence(logicalDevice, it->fence, nullptr);
-			vkFreeCommandBuffers(logicalDevice, uploadCommandPool, 1, &it->commandBuffer);
-
-			it = pendingGrassUploads.erase(it);
-		}
-		else if (status == VK_NOT_READY) {
-			++it; // Still executing on the GPU, pass to next loop iteration
-		}
-		else {
-			throw std::runtime_error("vkGetFenceStatus failed for grass upload");
-		}
-	}
 
 	DrawGUI();
 
+	drawCallCount = 0;
+	sceneTotalVertices = 0;
+	sceneTotalIndices = 0;
+	culledCount = 0;
+
+	m_globalFrameCounter++;
+
+	m_uploader.Tick(m_globalFrameCounter);
+
+	m_pendingDeletionsGlobal.Flush(m_globalFrameCounter, [&](BufferDeletion& del) {
+		// buffers[i]/memories[i] are always pushed as matched pairs (see
+		// BufferDeletion push sites) — DestroyBuffer already does the
+		// null-check-and-null-out, no need to duplicate that here.
+		for (size_t i = 0; i < del.buffers.size(); ++i) {
+			DestroyBuffer(del.buffers[i], del.memories[i]);
+		}
+		});
+
+	m_terrainRenderer.Tick(m_globalFrameCounter);
+	m_grassRenderer.Tick(m_globalFrameCounter);
+
 	vkWaitForFences(logicalDevice, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
-
-	for (auto it = m_staleWaterQueue.begin(); it != m_staleWaterQueue.end(); ) {
-		if (it->safeFrameIndex == currentFrame) {
-			DestroyBuffer(it->vertexBuffer, it->vertexMemory);
-			DestroyBuffer(it->indexBuffer, it->indexMemory);
-			it = m_staleWaterQueue.erase(it);
-		}
-		else {
-			++it;
-		}
-	}
-
-	// --- Process completed asynchronous uploads (NEW) ---
-	for (auto it = pendingUploads.begin(); it != pendingUploads.end(); ) {
-		VkResult status = vkGetFenceStatus(logicalDevice, it->fence);
-		if (status == VK_SUCCESS) {
-			if (it->cancelled) {
-				// Chunk was removed while this upload was in flight. Don't
-				// resurrect it into terrainChunks — just reclaim the span
-				// and staging resources now that the GPU is actually done.
-				// Safe to free immediately: this span was never drawn from
-				// (the chunk never made it into terrainChunks).
-				{
-					std::lock_guard<std::mutex> lock(terrainAllocMutex);
-					freeVertexSpans.push_back({ it->chunk.vertexOffset, it->chunk.vertexCount });
-					freeIndexSpans.push_back({ it->chunk.indexOffset, it->chunk.indexCount });
-				}
-			}
-			else {
-				auto existingIt = terrainChunks.find(it->chunkKey);
-				if (existingIt != terrainChunks.end()) {
-					// This is an LOD-upgrade replace: the old chunk here
-					// WAS drawn, and frames up to MAX_FRAMES_IN_FLIGHT old
-					// may still be executing a draw against its span.
-					// Defer the return instead of freeing immediately.
-					PendingSpanReturn ret;
-					ret.vertexSpan = { existingIt->second.vertexOffset, existingIt->second.vertexCount };
-					ret.indexSpan = { existingIt->second.indexOffset, existingIt->second.indexCount };
-					ret.safeFrame = m_globalFrameCounter + MAX_FRAMES_IN_FLIGHT;
-					m_pendingTerrainSpanReturns.push_back(ret);
-				}
-
-				it->chunk.ready = true;
-				terrainChunks[it->chunkKey] = it->chunk;
-			}
-
-			// Upload finished – destroy staging buffers and free command buffer
-			DestroyBuffer(it->stagingVertexBuffer, it->stagingVertexMemory);
-			DestroyBuffer(it->stagingIndexBuffer, it->stagingIndexMemory);
-
-			vkDestroyFence(logicalDevice, it->fence, nullptr);
-			vkFreeCommandBuffers(logicalDevice, uploadCommandPool, 1, &it->commandBuffer);
-			it = pendingUploads.erase(it);
-		}
-		else if (status == VK_NOT_READY) {
-			++it;   // Not finished yet, keep it
-		}
-		else {
-			throw std::runtime_error("vkGetFenceStatus failed for upload");
-		}
-	}
 
 	uint32_t imageIndex;
 	VkResult acquireResult = vkAcquireNextImageKHR(logicalDevice, swapChain, UINT64_MAX,
@@ -3259,94 +1853,6 @@ void VulkanRenderer::DrawFrame() {
 	// Advance to next frame
 	currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
 }
-void VulkanRenderer::DrawSkybox(VkCommandBuffer commandBuffer) {
-	if (m_skyboxTexture.imageView == VK_NULL_HANDLE) return;
-	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, skyboxPipeline);
-	vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, skyboxPipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
-	vkCmdDraw(commandBuffer, 3, 1, 0, 0);
-}
-void VulkanRenderer::DrawWater(VkCommandBuffer commandBuffer) {
-	if (m_waterBodies.empty()) return;
-
-	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, waterPipeline);
-	vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, waterPipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
-
-	float elapsed = std::chrono::duration<float>(std::chrono::high_resolution_clock::now() - m_waterStartTime).count();
-
-	for (const auto& body : m_waterBodies) {
-		VkBuffer vertexBuffers[] = { body.vertexBuffer };
-		VkDeviceSize offsets[] = { 0 };
-		vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
-		vkCmdBindIndexBuffer(commandBuffer, body.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-
-		WaterPushConstants constants{};
-		constants.modelMatrix = glm::mat4(1.0f);
-		constants.time = elapsed;
-		constants.normalTextureId = body.normalTextureId;
-		constants.tiling = body.tiling;
-		constants.waveStrength = body.waveStrength;
-
-		vkCmdPushConstants(commandBuffer, waterPipelineLayout,
-			VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-			0, sizeof(WaterPushConstants), &constants);
-
-		vkCmdDrawIndexed(commandBuffer, body.indexCount, 1, 0, 0, 0);
-		drawCallCount++;
-	}
-}
-void VulkanRenderer::DrawGrass(VkCommandBuffer commandBuffer) {
-	if (m_grassChunks.empty()) return;
-
-	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, grassPipeline);
-	vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-		grassPipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
-
-	static auto startTime = std::chrono::high_resolution_clock::now();
-	float time = std::chrono::duration<float>(
-		std::chrono::high_resolution_clock::now() - startTime).count();
-
-	for (const auto& [key, grassChunk] : m_grassChunks) {
-		// 1. Frustum & occlusion culling (keep your existing checks)
-		auto terrainIt = terrainChunks.find(key);
-		if (terrainIt != terrainChunks.end()) {
-			if (terrainIt->second.cachedOccluded ||
-				!IsSphereInFrustum(terrainIt->second.center, terrainIt->second.radius))
-				continue;
-		}
-
-		// 2. Compute distance and LOD for this chunk
-		float dist = glm::length(grassChunk.center - cameraPosition);
-
-		// Smooth transition range
-		float lodStart = 100.0f;   // where to begin reducing quality
-		float lodEnd = 250.0f;   // full simplification reached here
-
-		float lodFactor = std::clamp((dist - lodStart) / (lodEnd - lodStart), 0.0f, 1.0f);
-
-		// 3. Fill push constants with LOD
-		GrassPushConstants push{};
-		push.time = time;
-		push.textureId = 1;   // your grass texture index
-		push.windStrength = 2.0f;
-		push.windSpeed = 2.5f;
-		push.lodFactor = lodFactor;
-
-		vkCmdPushConstants(commandBuffer,
-			grassPipelineLayout,
-			VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-			0,
-			sizeof(GrassPushConstants),
-			&push);
-
-		// 4. Bind instance buffer and draw
-		VkBuffer buffers[] = { grassChunk.instanceBuffer };
-		VkDeviceSize offsets[] = { 0 };
-		vkCmdBindVertexBuffers(commandBuffer, 0, 1, buffers, offsets);
-
-		vkCmdDraw(commandBuffer, 24, grassChunk.instanceCount, 0, 0);
-		drawCallCount++;
-	}
-}
 
 void VulkanRenderer::Cleanup() {
 	m_isShuttingDown = true;
@@ -3365,7 +1871,7 @@ void VulkanRenderer::Cleanup() {
 		imguiDescriptorPool = VK_NULL_HANDLE;
 	}
 
-	// 2. Clean up Swapchain and dependent resources
+	// 2. Clean up Resources
 	if (colorImageView != VK_NULL_HANDLE) vkDestroyImageView(logicalDevice, colorImageView, nullptr);
 	if (colorImage != VK_NULL_HANDLE) vkDestroyImage(logicalDevice, colorImage, nullptr);
 	if (colorImageMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, colorImageMemory, nullptr);
@@ -3388,55 +1894,35 @@ void VulkanRenderer::Cleanup() {
 	}
 	swapChainImageViews.clear();
 
+	// 3. Clean up swapchain
 	if (swapChain != VK_NULL_HANDLE) {
 		vkDestroySwapchainKHR(logicalDevice, swapChain, nullptr);
 		swapChain = VK_NULL_HANDLE;
 	}
 
-	// Clean up grass
-	if (logicalDevice != VK_NULL_HANDLE) {
-		for (auto& [key, grassChunk] : m_grassChunks) {
-			DestroyBuffer(grassChunk.instanceBuffer, grassChunk.instanceMemory);
-		}
-		m_grassChunks.clear();
-
-		if (grassPipeline != VK_NULL_HANDLE) {
-			vkDestroyPipeline(logicalDevice, grassPipeline, nullptr);
-			grassPipeline = VK_NULL_HANDLE;
-		}
-		if (grassPipelineLayout != VK_NULL_HANDLE) {
-			vkDestroyPipelineLayout(logicalDevice, grassPipelineLayout, nullptr);
-			grassPipelineLayout = VK_NULL_HANDLE;
-		}
-	}
-
-	// 3. Process remaining pending uploads/deletions immediately
-	if (logicalDevice != VK_NULL_HANDLE) {
-		for (auto& upload : pendingUploads) {
-			if (upload.fence != VK_NULL_HANDLE) vkDestroyFence(logicalDevice, upload.fence, nullptr);
-			DestroyBuffer(upload.stagingVertexBuffer, upload.stagingVertexMemory);
-			DestroyBuffer(upload.stagingIndexBuffer, upload.stagingIndexMemory);
-		}
-		pendingUploads.clear();
-	}
-
-	// 4. Clean up pipelines, layouts, and individual shader modules
+	// 4. Sub-system Cleanups
 	if (logicalDevice != VK_NULL_HANDLE) {
 		// Main Mesh Graphics Pipeline
 		if (graphicsPipeline != VK_NULL_HANDLE) vkDestroyPipeline(logicalDevice, graphicsPipeline, nullptr);
 		if (pipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(logicalDevice, pipelineLayout, nullptr);
 
+		m_staticMeshRenderer.Cleanup();
+
+		// Terrain Pipeline
+		m_terrainRenderer.Cleanup();
+
 		// Skybox Pipeline
-		if (skyboxPipeline != VK_NULL_HANDLE) vkDestroyPipeline(logicalDevice, skyboxPipeline, nullptr);
-		if (skyboxPipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(logicalDevice, skyboxPipelineLayout, nullptr);
-		if (skyboxVertModule != VK_NULL_HANDLE) vkDestroyShaderModule(logicalDevice, skyboxVertModule, nullptr);
-		if (skyboxFragModule != VK_NULL_HANDLE) vkDestroyShaderModule(logicalDevice, skyboxFragModule, nullptr);
+		m_skybox.Cleanup(logicalDevice);
 
 		// Water Pipeline
-		if (waterPipeline != VK_NULL_HANDLE) vkDestroyPipeline(logicalDevice, waterPipeline, nullptr);
-		if (waterPipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(logicalDevice, waterPipelineLayout, nullptr);
-		if (waterVertModule != VK_NULL_HANDLE) vkDestroyShaderModule(logicalDevice, waterVertModule, nullptr);
-		if (waterFragModule != VK_NULL_HANDLE) vkDestroyShaderModule(logicalDevice, waterFragModule, nullptr);
+		m_waterRenderer.Cleanup(logicalDevice);
+
+		// Grass Pipeline
+		m_grassRenderer.Cleanup();
+
+
+		// Uploader
+		m_uploader.Shutdown();
 
 		if (renderPass != VK_NULL_HANDLE) {
 			vkDestroyRenderPass(logicalDevice, renderPass, nullptr);
@@ -3444,33 +1930,10 @@ void VulkanRenderer::Cleanup() {
 		}
 	}
 
-	// 5. Clean up individual Water bodies that haven't been queued for deletion
-	if (logicalDevice != VK_NULL_HANDLE) {
-		for (auto& water : m_waterBodies) {
-			DestroyBuffer(water.vertexBuffer, water.vertexMemory);
-			DestroyBuffer(water.indexBuffer, water.indexMemory);
-		}
-		m_waterBodies.clear();
-
-		// Wipe out any stale water buffers that were left waiting in the queue
-		for (auto& stale : m_staleWaterQueue) {
-			DestroyBuffer(stale.vertexBuffer, stale.vertexMemory);
-			DestroyBuffer(stale.indexBuffer, stale.indexMemory);
-		}
-		m_staleWaterQueue.clear();
-	}
-
 	// 6. Clean up Descriptor Sets, Pools, Layouts & Textures
 	if (logicalDevice != VK_NULL_HANDLE) {
 		if (descriptorPool != VK_NULL_HANDLE) vkDestroyDescriptorPool(logicalDevice, descriptorPool, nullptr);
 		if (descriptorSetLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(logicalDevice, descriptorSetLayout, nullptr);
-
-		// Clean up the ONLY texture the renderer owns (Skybox)
-		if (m_skyboxTexture.sampler != VK_NULL_HANDLE) vkDestroySampler(logicalDevice, m_skyboxTexture.sampler, nullptr);
-		if (m_skyboxTexture.imageView != VK_NULL_HANDLE) vkDestroyImageView(logicalDevice, m_skyboxTexture.imageView, nullptr);
-		if (m_skyboxTexture.image != VK_NULL_HANDLE) vkDestroyImage(logicalDevice, m_skyboxTexture.image, nullptr);
-		// Note: Assuming your Texture struct calls this 'imageMemory', which was used in your original asset loading.
-		if (m_skyboxTexture.imageMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, m_skyboxTexture.imageMemory, nullptr);
 
 		// Let the AssetManager clean up all the other 37 leaked textures (sand, grass, rock)
 		if (assetManager != nullptr) {
@@ -3487,22 +1950,6 @@ void VulkanRenderer::Cleanup() {
 		// Light Buffer
 		if (lightBufferMapped != nullptr) vkUnmapMemory(logicalDevice, lightBufferMemory);
 		DestroyBuffer(lightBuffer, lightBufferMemory);
-
-		// Global Static Meshes Buffer
-		DestroyBuffer(globalVertexBuffer, globalVertexBufferMemory);
-		DestroyBuffer(globalIndexBuffer, globalIndexBufferMemory);
-
-		// Global Terrain Buffer
-		DestroyBuffer(globalTerrainVertexBuffer, globalTerrainVertexMemory);
-		DestroyBuffer(globalTerrainIndexBuffer, globalTerrainIndexMemory);
-
-		// Dynamic extra allocated terrain buffers
-		for (auto buf : m_allocatedTerrainBuffers) vkDestroyBuffer(logicalDevice, buf, nullptr);
-		for (auto mem : m_allocatedTerrainMemory) vkFreeMemory(logicalDevice, mem, nullptr);
-
-		// Persistent Staging Ring Buffer
-		if (m_stagingBufferMapped != nullptr) vkUnmapMemory(logicalDevice, m_globalStagingMemory);
-		DestroyBuffer(m_globalStagingBuffer, m_globalStagingMemory);
 	}
 
 	// 8. Clean up Sync Objects (Semaphores & Fences)
@@ -3523,7 +1970,6 @@ void VulkanRenderer::Cleanup() {
 	// 9. Clean up Command pools
 	if (logicalDevice != VK_NULL_HANDLE) {
 		if (commandPool != VK_NULL_HANDLE) vkDestroyCommandPool(logicalDevice, commandPool, nullptr);
-		if (uploadCommandPool != VK_NULL_HANDLE) vkDestroyCommandPool(logicalDevice, uploadCommandPool, nullptr);
 	}
 
 	// 10. Destroy the core Vulkan Handles

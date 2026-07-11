@@ -178,6 +178,12 @@
     <ClCompile Include="mesh.cpp" />
     <ClCompile Include="networkManager.cpp" />
     <ClCompile Include="renderer.cpp" />
+    <ClCompile Include="renderer_grass.cpp" />
+    <ClCompile Include="renderer_skybox.cpp" />
+    <ClCompile Include="renderer_static.cpp" />
+    <ClCompile Include="renderer_terrain.cpp" />
+    <ClCompile Include="renderer_water.cpp" />
+    <ClCompile Include="ring_buffer_uploader.cpp" />
     <ClCompile Include="settings.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -185,12 +191,19 @@
     <ClInclude Include="chunk.h" />
     <ClInclude Include="FastNoiseLite.h" />
     <ClInclude Include="game.h" />
+    <ClInclude Include="gpu_async.h" />
     <ClInclude Include="gpu_instances.h" />
     <ClInclude Include="input.h" />
     <ClInclude Include="logger.h" />
     <ClInclude Include="mesh.h" />
     <ClInclude Include="networkManager.h" />
     <ClInclude Include="renderer.h" />
+    <ClInclude Include="renderer_grass.h" />
+    <ClInclude Include="renderer_skybox.h" />
+    <ClInclude Include="renderer_static.h" />
+    <ClInclude Include="renderer_terrain.h" />
+    <ClInclude Include="renderer_water.h" />
+    <ClInclude Include="ring_buffer_uploader.h" />
     <ClInclude Include="scene.h" />
     <ClInclude Include="scene_types.h" />
     <ClInclude Include="settings.h" />
@@ -200,6 +213,7 @@
     <ClInclude Include="tiny_obj_loader.h" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="shaders\grass.comp" />
     <None Include="shaders\grass.frag" />
     <None Include="shaders\grass.vert" />
     <None Include="shaders\shader.frag" />
