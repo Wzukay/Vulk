@@ -7,6 +7,7 @@
 // --- Static seed for height queries ---
 int Chunk::s_globalSeed = 23645;
 float Chunk::m_chunkSize = 512.0f;
+std::unordered_map<int64_t, ChunkGridCache> Chunk::s_activeChunkGrids;
 
 Chunk::Chunk() : threadPool(std::max(1u, std::thread::hardware_concurrency() - 1)) {}
 
@@ -17,16 +18,127 @@ void Chunk::Init(VulkanRenderer& renderer) {
     m_chunkSize = chunkSize;
 }
 
+uint32_t Chunk::Hash2D(int x, int z, int seed) {
+    uint32_t h = static_cast<uint32_t>(seed);
+    h ^= static_cast<uint32_t>(x) * 374761393U + static_cast<uint32_t>(z) * 668265263U;
+    h = (h ^ (h >> 13)) * 1274126177U;
+    return h ^ (h >> 16);
+}
 std::string ChunkName(int cx, int cz) {
     return "terrain_chunk_" + std::to_string(cx) + "_" + std::to_string(cz);
 }
-
 int Chunk::DesiredLodForDistance(float distance) const {
     if (distance < chunkSize * 2.0f)  return 0;
-    if (distance < chunkSize * 4.0f)  return 1;
-    if (distance < chunkSize * 8.0f)  return 2;
-    if (distance < chunkSize * 16.0f) return 3;
+    if (distance < chunkSize * 4.0f)   return 1;
+    if (distance < chunkSize * 7.0f)   return 2;
+    if (distance < chunkSize * 9.0f)   return 3;
     return 4;
+}
+float Chunk::GetHeight(float worldX, float worldZ) {
+    return CalculateHeightAndColor(worldX, worldZ).first;
+}
+float Chunk::GetCachedHeightFromGrid(float worldX, float worldZ) {
+    // 1. Convert world coordinates to chunk grid coordinates
+    int chunkX = static_cast<int>(std::floor(worldX / m_chunkSize));
+    int chunkZ = static_cast<int>(std::floor(worldZ / m_chunkSize));
+
+    int64_t chunkKey = ChunkCoord{ chunkX, chunkZ }.Key();
+    auto it = s_activeChunkGrids.find(chunkKey);
+
+    // Fallback: If chunk isn't loaded in memory yet, evaluate raw noise.
+    // NOTE: CalculateHeightAndColor MUST be a static method for this line to compile!
+    if (it == s_activeChunkGrids.end() || it->second.heightData.empty()) {
+        return CalculateHeightAndColor(worldX, worldZ).first;
+    }
+
+    // 2. Get normalized local position within the chunk [0.0 to 1.0]
+    float localX = (worldX - (chunkX * m_chunkSize)) / m_chunkSize;
+    float localZ = (worldZ - (chunkZ * m_chunkSize)) / m_chunkSize;
+
+    // 3. Map to exact array cell indices
+    const int res = it->second.resolution;
+    float gridX = localX * (res - 1);
+    float gridZ = localZ * (res - 1);
+
+    int x0 = std::clamp(static_cast<int>(gridX), 0, res - 2);
+    int z0 = std::clamp(static_cast<int>(gridZ), 0, res - 2);
+    int x1 = x0 + 1;
+    int z1 = z0 + 1;
+
+    // 4. Fetch the 4 corner heights from the cached array
+    const auto& heights = it->second.heightData;
+    float h00 = heights[z0 * res + x0];
+    float h10 = heights[z0 * res + x1];
+    float h01 = heights[z1 * res + x0];
+    float h11 = heights[z1 * res + x1];
+
+    // 5. Bilinear interpolation for smooth sub-grid height estimation
+    float tx = gridX - x0;
+    float tz = gridZ - z0;
+    float h0 = std::lerp(h00, h10, tx);
+    float h1 = std::lerp(h01, h11, tx);
+
+    return std::lerp(h0, h1, tz);
+}
+void Chunk::RemoveGridCache(int64_t chunkKey) {
+    s_activeChunkGrids.erase(chunkKey);
+}
+bool Chunk::HasCameraShiftedNoticeably(const glm::vec3& camPos, const glm::vec3& camForward) {
+    glm::vec3 diff = camPos - m_lastPreGenCamPos;
+    float distSq = glm::dot(diff, diff);
+    if (distSq > (MOVE_THRESHOLD * MOVE_THRESHOLD)) return true;
+
+    float angleCos = glm::dot(glm::normalize(camForward), glm::normalize(m_lastPreGenCamForward));
+    if (angleCos < ROTATE_THRESHOLD) return true;
+
+    return false;
+}
+glm::vec3 Chunk::ChunkBoundsCenter(int cx, int cz) const {
+    float centerX = cx * chunkSize + chunkSize * 0.5f;
+    float centerZ = cz * chunkSize + chunkSize * 0.5f;
+    return glm::vec3(centerX, 0.0f, centerZ);
+}
+float Chunk::ChunkBoundsRadius() const {
+    float footprintRadius = (chunkSize * 1.41421356f) * 0.5f;
+    float heightMargin = 100.0f;
+    return std::sqrt(footprintRadius * footprintRadius + heightMargin * heightMargin);
+}
+std::vector<glm::vec2> Chunk::ConvexHull(std::vector<glm::vec2> points) {
+    if (points.size() <= 3) return points;
+    std::sort(points.begin(), points.end(),
+        [](const glm::vec2& a, const glm::vec2& b) {
+            return a.x < b.x || (a.x == b.x && a.y < b.y);
+        });
+
+    std::vector<glm::vec2> hull;
+    // Lower hull
+    for (const auto& p : points) {
+        while (hull.size() >= 2) {
+            const auto& a = hull[hull.size() - 2];
+            const auto& b = hull.back();
+            if ((b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x) <= 0.0f)
+                hull.pop_back();
+            else
+                break;
+        }
+        hull.push_back(p);
+    }
+    // Upper hull
+    size_t lower_size = hull.size();
+    for (int i = (int)points.size() - 2; i >= 0; --i) {
+        const auto& p = points[i];
+        while (hull.size() > lower_size) {
+            const auto& a = hull[hull.size() - 2];
+            const auto& b = hull.back();
+            if ((b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x) <= 0.0f)
+                hull.pop_back();
+            else
+                break;
+        }
+        hull.push_back(p);
+    }
+    hull.pop_back(); // remove duplicate last point
+    return hull;
 }
 
 bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& renderer) {
@@ -50,11 +162,6 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
             }
         }
 
-        // Only kick the amortized rebuild back to the start once per
-        // detection, instead of once per mismatched chunk. Resetting
-        // m_currentAmortizeIndex per-chunk discarded all progress through
-        // m_desiredList every single frame, so distant chunks never got a
-        // turn to actually dispatch and repair themselves.
         if (anyMismatch && !m_needsGridRebuild) {
             m_needsGridRebuild = true;
             m_currentAmortizeIndex = 0;
@@ -91,26 +198,32 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
                 scene.RemoveChunk(resultKey);
             }
 
+            for (const auto& treeData : result.trees) {
+                Entity treeEntity = scene.GetRegistry().CreateEntity();
+
+                TransformComponent tComp;
+                tComp.position = treeData.position;
+                tComp.rotation = treeData.rotation;
+                tComp.scale = treeData.scale;
+                tComp.isDirty = true;
+                scene.GetRegistry().AddComponent<TransformComponent>(treeEntity, tComp);
+
+                RenderComponent rComp;
+                rComp.meshName = "assets/models/tree/tree.obj";
+                rComp.type = MeshType::Static;
+                rComp.isInstanced = true;
+                rComp.isVisible = true;
+                scene.GetRegistry().AddComponent<RenderComponent>(treeEntity, rComp);
+
+                ChunkPropComponent cComp;
+                cComp.chunkKey = resultKey;
+                scene.GetRegistry().AddComponent<ChunkPropComponent>(treeEntity, cComp);
+            }
+
+            scene.MarkDirty();
+
             renderer.AddTerrainChunk(resultKey, result.coord.cx, result.coord.cz, result.lod, result.vertices, result.indices);
             renderer.AddGrass(resultKey, result.grassInstances);
-
-            //if (result.waterMesh) {
-            //    renderer.AddWaterBodyForChunk(
-            //        resultKey,
-            //        *result.waterMesh,
-            //        "",
-            //        8.0f,
-            //        0.15f
-            //    );
-            //}
-            //if (result.rivers) {
-            //    for (auto& river : *result.rivers) {
-            //        WaterMesh riverMesh = WaterMeshGen::GenerateRiver(river.path, river.width, 4);
-            //        if (!riverMesh.indices.empty()) {
-            //            renderer.AddWaterBodyForChunk(resultKey, riverMesh, "", 8.0f, 0.15f);
-            //        }
-            //    }
-            //}
 
             loadedChunks[resultKey] = result.lod;
             loadingChunks.erase(resultKey);
@@ -124,7 +237,6 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
 
     if (++frameCounter > 60) {
         frameCounter = 0;
-
         shouldCleanup = true;
     }
 
@@ -274,6 +386,9 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
         if (m_desiredKeysLookup.find(it->first) == m_desiredKeysLookup.end()) {
             renderer.RemoveTerrainChunk(it->first);
             renderer.RemoveWaterBody(it->first);
+
+            scene.RemoveChunk(it->first);
+
             it = loadedChunks.erase(it);
         }
         else {
@@ -368,7 +483,7 @@ void Chunk::PreGenerateChunks(const glm::vec3& camPos, Scene& scene, VulkanRende
                 jobData.vertices = std::move(buffers.vertices);
                 jobData.indices = std::move(buffers.indices);
 
-                GenerateChunk(cx, cz, targetResolution, size, jobData, cancelToken);   // ← same change
+                GenerateChunk(cx, cz, targetResolution, size, jobData, cancelToken);
                 return jobData;
                 });
 
@@ -399,7 +514,7 @@ std::pair<float, glm::vec3> Chunk::CalculateHeightAndColor(float worldX, float w
 
         lakeNoise.SetNoiseType(FastNoiseLite::NoiseType_Cellular);
         lakeNoise.SetCellularDistanceFunction(FastNoiseLite::CellularDistanceFunction_Euclidean);
-        lakeNoise.SetCellularReturnType(FastNoiseLite::CellularReturnType_CellValue); // one value per cell -> one hole per cell
+        lakeNoise.SetCellularReturnType(FastNoiseLite::CellularReturnType_CellValue);
         lakeNoise.SetFrequency(0.0045f);
 
         warpNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
@@ -436,45 +551,6 @@ std::pair<float, glm::vec3> Chunk::CalculateHeightAndColor(float worldX, float w
     float curvedNoise = std::pow(rawBase, blendedExp);
     float finalHeight = curvedNoise * blendedScale;
 
-    // ==========================================================
-    // LAKE HOLES - the ONLY source of basins now. GenerateChunk's
-    // water-fill step (section 6) fills exactly these holes; there's
-    // no other terrain-carving noise left underneath it to conflict.
-    // ==========================================================
-    if (blendedWeights.y >= 0.5f) {
-        int chunkX = (int)std::floor(worldX / m_chunkSize);
-        int chunkZ = (int)std::floor(worldZ / m_chunkSize);
-
-        // Simple hash to get a 0.0 - 1.0 "random" value per chunk, so only
-        // a minority of chunks ever roll a lake at all.
-        auto hash = [](int x, int z) {
-            uint32_t h = (uint32_t)(x * 374761397 + z * 668265263);
-            h = (h ^ (h >> 13)) * 1274126177;
-            return (float)(h & 0xFFFFFF) / (float)0xFFFFFF;
-            };
-
-        //if (hash(chunkX, chunkZ) < 0.15f) {
-        //    float lakeVal = (lakeNoise.GetNoise(worldX, worldZ) + 1.0f) * 0.5f;
-
-        //    if (lakeVal > 0.80f) {
-        //        float tLake = (lakeVal - 0.80f) / 0.20f;
-        //        float smoothLake = tLake * tLake * (3.0f - 2.0f * tLake);
-
-        //        float baseDepth = 15.0f + (smoothLake * 65.0f);
-        //        float ripple = warpNoise.GetNoise(worldX, worldZ) * 4.0f; // ±4 units, cosmetic only
-        //        float targetDepth = baseDepth + ripple;
-
-        //        float plainsFade = (blendedWeights.y - 0.5f) / 0.5f;
-        //        plainsFade = std::max(0.0f, std::min(1.0f, plainsFade));
-
-        //        finalHeight -= targetDepth * smoothLake * plainsFade;
-
-        //        // Debug color - remove once you're happy with placement.
-        //        blendedWeights = glm::vec3(1.0f, 0.0f, 0.0f);
-        //    }
-        //}
-    }
-
     if (t < COLD_BOUND) {
         float coldFactor = 1.0f - (t / COLD_BOUND);
         finalHeight += coldFactor * 20.0f;
@@ -491,8 +567,7 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
     outResult.vertices.clear();
     outResult.indices.clear();
     outResult.grassInstances.clear();
-    outResult.waterMesh.reset();
-    outResult.rivers.reset();
+    outResult.trees.clear();
 
     outResult.vertices.reserve(resolution * resolution + (resolution - 1) * 8);
     outResult.indices.reserve(((resolution - 1) * (resolution - 1) * 6) + ((resolution - 1) * 4 * 6));
@@ -517,6 +592,16 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
             colorGrid[rowOffset + gx] = blendedWeights;
         }
     }
+
+    std::vector<float> physicsGrid(resolution * resolution);
+    for (int z = 0; z < resolution; ++z) {
+        for (int x = 0; x < resolution; ++x) {
+            physicsGrid[z * resolution + x] = heightGrid[(z + 1) * gridSize + (x + 1)];
+        }
+    }
+
+    int64_t chunkKey = ChunkCoord{ chunkX, chunkZ }.Key();
+    s_activeChunkGrids[chunkKey] = ChunkGridCache{ resolution, std::move(physicsGrid) };
 
     auto GetCachedHeight = [&](int localX, int localZ) -> float {
         return heightGrid[(localZ + 1) * gridSize + (localX + 1)];
@@ -646,36 +731,50 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
     );
     outResult.vertices = std::move(rearrangedVertices);
 
-    int stride = 1;
-    int bladesPerVertex = 2; // Reduced baseline from 6 to 4 (Cross-quads are already thick)
-    float widthMultiplier = 1;
-
-    if (outResult.lod > 0) {
-        stride = 5 * outResult.lod;
-        bladesPerVertex = 1;
-        widthMultiplier = outResult.lod;
-    }
-    else if (outResult.lod > 5) {
-        outResult.grassInstances.clear();
-        return;
-    }
-
-    const float JITTER_RADIUS = 6;
-
-    outResult.grassInstances.reserve((outResult.vertices.size() / stride) * bladesPerVertex);
-
-    // Fast thread-safe random function to avoid blocking main thread rand()
     auto fastRand = [](uint32_t& state) -> float {
         state ^= state << 13; state ^= state >> 17; state ^= state << 5;
         return (float)state / (float)UINT32_MAX;
         };
     uint32_t rngState = static_cast<uint32_t>(chunkX * 73856 + chunkZ * 19349 + 1);
 
+    // ================================================================
+    // ---- TREE generation (Deterministic World-Space scatter) ----
+    // ================================================================
+    GenerateChunkTrees(chunkX, chunkZ, outResult);
+
+    int stride = 2;
+    int bladesPerVertex = 6;
+    float widthMultiplier = 1.0f;
+
+    if (outResult.lod == 1) {
+        stride = 3;
+        bladesPerVertex = 2;
+        widthMultiplier = 2.0f;
+    }
+    else if (outResult.lod == 2) {
+        stride = 6;
+        bladesPerVertex = 1;
+        widthMultiplier = 3.0f;
+    }
+    else if (outResult.lod == 3) {
+        stride = 9;
+        bladesPerVertex = 1;
+        widthMultiplier = 4.5f;
+    }
+    else if (outResult.lod == 4) {
+        stride = 12;
+        bladesPerVertex = 1;
+        widthMultiplier = 6;
+    }
+
+    const float JITTER_RADIUS = 6.5f;
+
+    outResult.grassInstances.reserve((outResult.vertices.size() / stride) * bladesPerVertex);
+
     for (size_t i = 0; i < outResult.vertices.size(); i += stride) {
         const auto& v = outResult.vertices[i];
 
-        // Only grow grass on flat terrain (check normal) and above water height
-        if (v.normal.y > 0.5f && v.pos.y > -5.0f && v.color.y >= 0.8f) {
+        if (v.normal.y > 0.75f && v.pos.y > -5.0f && v.color.y >= 0.8f) {
             for (int n = 0; n < bladesPerVertex; n++) {
                 GrassInstance inst;
 
@@ -687,9 +786,8 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
 
                 float randVal = fastRand(rngState);
 
-                // Height stays the same, but width is multiplied by our LOD scaler
-                float height = 2.0f + (randVal * 1.0f);
-                float baseWidth = 0.25f + (randVal * 0.15f);
+                float height = 1.5f + (randVal * 2.0f);
+                float baseWidth = height * 1.2f;
                 float finalWidth = baseWidth * widthMultiplier;
 
                 inst.scale = glm::vec3(finalWidth, height, finalWidth);
@@ -699,222 +797,48 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
             }
         }
     }
-
-    // ================================================================
-    // ---- 6. LAKE generation (basin filling on the modified terrain) ----
-    // ================================================================
-
-    //const int gW = gridSize;
-    //const int gH = gridSize;
-
-    //// Helper lambda for grid access
-    //auto getH = [&](int x, int y) -> float {
-    //    if (x < 0 || x >= gW || y < 0 || y >= gH) return 1e9f;
-    //    return heightGrid[y * gW + x];
-    //    };
-
-    //std::vector<int> basinLabels(gW* gH, -1);
-    //int nextLabel = 0;
-
-    //std::vector<std::pair<int, int>> pathScratch;
-    //pathScratch.reserve(64);
-
-    //// 6a. Label basins (Optimized: avoid tracing already labeled cells)
-    //for (int y = 0; y < gH; ++y) {
-    //    for (int x = 0; x < gW; ++x) {
-    //        if (basinLabels[y * gW + x] != -1) continue;
-
-    //        pathScratch.clear();
-    //        int cx = x, cy = y;
-    //        int foundLabel = -1;
-
-    //        for (int depth = 0; depth < 4096; ++depth) { // generous safety cap
-    //            if (basinLabels[cy * gW + cx] != -1) {
-    //                foundLabel = basinLabels[cy * gW + cx];
-    //                break;
-    //            }
-    //            pathScratch.emplace_back(cx, cy);
-
-    //            float lowest = getH(cx, cy);
-    //            int nx = cx, ny = cy;
-    //            const int dirs[4][2] = { {1,0},{-1,0},{0,1},{0,-1} };
-    //            for (auto d : dirs) {
-    //                float h = getH(cx + d[0], cy + d[1]);
-    //                if (h < lowest) { lowest = h; nx = cx + d[0]; ny = cy + d[1]; }
-    //            }
-    //            if (nx == cx && ny == cy) break; // reached a local minimum
-    //            cx = nx; cy = ny;
-    //        }
-
-    //        if (foundLabel == -1) foundLabel = nextLabel++;
-    //        for (auto& p : pathScratch) {
-    //            basinLabels[p.second * gW + p.first] = foundLabel;
-    //        }
-    //    }
-    //}
-
-    //// 6b. Find rim heights and filter basins
-    //std::vector<float> basinWaterLevel(nextLabel, 1e9f);
-    //std::vector<bool> basinValid(nextLabel, true);
-
-    //for (int y = 0; y < gH; ++y) {
-    //    for (int x = 0; x < gW; ++x) {
-    //        int label = basinLabels[y * gW + x];
-    //        if (label == -1) continue;
-
-    //        // Constraint: If basin touches chunk edge, invalidate it
-    //        if (x == 0 || x == gW - 1 || y == 0 || y == gH - 1) basinValid[label] = false;
-
-    //        const int dirs[4][2] = { {1,0},{-1,0},{0,1},{0,-1} };
-    //        for (auto d : dirs) {
-    //            int nx = x + d[0], ny = y + d[1];
-    //            if (nx < 0 || nx >= gW || ny < 0 || ny >= gH) continue;
-    //            if (basinLabels[ny * gW + nx] != label) {
-    //                basinWaterLevel[label] = std::min(basinWaterLevel[label], getH(nx, ny));
-    //            }
-    //        }
-    //    }
-    //}
-
-    //// 6c. Generate Masked Meshes
-    //for (int label = 0; label < nextLabel; ++label) {
-    //    if (!basinValid[label] || basinWaterLevel[label] >= 1e8f) continue;
-
-    //    float minFloor = 1e9f;
-    //    std::vector<bool> cellMask(gW * gH, false);
-    //    bool hasWater = false;
-
-    //    for (int i = 0; i < gW * gH; ++i) {
-    //        if (basinLabels[i] == label) {
-    //            float h = heightGrid[i];
-    //            minFloor = std::min(minFloor, h);
-    //            if (h < basinWaterLevel[label] - 0.5f) { // 0.5f = min depth
-    //                cellMask[i] = true;
-    //                hasWater = true;
-    //            }
-    //        }
-    //    }
-
-    //    if (!hasWater || (basinWaterLevel[label] - minFloor) < 2.0f) continue;
-
-    //    WaterMesh lakeMesh = WaterMeshGen::GenerateLakeFromMask(
-    //        cellMask, gW, gH,
-    //        originX - step, originZ - step,
-    //        step, basinWaterLevel[label]
-    //    );
-
-    //    if (!lakeMesh.indices.empty()) {
-    //        if (!outResult.waterMesh) outResult.waterMesh = WaterMesh{};
-    //        uint32_t vOffset = (uint32_t)outResult.waterMesh->vertices.size();
-    //        outResult.waterMesh->vertices.insert(outResult.waterMesh->vertices.end(), lakeMesh.vertices.begin(), lakeMesh.vertices.end());
-    //        for (auto idx : lakeMesh.indices) outResult.waterMesh->indices.push_back(idx + vOffset);
-    //    }
-    //}
-
-    //// ================================================================
-    //// ---- 7. RIVER generation ----
-    //// ================================================================
-
-    //const int maxRivers = 2;
-    //std::vector<RiverSegment> rivers;
-
-    //uint32_t rngState = static_cast<uint32_t>(chunkX * 73856093u ^ chunkZ * 19349663u + seed);
-
-    //auto randFloat = [&rngState]() -> float {
-    //    rngState = rngState * 1664525u + 1013904223u;
-    //    return (rngState & 0x7FFFFFFFu) / 2147483648.0f;
-    //    };
-
-    //for (int attempt = 0; attempt < 20 && rivers.size() < maxRivers; ++attempt) {
-    //    int rx = 1 + (int)(randFloat() * (gW - 2));
-    //    int ry = 1 + (int)(randFloat() * (gH - 2));
-    //    float startH = getH(rx, ry);
-
-    //    // Check if it's a local maximum (peak)
-    //    bool isPeak = true;
-    //    for (int dy = -1; dy <= 1; ++dy) {
-    //        for (int dx = -1; dx <= 1; ++dx) {
-    //            if (dx == 0 && dy == 0) continue;
-    //            if (getH(rx + dx, ry + dy) >= startH) {
-    //                isPeak = false;
-    //                break;
-    //            }
-    //        }
-    //        if (!isPeak) break;
-    //    }
-    //    if (!isPeak) continue;
-
-    //    // Trace steepest descent
-    //    std::vector<glm::vec3> path;
-    //    int cx = rx, cy = ry;
-    //    float currentH = startH;
-    //    bool hitLake = false;
-
-    //    for (int stepCount = 0; stepCount < 200; ++stepCount) {
-    //        path.push_back(glm::vec3(originX + (cx - 1) * step, currentH, originZ + (cy - 1) * step));
-
-    //        // Check if we reached a lake
-    //        int label = basinLabels[cy * gW + cx];
-    //        if (label != -1 && basinWaterLevel[label] < 1e8f && currentH <= basinWaterLevel[label]) {
-    //            hitLake = true;
-    //            break;
-    //        }
-
-    //        float lowest = currentH;
-    //        int nx = cx, ny = cy;
-    //        const int dirs[4][2] = { {1,0},{-1,0},{0,1},{0,-1} };
-    //        for (auto d : dirs) {
-    //            int tx = cx + d[0], ty = cy + d[1];
-    //            if (tx < 1 || tx >= gW - 1 || ty < 1 || ty >= gH - 1) continue;
-    //            float h = getH(tx, ty);
-    //            if (h < lowest) {
-    //                lowest = h;
-    //                nx = tx; ny = ty;
-    //            }
-    //        }
-    //        if (nx == cx && ny == cy) break;
-    //        cx = nx; cy = ny;
-    //        currentH = lowest;
-    //    }
-
-    //    if (path.size() > 5 && hitLake) {
-    //        RiverSegment seg;
-    //        seg.path = std::move(path);
-    //        seg.width = 2.0f + randFloat() * 4.0f;
-    //        rivers.push_back(std::move(seg));
-    //    }
-    //}
-
-    //if (!rivers.empty()) {
-    //    outResult.rivers = std::move(rivers);
-    //}
 }
 
-float Chunk::GetHeight(float worldX, float worldZ) {
-    return CalculateHeightAndColor(worldX, worldZ).first;
-}
+void Chunk::GenerateChunkTrees(int chunkX, int chunkZ, ChunkJobResult& outResult) {
+    const float stepSize = 8.0f; // Check for a tree every 8 world units
+    const float startX = chunkX * m_chunkSize;
+    const float startZ = chunkZ * m_chunkSize;
 
-bool Chunk::HasCameraShiftedNoticeably(const glm::vec3& camPos, const glm::vec3& camForward) {
-    glm::vec3 diff = camPos - m_lastPreGenCamPos;
-    float distSq = glm::dot(diff, diff);
-    if (distSq > (MOVE_THRESHOLD * MOVE_THRESHOLD)) return true;
+    for (float x = startX; x < startX + m_chunkSize; x += stepSize) {
+        for (float z = startZ; z < startZ + m_chunkSize; z += stepSize) {
 
-    float angleCos = glm::dot(glm::normalize(camForward), glm::normalize(m_lastPreGenCamForward));
-    if (angleCos < ROTATE_THRESHOLD) return true;
+            uint32_t coordHash = Hash2D(static_cast<int>(x), static_cast<int>(z), s_globalSeed);
+            float spawnChance = (coordHash % 1000) / 1000.0f;
 
-    return false;
-}
+            if (spawnChance < 0.06f) { // 6% density
 
-glm::vec3 Chunk::ChunkBoundsCenter(int cx, int cz) const {
-    float centerX = cx * chunkSize + chunkSize * 0.5f;
-    float centerZ = cz * chunkSize + chunkSize * 0.5f;
-    return glm::vec3(centerX, 0.0f, centerZ);
-}
+                // Thread-safe: evaluate raw noise math instead of accessing maps/arrays
+                float groundY = CalculateHeightAndColor(x, z).first;
 
-float Chunk::ChunkBoundsRadius() const {
-    float footprintRadius = (chunkSize * 1.41421356f) * 0.5f;
-    float heightMargin = 100.0f;
-    return std::sqrt(footprintRadius * footprintRadius + heightMargin * heightMargin);
+                // Ignore underwater plots or high peaks
+                if (groundY > 2.0f && groundY < 85.0f) {
+
+                    // Quick normal check to prevent trees sticking out of sheer cliffs
+                    float hL = CalculateHeightAndColor(x - 1.0f, z).first;
+                    float hR = CalculateHeightAndColor(x + 1.0f, z).first;
+                    float hD = CalculateHeightAndColor(x, z - 1.0f).first;
+                    float hU = CalculateHeightAndColor(x, z + 1.0f).first;
+                    glm::vec3 normal = glm::normalize(glm::vec3(hL - hR, 2.0f, hD - hU));
+
+                    if (normal.y > 0.85f) {
+                        TreeInstance tree;
+                        tree.position = glm::vec3(x, groundY, z);
+                        tree.rotation = glm::vec3(0.0f, static_cast<float>(coordHash % 360), 0.0f);
+
+                        float randomScale = 0.8f + (static_cast<float>((coordHash >> 8) % 70) / 100.0f);
+                        tree.scale = glm::vec3(randomScale);
+
+                        outResult.trees.push_back(tree);
+                    }
+                }
+            }
+        }
+    }
 }
 
 void Chunk::UpdateFogParamsBasedOnData(VulkanRenderer& renderer) {
@@ -922,44 +846,6 @@ void Chunk::UpdateFogParamsBasedOnData(VulkanRenderer& renderer) {
     float fogStart = 0.3125f * totalViewDistance;
     float fogEnd = 0.3320f * totalViewDistance;
     renderer.SetFogParams(fogStart, fogEnd);
-}
-
-std::vector<glm::vec2> Chunk::ConvexHull(std::vector<glm::vec2> points) {
-    if (points.size() <= 3) return points;
-    std::sort(points.begin(), points.end(),
-        [](const glm::vec2& a, const glm::vec2& b) {
-            return a.x < b.x || (a.x == b.x && a.y < b.y);
-        });
-
-    std::vector<glm::vec2> hull;
-    // Lower hull
-    for (const auto& p : points) {
-        while (hull.size() >= 2) {
-            const auto& a = hull[hull.size() - 2];
-            const auto& b = hull.back();
-            if ((b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x) <= 0.0f)
-                hull.pop_back();
-            else
-                break;
-        }
-        hull.push_back(p);
-    }
-    // Upper hull
-    size_t lower_size = hull.size();
-    for (int i = (int)points.size() - 2; i >= 0; --i) {
-        const auto& p = points[i];
-        while (hull.size() > lower_size) {
-            const auto& a = hull[hull.size() - 2];
-            const auto& b = hull.back();
-            if ((b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x) <= 0.0f)
-                hull.pop_back();
-            else
-                break;
-        }
-        hull.push_back(p);
-    }
-    hull.pop_back(); // remove duplicate last point
-    return hull;
 }
 
 void Chunk::Shutdown() {

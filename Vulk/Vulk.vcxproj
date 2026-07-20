@@ -163,6 +163,7 @@
   <ItemGroup>
     <ClCompile Include="assetManager.cpp" />
     <ClCompile Include="chunk.cpp" />
+    <ClCompile Include="ecs.cpp" />
     <ClCompile Include="game.cpp" />
     <ClCompile Include="include\imgui\imgui.cpp" />
     <ClCompile Include="include\imgui\imgui_draw.cpp" />
@@ -177,6 +178,7 @@
     <ClCompile Include="main.cpp" />
     <ClCompile Include="mesh.cpp" />
     <ClCompile Include="networkManager.cpp" />
+    <ClCompile Include="player.cpp" />
     <ClCompile Include="renderer.cpp" />
     <ClCompile Include="renderer_grass.cpp" />
     <ClCompile Include="renderer_skybox.cpp" />
@@ -187,8 +189,9 @@
     <ClCompile Include="settings.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="assetManager.h" />
+    <ClInclude Include="asset_manager.h" />
     <ClInclude Include="chunk.h" />
+    <ClInclude Include="ecs.h" />
     <ClInclude Include="FastNoiseLite.h" />
     <ClInclude Include="game.h" />
     <ClInclude Include="gpu_async.h" />
@@ -196,7 +199,9 @@
     <ClInclude Include="input.h" />
     <ClInclude Include="logger.h" />
     <ClInclude Include="mesh.h" />
-    <ClInclude Include="networkManager.h" />
+    <ClInclude Include="network_manager.h" />
+    <ClInclude Include="player.h" />
+    <ClInclude Include="player_system.h" />
     <ClInclude Include="renderer.h" />
     <ClInclude Include="renderer_grass.h" />
     <ClInclude Include="renderer_skybox.h" />
@@ -209,17 +214,20 @@
     <ClInclude Include="settings.h" />
     <ClInclude Include="stb_image.h" />
     <ClInclude Include="texture.h" />
-    <ClInclude Include="threadPool.h" />
+    <ClInclude Include="thread_pool.h" />
     <ClInclude Include="tiny_obj_loader.h" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="shaders\grass.comp" />
     <None Include="shaders\grass.frag" />
     <None Include="shaders\grass.vert" />
+    <None Include="shaders\instanced.frag" />
+    <None Include="shaders\instanced.vert" />
     <None Include="shaders\shader.frag" />
     <None Include="shaders\shader.vert" />
     <None Include="shaders\skybox.frag" />
     <None Include="shaders\skybox.vert" />
+    <None Include="shaders\static.frag" />
+    <None Include="shaders\static.vert" />
     <None Include="shaders\water.frag" />
     <None Include="shaders\water.vert" />
   </ItemGroup>

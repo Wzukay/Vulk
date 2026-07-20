@@ -15,13 +15,13 @@
 #include <queue>
 #include <optional>
 
-#include "assetManager.h"
+#include "asset_manager.h"
 #include "scene.h"
 
 #include "renderer.h"
 #include "renderer_grass.h"
 
-#include "threadPool.h"
+#include "thread_pool.h"
 #include "mesh.h"
 #include "FastNoiseLite.h"
 #include "meshoptimizer.h"
@@ -118,6 +118,12 @@ struct RiverSegment {
     float width;
 };
 
+struct TreeInstance {
+    glm::vec3 position;
+    glm::vec3 rotation;
+    glm::vec3 scale;
+};
+
 struct ChunkJobResult {
     ChunkCoord coord;
     std::vector<ModelVertex> vertices;
@@ -125,12 +131,13 @@ struct ChunkJobResult {
     int lod;
 
     std::vector<GrassInstance> grassInstances;
+    std::vector<TreeInstance> trees;
 
     // Present only if this chunk actually generated water/rivers — replaces
     // the old hasWater/waterMesh and hasRiver/rivers bool+data pairs, so
     // there's no separate flag that can fall out of sync with the data.
-    std::optional<WaterMesh> waterMesh;
-    std::optional<std::vector<RiverSegment>> rivers;
+    //std::optional<WaterMesh> waterMesh;
+    //std::optional<std::vector<RiverSegment>> rivers;
 };
 struct ChunkSortItem {
     ChunkCoord coord;
@@ -139,6 +146,11 @@ struct ChunkSortItem {
     int targetResolution;
     bool isImmediate;
 };
+struct ChunkGridCache {
+    int resolution;
+    std::vector<float> heightData;
+};
+
 
 struct ActiveJob {
     std::future<ChunkJobResult> future;
@@ -178,8 +190,8 @@ public:
     Chunk();
 
     float chunkSize = 512;
-    int resolution = 65;
-    int viewDistanceChunks = 16;
+    int resolution = 45;
+    int viewDistanceChunks = 24;
     int immediateViewChunks = 4;
     static int s_globalSeed;
 
@@ -192,6 +204,11 @@ public:
     void SetRandomSeed() { s_globalSeed = std::rand() % 1000000; }
     bool Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& renderer);
     void PreGenerateChunks(const glm::vec3& camPos, Scene& scene, VulkanRenderer& renderer);
+
+    static float GetCachedHeightFromGrid(float worldX, float worldZ);
+    static void RemoveGridCache(int64_t chunkKey);
+    static float GetHeight(float worldX, float worldZ);
+
     void Shutdown();
 
 private:
@@ -221,6 +238,8 @@ private:
     glm::vec3 m_lastPreGenCamPos = glm::vec3(std::numeric_limits<float>::max());
     glm::vec3 m_lastPreGenCamForward = glm::vec3(0.0f);
 
+    static std::unordered_map<int64_t, ChunkGridCache> s_activeChunkGrids;
+
     void UpdateFogParamsBasedOnData(VulkanRenderer& renderer);
     glm::vec3 ChunkBoundsCenter(int cx, int cz) const;
     bool HasCameraShiftedNoticeably(const glm::vec3& camPos, const glm::vec3& camForward);
@@ -231,12 +250,9 @@ private:
     static std::vector<glm::vec2> ConvexHull(std::vector<glm::vec2> points);
     static std::pair<float, glm::vec3> CalculateHeightAndColor(float worldX, float worldZ);
 
-    // Single source of truth for the distance->LOD bucketing used both when
-    // detecting stale-LOD chunks and when deciding what to dispatch. Was
-    // previously duplicated inline in both places with identical thresholds
-    // that could silently drift apart.
     int DesiredLodForDistance(float distance) const;
+    void EvictUnloadedChunks(Scene& scene, VulkanRenderer& renderer);
 
-public:
-    static float GetHeight(float worldX, float worldZ);
+    static uint32_t Hash2D(int x, int z, int seed);
+    void GenerateChunkTrees(int chunkX, int chunkZ, ChunkJobResult& outResult);
 };

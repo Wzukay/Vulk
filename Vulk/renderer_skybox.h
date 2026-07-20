@@ -3,7 +3,7 @@
 #include <vulkan/vulkan_core.h>
 #include <string>
 
-#include "assetManager.h"   // for Texture
+#include "asset_manager.h"   // for Texture
 
 // Owns everything needed to draw the skybox: its pipeline/shader modules
 // and cubemap texture.

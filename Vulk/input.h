@@ -2,12 +2,23 @@
 
 #include <GLFW/glfw3.h>
 #include <glm/gtc/matrix_transform.hpp>
+#include <algorithm>
+#include <iostream>
 
 struct CameraData {
 	glm::vec3 pos;
 	glm::vec3 front;
 	glm::vec3 up;
 };
+
+enum class ControlMode {
+	Player,
+	NoClip
+};
+
+inline ControlMode g_CurrentMode = ControlMode::NoClip;
+
+static bool f1KeyPressedLastFrame = false;
 
 extern CameraData cam;
 

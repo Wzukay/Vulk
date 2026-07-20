@@ -1,14 +1,15 @@
 #include "game.h"
-#include "assetManager.h"
+#include "asset_manager.h"
+#include "player_system.h"
 
 #include <chrono>
 
 GameLogger debugLog;
-bool isReadyToDraw = false;
 static glm::vec3 lastCamPos;
+extern ControlMode g_CurrentMode;
 
 void Game::Init()
-{ 
+{
     std::cout << "Starting Base Vulkan Setup...\n";
 
     g_Settings.LoadFromFile();
@@ -16,22 +17,35 @@ void Game::Init()
     renderer.Initialize(g_Settings.windowWidth, g_Settings.windowHeight, "Vulk");
     window = renderer.GetWindow();
 
-	chunk.Init(renderer);
-
-    //g_AssetManager.LoadMesh("assets/models/sponza/sponza.obj");
-
-    //glm::mat4 sponzaTransform = glm::mat4(1.0f);
-    //sponzaTransform = glm::rotate(sponzaTransform, glm::radians(90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-    //sponzaTransform = glm::scale(sponzaTransform, glm::vec3(0.3f));
-    //scene.AddInstance("assets/models/sponza/sponza.obj", sponzaTransform, 1);
+    chunk.Init(renderer);
 
     uint32_t sandId = g_AssetManager.LoadTextureFromFile("assets/textures/sand_albedo.dds");   // Index 0
-    uint32_t grassId = g_AssetManager.LoadTextureFromFile("assets/textures/grass_albedo.dds");  // Index 1
+    uint32_t grassId = g_AssetManager.LoadTextureFromFile("assets/textures/grass2_albedo.dds");  // Index 1
     uint32_t rockId = g_AssetManager.LoadTextureFromFile("assets/textures/rock_albedo.dds");   // Index 2
+    uint32_t grassBillboardId = g_AssetManager.LoadTextureFromFile("assets/textures/grass_billboard.dds"); // Index 3
 
-    uint32_t sandNormalId = g_AssetManager.LoadTextureFromFile("assets/textures/sand_normal.dds");
-    uint32_t grassNormalId = g_AssetManager.LoadTextureFromFile("assets/textures/grass_normal.dds");
-    uint32_t rockNormalId = g_AssetManager.LoadTextureFromFile("assets/textures/rock_normal.dds");
+    uint32_t sandNormalId = g_AssetManager.LoadNormalTextureFromFile("assets/textures/sand_normal.dds");
+    uint32_t grassNormalId = g_AssetManager.LoadNormalTextureFromFile("assets/textures/grass2_normal.dds");
+    uint32_t rockNormalId = g_AssetManager.LoadNormalTextureFromFile("assets/textures/rock_normal.dds");
+    uint32_t grassBillboardNormalId = g_AssetManager.LoadNormalTextureFromFile("assets/textures/grass_billboard_normal.dds");
+
+    //g_AssetManager.LoadMesh("assets/models/sponza/sponza.obj");
+    g_AssetManager.LoadMesh("assets/models/tree/tree.obj");
+
+    Entity sponzaWorldEntity = scene.GetRegistry().CreateEntity();
+
+    //TransformComponent sponzaTransform;
+    //sponzaTransform.position = glm::vec3(100.0f, 20.0f, 200.0f);
+    //sponzaTransform.rotation = glm::vec3(0.0f, 0.0f, 0.0f); // Stands upright naturally
+    //sponzaTransform.scale = glm::vec3(0.3f);
+    //sponzaTransform.isDirty = true;
+    //scene.GetRegistry().AddComponent<TransformComponent>(sponzaWorldEntity, sponzaTransform);
+
+    //RenderComponent sponzaRender;
+    //sponzaRender.meshName = "assets/models/sponza/sponza.obj";
+    //sponzaRender.type = MeshType::Static; //
+    //sponzaRender.isVisible = true;
+    //scene.GetRegistry().AddComponent<RenderComponent>(sponzaWorldEntity, sponzaRender);
 
     scene.AddLight(MakeDirectional(glm::vec3(0.6f, 0.9f, 0.6f), glm::vec3(0.75f, 0.7f, 0.65f), 1.0f));
     //scene.AddLight(MakePoint(glm::vec3(2.0f, 10.0f, -1.0f), glm::vec3(1.0f, 0.4f, 0.2f), 1.0f, 15.0f));
@@ -56,7 +70,7 @@ void Game::Init()
         debugLog.AddLog("[Lobby] Contacting introduction server. Standing by...");
     }
     else {
-        chunk.SetSeed(23645);
+        chunk.SetSeed(69696967);
 
         CameraData initialCam = { glm::vec3(100.0f, 60.0f, 250.0f),
                                   glm::normalize(glm::vec3(0.0f, sin(glm::radians(-30.0f)), -cos(glm::radians(-30.0f)))),
@@ -67,6 +81,19 @@ void Game::Init()
         isReadyToDraw = true;
     }
 
+    localPlayerEntity = scene.GetRegistry().CreateEntity();
+
+    TransformComponent pTransform;
+    pTransform.position = glm::vec3(100.0f, 60.0f, 250.0f);
+    scene.GetRegistry().AddComponent<TransformComponent>(localPlayerEntity, pTransform);
+
+    PhysicsComponent pPhysics;
+    scene.GetRegistry().AddComponent<PhysicsComponent>(localPlayerEntity, pPhysics);
+
+    PlayerComponent pPlayer;
+    pPlayer.minSlopeDot = std::cos(glm::radians(pPlayer.maxSlopeAngle)); // Cache our dot product limit cleanly
+    scene.GetRegistry().AddComponent<PlayerComponent>(localPlayerEntity, pPlayer);
+
     renderer.UpdateScene(scene);
 
     isRunning = true;
@@ -75,6 +102,7 @@ void Game::Init()
 void Game::Loop()
 {
     auto lastUpdate = std::chrono::steady_clock::now();
+    double lastFrameTime = glfwGetTime();
     bool firstRun = true;
 
     if (!window) {
@@ -83,7 +111,9 @@ void Game::Loop()
     }
 
     while (!renderer.ShouldClose() && isRunning) {
-        auto frameStart = std::chrono::high_resolution_clock::now();
+        double currentFrameTime = glfwGetTime();
+        float deltaTime = std::min(static_cast<float>(currentFrameTime - lastFrameTime), 0.1f);
+        lastFrameTime = currentFrameTime;
 
         renderer.PollEvents();
 
@@ -93,33 +123,32 @@ void Game::Loop()
         CameraData cam = input.ProcessInput(window);
 
         if (isReadyToDraw) {
+            extern ControlMode g_CurrentMode;
+            auto& transform = scene.GetRegistry().GetComponent<TransformComponent>(localPlayerEntity);
+            auto& physics = scene.GetRegistry().GetComponent<PhysicsComponent>(localPlayerEntity);
+            auto& playerOpt = scene.GetRegistry().GetComponent<PlayerComponent>(localPlayerEntity);
+
+            if (g_CurrentMode == ControlMode::Player) {
+                // Update player positions using our decoupled kinematics system
+                PlayerSystem::Update(scene.GetRegistry(), window, cam.front, cam.up, deltaTime);
+                cam.pos = transform.position + glm::vec3(0.0f, playerOpt.playerHeight, 0.0f);
+            }
+            else {
+                // Freecam mode: update coordinates independently of physics
+                transform.position = cam.pos - glm::vec3(0.0f, playerOpt.playerHeight, 0.0f);
+                physics.velocity = glm::vec3(0.0f);
+                transform.isDirty = true;
+            }
+
             renderer.UpdateUniformBuffer({ cam.pos, cam.front, cam.up });
-
-            //auto chunkStart = std::chrono::high_resolution_clock::now();
-            //chunk.Update(cam.pos, scene, renderer);
-            //chunk.PreGenerateChunks(cam.pos, scene, renderer);
-            //auto chunkEnd = std::chrono::high_resolution_clock::now();
-            //float chunkMs = std::chrono::duration<float, std::milli>(chunkEnd - chunkStart).count();
-
-            //auto renderStart = std::chrono::high_resolution_clock::now();
-            //renderer.DrawFrame();
-            //auto renderEnd = std::chrono::high_resolution_clock::now();
-            //float renderMs = std::chrono::duration<float, std::milli>(renderEnd - renderStart).count();
-
-            //auto frameEnd = std::chrono::high_resolution_clock::now();
-            //float frameMs = std::chrono::duration<float, std::milli>(frameEnd - frameStart).count();
-            //if (frameMs > 16.0f) {
-            //    std::cout << "[Frame] Chunk: " << chunkMs << " ms, Render: " << renderMs << " ms, Total: " << frameMs << "\n";
-            //}
 
             chunk.Update(cam.pos, scene, renderer);
             chunk.PreGenerateChunks(cam.pos, scene, renderer);
 
-            renderer.DrawFrame();
+            renderer.UpdateScene(scene);
         }
-        else {
-            renderer.DrawFrame();
-        }
+
+        renderer.DrawFrame();
     }
 
     std::cout << "Closing and dropping pipelines...\n";
@@ -140,7 +169,7 @@ void Game::ShutdownCleanly() {
 }
 
 void Game::ProcessNetworkPackets() {
-    isHost = netManager.IsHost();   
+    isHost = netManager.IsHost();
 
     if (isHost && !isReadyToDraw) {
         // Double check if we are truly ready (meaning we have received our manifest response)
@@ -234,7 +263,7 @@ void Game::ProcessNetworkPackets() {
                     iAmLowest = false;
                 }
             }
-            
+
             if (iAmLowest) {
                 isHost = true;
                 netManager.PromoteToHost();
@@ -253,7 +282,7 @@ void Game::ProcessNetworkPackets() {
     if (stateChanged) {
         std::cout << " LIVE DIAGNOSTIC LOG MATRIX:\n";
         auto currentLogs = debugLog.GetLogs();
-    
+
         for (size_t i = 0; i < 8; ++i) {
             if (i < currentLogs.size()) {
                 std::cout << " > " << currentLogs[i] << "\n";

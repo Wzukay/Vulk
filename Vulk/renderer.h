@@ -22,7 +22,7 @@
 #include "scene_types.h"
 
 #include "settings.h"
-#include "assetManager.h"
+#include "asset_manager.h"
 
 #include "renderer_skybox.h"
 #include "renderer_water.h"
@@ -191,7 +191,10 @@ public:
 
 private:
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
-    VkPipeline graphicsPipeline = VK_NULL_HANDLE;
+    
+    VkPipeline terrainPipeline = VK_NULL_HANDLE;
+    VkPipeline staticPipeline = VK_NULL_HANDLE;
+    VkPipeline instancedPipeline = VK_NULL_HANDLE;
 
     VkDescriptorSetLayout descriptorSetLayout;
     VkDescriptorPool descriptorPool;
@@ -238,7 +241,7 @@ private:
 
 public:
     void SetLights(const std::vector<Light>& lights);
-    
+
 private:
     StaticMeshRenderer m_staticMeshRenderer;
 public:
@@ -248,10 +251,10 @@ private:
     TerrainRenderer m_terrainRenderer;
 
 public:
-    void AddTerrainChunk( int64_t key, int cx, int cz, int lod,
+    void AddTerrainChunk(int64_t key, int cx, int cz, int lod,
         const std::vector<ModelVertex>& vertices,
         const std::vector<uint32_t>& indices);
-    void RemoveTerrainChunk( int64_t key);
+    void RemoveTerrainChunk(int64_t key);
     void SetTerrainChunkSize(float size);
     void ClearHeightCache();
 

@@ -1,33 +1,37 @@
 #pragma once
 
-#include "networkManager.h"
+#include "network_manager.h"
 #include "logger.h"
 #include "renderer.h"
 #include "input.h"
 #include "chunk.h"
+#include "player.h"
 
 #include <iostream>
 #include <string>
 #include <vector>
 #include <mutex>
-
+#include <memory>
 #include <glm/gtc/matrix_transform.hpp>
 
 #ifdef _WIN32
 #include <conio.h> // Required for _kbhit() and _getch()
 #endif
 
+class Player;
+
 class Game
 {
 private:
 	bool isRunning = false;
+	bool isReadyToDraw = false;
 	bool isHost = false;
 	bool isMultiplayerGame = false;
 
+	Entity localPlayerEntity = INVALID_ENTITY;
+
 	GLFWwindow* window;
-
 	Scene scene;
-
 	AssetManager assetManager;
 	NetworkManager netManager;
 	Chunk chunk;

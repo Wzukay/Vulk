@@ -1,6 +1,7 @@
 #include "renderer_grass.h"
 #include "renderer.h"          // VulkanRenderer methods
-#include "assetManager.h"
+#include "asset_manager.h"
+#include "chunk.h"
 
 #include <stdexcept>
 #include <iostream>
@@ -107,7 +108,7 @@ void GrassRenderer::AddGrass(int64_t key, const std::vector<GrassInstance>& gras
 }
 
 void GrassRenderer::Tick(uint64_t currentFrame) {
-    
+
 }
 
 void GrassRenderer::Draw(VkCommandBuffer commandBuffer, VkDescriptorSet sharedDescriptorSet, uint32_t& outDrawCalls) const {
@@ -122,24 +123,23 @@ void GrassRenderer::Draw(VkCommandBuffer commandBuffer, VkDescriptorSet sharedDe
     float time = std::chrono::duration<float>(
         std::chrono::high_resolution_clock::now() - startTime).count();
 
-    const float maxGrassDist = 600;
+    const float maxGrassDist = 5000;
     const glm::vec3& camPos = m_renderer->GetCameraPosition();
 
     for (const auto& [key, chunk] : m_grassChunks) {
-        // Frustum culling
+        if (chunk.instanceCount == 0 || chunk.instanceBuffer == VK_NULL_HANDLE) continue;
         float dist = glm::length(chunk.center - camPos);
 
         if (!m_renderer->IsSphereInFrustum(chunk.center, chunk.radius)) continue;
 
-        float lodStart = 100.0f;
-        float lodEnd = maxGrassDist;
-        float lodFactor = std::clamp((dist - lodStart) / (lodEnd - lodStart), 0.0f, 1.0f);
+        float lodStart = maxGrassDist * 0.75f;
+        float lodFactor = std::clamp((dist - lodStart) / (maxGrassDist - lodStart), 0.0f, 1.0f);
 
         // Push constants
         GrassPushConstants push{};
         push.time = time;
-        push.textureId = 1;   // grass texture index, adjust if needed
-        push.windStrength = 2.0f;
+        push.textureId = 3;   // grass texture index, adjust if needed
+        push.windStrength = 1.7f;
         push.windSpeed = 2.5f;
         push.lodFactor = lodFactor;
 
@@ -152,7 +152,7 @@ void GrassRenderer::Draw(VkCommandBuffer commandBuffer, VkDescriptorSet sharedDe
         VkDeviceSize offsets[] = { 0 };
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, buffers, offsets);
         vkCmdDraw(commandBuffer, 12, chunk.instanceCount, 0, 0);
-        
+
         outDrawCalls++;
     }
 }

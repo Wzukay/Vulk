@@ -90,12 +90,18 @@
     <ClCompile Include="ring_buffer_uploader.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="player.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="ecs.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="game.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="networkManager.h">
+    <ClInclude Include="network_manager.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="renderer.h">
@@ -128,13 +134,13 @@
     <ClInclude Include="settings.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="assetManager.h">
+    <ClInclude Include="asset_manager.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="chunk.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="threadPool.h">
+    <ClInclude Include="thread_pool.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="mesh.h">
@@ -164,6 +170,15 @@
     <ClInclude Include="ring_buffer_uploader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="player.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ecs.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="player_system.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <None Include="shaders\shader.frag">
@@ -190,7 +205,16 @@
     <None Include="shaders\grass.vert">
       <Filter>Shaders</Filter>
     </None>
-    <None Include="shaders\grass.comp">
+    <None Include="shaders\static.frag">
+      <Filter>Shaders</Filter>
+    </None>
+    <None Include="shaders\static.vert">
+      <Filter>Shaders</Filter>
+    </None>
+    <None Include="shaders\instanced.vert">
+      <Filter>Shaders</Filter>
+    </None>
+    <None Include="shaders\instanced.frag">
       <Filter>Shaders</Filter>
     </None>
   </ItemGroup>

@@ -1,4 +1,4 @@
-#include "assetManager.h"
+#include "asset_manager.h"
 #include "renderer.h"
 
 #include <iostream>
@@ -252,25 +252,35 @@ void AssetManager::CreateDefaultNormalTexture() {
 }
 
 uint32_t AssetManager::LoadTextureFromFile(const std::string& filePath) {
-    // 1. If the texture is already loaded, immediately return its existing index
     auto it = m_textureToId.find(filePath);
     if (it != m_textureToId.end()) {
         return it->second;
     }
 
-    // 2. Initialize a fresh engine Texture structure
+    // Pre-check file existence to catch the missing asset path cleanly
+    std::ifstream checkFile(filePath, std::ios::binary);
+    if (!checkFile.is_open()) {
+        std::cerr << "\n------------------------------------------------------------------------\n"
+            << "[Asset Pipeline Error] FAILED TO OPEN COMPRESSED TEXTURE FILE:\n"
+            << " -> Target Path: " << filePath << "\n"
+            << "[Asset Pipeline Warning] Automatically falling back to default white texture (ID 0).\n"
+            << "------------------------------------------------------------------------\n\n";
+
+        // Map this broken path directly to your clean fallback texture ID 0
+        m_textureToId[filePath] = 0;
+        return 0;
+    }
+    checkFile.close();
+
     Texture tex{};
     CreateTextureImage(filePath, tex, VK_FORMAT_BC7_SRGB_BLOCK);
 
-    // 3. Register the newly built texture into your bindless storage arrays
     uint32_t newId = static_cast<uint32_t>(m_textureRegistry.size());
-    m_textureRegistry.push_back(std::move(tex));   // move, not copy
+    m_textureRegistry.push_back(std::move(tex));
     m_textureToId[filePath] = newId;
 
-    // 4. Signal your pipeline to update the descriptor sets on the next frame
     m_textureDirty = true;
-
-    std::cout << "[AssetManager] Loaded: " << filePath << " -> ID " << newId << "\n";
+    std::cout << "[AssetManager] Loaded albedo: " << filePath << " -> ID " << newId << "\n";
 
     return newId;
 }
@@ -281,14 +291,20 @@ void AssetManager::LoadTexture(const std::string& path) {
     LoadTextureFromFile(path);
 }
 Texture* AssetManager::GetTexture(const std::string& path) {
-    if (path.empty() || path == "default")
+    if (path.empty() || path == "default") {
         return &m_defaultTexture;
+    }
+
     auto it = m_textureToId.find(path);
-    if (it != m_textureToId.end())
-        return &m_textureRegistry[it->second];
-    // Load on demand
-    LoadTexture(path);
-    return &m_textureRegistry[m_textureToId[path]];
+    if (it != m_textureToId.end()) {
+        // CRITICAL CRASH FIX: Explicitly verify the ID falls within the allocated vector bounds
+        if (it->second < m_textureRegistry.size()) {
+            return &m_textureRegistry[it->second];
+        }
+    }
+
+    // Graceful fallback to standalone default texture address if lookups fail or map to 0
+    return &m_defaultTexture;
 }
 uint32_t AssetManager::GetTextureId(const std::string& path) {
     // Return 0 for empty path or "default"
@@ -305,15 +321,29 @@ uint32_t AssetManager::LoadNormalTextureFromFile(const std::string& filePath) {
         return it->second;
     }
 
-    Texture tex{};
+    // Pre-check file existence to catch the missing normal vector path cleanly
+    std::ifstream checkFile(filePath, std::ios::binary);
+    if (!checkFile.is_open()) {
+        std::cerr << "\n------------------------------------------------------------------------\n"
+            << "[Asset Pipeline Error] FAILED TO OPEN COMPRESSED NORMAL FILE:\n"
+            << " -> Target Path: " << filePath << "\n"
+            << "[Asset Pipeline Warning] Automatically falling back to flat default normal (ID 0).\n"
+            << "------------------------------------------------------------------------\n\n";
 
+        // Map this broken normal path directly to your flat baseline texture ID 0
+        m_normalTextureToId[filePath] = 0;
+        return 0;
+    }
+    checkFile.close();
+
+    Texture tex{};
     CreateTextureImage(filePath, tex, VK_FORMAT_BC7_UNORM_BLOCK);
 
     uint32_t newId = static_cast<uint32_t>(m_normalTextureRegistry.size());
     m_normalTextureRegistry.push_back(std::move(tex));
     m_normalTextureToId[filePath] = newId;
 
-    m_textureDirty = true; // Tell renderer to update descriptor pools
+    m_textureDirty = true;
     std::cout << "[AssetManager] Loaded normal: " << filePath << " -> ID " << newId << "\n";
 
     return newId;
@@ -324,13 +354,20 @@ void AssetManager::LoadNormalTexture(const std::string& path) {
     LoadNormalTextureFromFile(path);
 }
 Texture* AssetManager::GetNormalTexture(const std::string& path) {
-    if (path.empty())
+    if (path.empty() || path == "default") {
         return &m_defaultNormalTexture;
+    }
+
     auto it = m_normalTextureToId.find(path);
-    if (it != m_normalTextureToId.end())
-        return &m_normalTextureRegistry[it->second];
-    LoadNormalTexture(path);
-    return &m_normalTextureRegistry[m_normalTextureToId[path]];
+    if (it != m_normalTextureToId.end()) {
+        // CRITICAL CRASH FIX: Explicitly verify the ID falls within the allocated vector bounds
+        if (it->second < m_normalTextureRegistry.size()) {
+            return &m_normalTextureRegistry[it->second];
+        }
+    }
+
+    // Graceful fallback to flat standalone normal texture address if lookups fail or map to 0
+    return &m_defaultNormalTexture;
 }
 uint32_t AssetManager::GetNormalTextureId(const std::string& path) {
     if (path.empty()) return 0; // slot 0 reserved for default flat normal
@@ -746,7 +783,7 @@ static std::string GuessNormalMapPath(const std::string& diffusePath) {
     }
     return "";
 }
-void AssetManager::ParseObjFileByMaterial(const std::string& filepath,
+bool AssetManager::ParseObjFileByMaterial(const std::string& filepath,
     std::vector<std::vector<ModelVertex>>& verticesPerMaterial,
     std::vector<std::vector<uint32_t>>& indicesPerMaterial,
     std::vector<std::string>& textureFilenames,
@@ -766,8 +803,15 @@ void AssetManager::ParseObjFileByMaterial(const std::string& filepath,
     bool result = tinyobj::LoadObj(&attrib, &shapes, &materials, &err,
         filepath.c_str(), baseDir.empty() ? nullptr : baseDir.c_str(), true);
 
+    // CRITICAL FIX: Intercept parsing errors and return false instead of throwing a fatal exception!
     if (!result) {
-        throw std::runtime_error("[Asset Error] Failed to parse .obj file structure: " + err);
+        std::cerr << "\n------------------------------------------------------------------------\n"
+            << "[Asset Pipeline Error] FAILED TO LOAD MESH FILE:\n"
+            << " -> Target Path: " << filepath << "\n"
+            << " -> TinyObjLoader Error: " << err
+            << "[Asset Pipeline Warning] Returning empty geometry to prevent crash.\n"
+            << "------------------------------------------------------------------------\n\n";
+        return false;
     }
 
     size_t materialCount = materials.size();
@@ -783,7 +827,7 @@ void AssetManager::ParseObjFileByMaterial(const std::string& filepath,
             ? ""
             : baseDir + materials[m].diffuse_texname;
 
-        normalMapFilenames[m] = materials[m].bump_texname.empty()  // NEW
+        normalMapFilenames[m] = materials[m].bump_texname.empty()
             ? "" : baseDir + materials[m].bump_texname;
 
         if (normalMapFilenames[m].empty()) {
@@ -838,6 +882,8 @@ void AssetManager::ParseObjFileByMaterial(const std::string& filepath,
 
     std::cout << "[Asset Manager] '" << filepath << "' split into " << materials.size()
         << " materials (+ possible untextured group)\n";
+
+    return true; // Report success back to LoadMesh
 }
 
 void AssetManager::LoadMesh(const std::string& path) {
@@ -848,7 +894,34 @@ void AssetManager::LoadMesh(const std::string& path) {
     std::vector<std::string> textureFilenames;
     std::vector<std::string> normalMapFilenames;
 
-    ParseObjFileByMaterial(path, verticesPerMaterial, indicesPerMaterial, textureFilenames, normalMapFilenames);
+    // CRITICAL FIX: Only process the mesh if the file was successfully read
+    bool parseSuccess = ParseObjFileByMaterial(path, verticesPerMaterial, indicesPerMaterial, textureFilenames, normalMapFilenames);
+
+    if (!parseSuccess) {
+        // Register an empty mesh at this path so the engine doesn't keep trying to load a broken file every frame
+        m_meshes[path] = MeshAsset{};
+        return;
+    }
+
+    // Dynamic Extension Swap (Supports lowercase and uppercase extensions)
+    for (auto& filename : textureFilenames) {
+        if (filename.empty()) continue;
+        size_t extPos = filename.rfind(".tga");
+        if (extPos == std::string::npos) extPos = filename.rfind(".TGA");
+
+        if (extPos != std::string::npos) {
+            filename.replace(extPos, 4, ".dds");
+        }
+    }
+    for (auto& filename : normalMapFilenames) {
+        if (filename.empty()) continue;
+        size_t extPos = filename.rfind(".tga");
+        if (extPos == std::string::npos) extPos = filename.rfind(".TGA");
+
+        if (extPos != std::string::npos) {
+            filename.replace(extPos, 4, ".dds");
+        }
+    }
 
     // Flip winding to match Vulkan's clockwise front face
     for (auto& idxs : indicesPerMaterial) {
@@ -886,9 +959,8 @@ void AssetManager::LoadMesh(const std::string& path) {
         sub.vertexOffset = static_cast<int32_t>(vertexOffset);
         sub.boundingCenterLocal = center;
         sub.boundingRadiusLocal = radius;
-        sub.textureId = 0; // will be set later when scene assigns materials
+        sub.textureId = 0;
 
-        // Append to mesh
         mesh.vertices.insert(mesh.vertices.end(), verts.begin(), verts.end());
         mesh.indices.insert(mesh.indices.end(), idxs.begin(), idxs.end());
         mesh.subMeshes.push_back(sub);
@@ -903,6 +975,7 @@ void AssetManager::LoadMesh(const std::string& path) {
     m_meshes[path] = std::move(mesh);
     std::cout << "[Asset Manager] Loaded mesh: " << path << " with " << m_meshes[path].subMeshes.size() << " submeshes\n";
 }
+
 void AssetManager::RegisterMesh(
     const std::string& name,
     std::vector<ModelVertex>&& vertices,

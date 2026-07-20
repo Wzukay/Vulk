@@ -76,6 +76,30 @@ struct ModelVertex {
     }
 };
 
+struct InstanceData {
+    glm::mat4 modelMatrix;
+
+    static VkVertexInputBindingDescription getBindingDescription() {
+        VkVertexInputBindingDescription desc{};
+        desc.binding = 1; // Binding 1 is reserved for per-instance data
+        desc.stride = sizeof(InstanceData);
+        desc.inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+        return desc;
+    }
+
+    static std::vector<VkVertexInputAttributeDescription> getAttributeDescriptions() {
+        std::vector<VkVertexInputAttributeDescription> descs(4);
+        // A mat4 takes up 4 attribute locations (vec4s) in the shader
+        for (int i = 0; i < 4; i++) {
+            descs[i].binding = 1;
+            descs[i].location = 7 + i;
+            descs[i].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+            descs[i].offset = sizeof(glm::vec4) * i;
+        }
+        return descs;
+    }
+};
+
 struct RenderMesh {
     VkBuffer vertexBuffer = VK_NULL_HANDLE;
     VkDeviceMemory vertexBufferMemory = VK_NULL_HANDLE;

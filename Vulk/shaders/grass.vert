@@ -43,12 +43,12 @@ const vec3 VERT_POSITIONS[12] = vec3[12](
 );
 
 const vec2 VERT_UVS[12] = vec2[12](
-    // Front‑back quad (6 UVs)
-    vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(1.0, 1.0),
-    vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 1.0),
-    // Left‑right quad (6 UVs)
-    vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(1.0, 1.0),
-    vec2(0.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 1.0)
+    // Front-back quad (Corrected Vulkan UVs)
+    vec2(0.0, 1.0), vec2(1.0, 1.0), vec2(1.0, 0.0),
+    vec2(0.0, 1.0), vec2(1.0, 0.0), vec2(0.0, 0.0),
+    // Left-right quad (Corrected Vulkan UVs)
+    vec2(0.0, 1.0), vec2(1.0, 1.0), vec2(1.0, 0.0),
+    vec2(0.0, 1.0), vec2(1.0, 0.0), vec2(0.0, 0.0)
 );
 
 void main() {
@@ -62,20 +62,11 @@ void main() {
     float bladeRand = fract(sin(inInstancePos.x * 12.9898 + inInstancePos.z * 78.233 + inInstancePos.y * 45.164) * 43758.5453);
     outBladeRand = bladeRand;
 
-    // ---- Scaling ----
-    vec3 dimensionModifier = vec3(0.5, 2.2, 0.5);
-    vec3 scaledPos = localPos * (inInstanceScale * dimensionModifier);
-
-    // ---- Taper: noticeably wider at base, very narrow at tip ----
-    float baseWidth = 2.0;   // 100% wider at the ground
-    float tipWidth  = 0.1;   // almost a point at the top
-    float taper = mix(baseWidth, tipWidth, heightNorm * heightNorm);
-    scaledPos.x *= taper;
-    scaledPos.z *= taper;
+    vec3 scaledPos = localPos * inInstanceScale;
 
     // ---- Static curvature with per‑blade variation ----
-    float bladeHeight = inInstanceScale.y * dimensionModifier.y;
-    float bendAmount = 0.15 + bladeRand * 0.25;
+    float bladeHeight = inInstanceScale.y;
+    float bendAmount = 0.10 + bladeRand * 0.15;
     float bendOffset = bendAmount * bladeHeight * heightNorm * heightNorm;
     scaledPos.x += bendOffset;
 
@@ -108,13 +99,12 @@ void main() {
     gust = gust * 0.4 + 0.8;
     float finalWindStrength = push.windStrength * gust;
 
-    // Per‑blade wind multiplier
     float windMultiplier = 0.7 + 0.6 * bladeRand;
     float windScale = 1.0 - push.lodFactor;
 
-    rotatedPos.x += totalWave * finalWindStrength * windScale * bendFactor * windMultiplier;
-    rotatedPos.z += totalWave * finalWindStrength * 0.4  * windScale * bendFactor * windMultiplier;
-    rotatedPos.y -= (totalWave * totalWave) * finalWindStrength * 0.15 * windScale * bendFactor * windMultiplier * 0.7;
+    rotatedPos.x += totalWave * finalWindStrength * windScale * bendFactor * windMultiplier * 0.5;
+    rotatedPos.z += totalWave * finalWindStrength * 0.2 * windScale * bendFactor * windMultiplier;
+    rotatedPos.y -= (totalWave * totalWave) * finalWindStrength * 0.05 * windScale * bendFactor * windMultiplier;
 
     outWorldPos = rotatedPos + inInstancePos;
     gl_Position = ubo.proj * ubo.view * vec4(outWorldPos, 1.0);

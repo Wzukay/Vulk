@@ -17,6 +17,8 @@ struct MeshInstance {
     MeshType type;
 
     int64_t chunkKey = -1;
+
+    bool isInstanced = false;
 };
 
 struct SubMesh {
