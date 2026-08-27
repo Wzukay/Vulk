@@ -7,15 +7,20 @@ struct Light {
     vec4 params;
 };
 
-layout(binding = 0) uniform UniformBufferObject {
+layout(set = 0, binding = 0) uniform UniformBufferObject {
     mat4 view;
     mat4 proj;
     vec3 cameraPos;
     float ambient;
+    vec4 fadeParams;
+    vec2 screenSize;
     float specularPower;
     uint lightCount;
     float fogStart;
     float fogEnd;
+    mat4 inverseViewProj;
+    mat4 inverseProj;
+    mat4 inverseView;
 } ubo;
 
 layout(std430, binding = 1) readonly buffer LightBuffer {
@@ -114,7 +119,9 @@ void main() {
     float dist = length(ubo.cameraPos - fragWorldPos);
     float fogFactor = clamp((dist - ubo.fogStart) / (ubo.fogEnd - ubo.fogStart), 0.0, 1.0);
     if (dist > ubo.fogEnd) fogFactor = 1.0;
+    
     vec3 fogColor = vec3(0.6, 0.7, 0.8);
     vec3 finalColor = mix(result, fogColor, fogFactor);
+
     outColor = vec4(finalColor, 1.0);
 }

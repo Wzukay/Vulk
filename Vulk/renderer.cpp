@@ -1326,9 +1326,15 @@ void VulkanRenderer::UpdateUniformBuffer(const CameraData& cam) {
 	ubo.lightCount = static_cast<uint32_t>(currentLights.size());
 
 	ubo.cameraPos = cam.pos;
-
-	ubo.fogStart = m_fogStart;
-	ubo.fogEnd = m_fogEnd;
+	
+	ubo.fogStart = g_Settings.fogStart;
+	ubo.fogEnd = g_Settings.fogEnd;
+	ubo.fadeParams = glm::vec4(
+		g_Settings.staticFadeStart,   // .x (Read by static.frag)
+		g_Settings.staticFadeEnd,     // .y (Read by static.frag)
+		g_Settings.grassFadeStart,  // .z (Read by grass.frag)
+		g_Settings.grassFadeEnd     // .w (Read by grass.frag)
+	);
 
 	ubo.screenSize = glm::vec2((float)swapChainExtent.width, (float)swapChainExtent.height);
 

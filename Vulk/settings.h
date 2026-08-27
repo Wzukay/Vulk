@@ -4,12 +4,22 @@
 
 struct Settings {
     // --- Rendering ---
-    float renderDistance = 1000.0f;          // far plane distance
-    int maxMipLevels = 4;                    // maximum mip levels for textures (0 = auto)
-    bool vsync = false;                       // enable V-Sync (FIFO present mode)
-    bool anisotropicFiltering = true;        // enable anisotropic filtering
-    float maxAnisotropy = 16.0f;             // max anisotropy level (if supported)
+    float renderDistance = 5000.0f;
+    int maxMipLevels = 4;
+    bool vsync = false;
+    bool anisotropicFiltering = true;
+    float maxAnisotropy = 16.0f;
     int msaaSamples = 4;
+
+    // --- World & LOD Distances (The Source of Truth) ---
+    float fogStart = 3500.0f;
+    float fogEnd = 5000.0f;
+
+    float staticFadeStart = 1200.0f;
+    float staticFadeEnd = 1536.0f;     // Should match where Chunk LOD 3 culls
+
+    float grassFadeStart = 400.0f;
+    float grassFadeEnd = 600.0f;     // Grass usually culls much earlier than trees
 
     // --- Debug ---
     bool showStats = true;
@@ -19,7 +29,6 @@ struct Settings {
     int windowHeight = 720;
     bool fullscreen = false;
 
-    // --- Load/Save (optional) ---
     void LoadFromFile(const std::string& path = "settings.ini");
     void SaveToFile(const std::string& path = "settings.ini") const;
 };

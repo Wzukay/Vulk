@@ -7,15 +7,20 @@ struct Light {
     vec4 params;
 };
 
-layout(binding = 0) uniform UniformBufferObject {
+layout(set = 0, binding = 0) uniform UniformBufferObject {
     mat4 view;
     mat4 proj;
     vec3 cameraPos;
     float ambient;
+    vec4 fadeParams;
+    vec2 screenSize;
     float specularPower;
     uint lightCount;
     float fogStart;
     float fogEnd;
+    mat4 inverseViewProj;
+    mat4 inverseProj;
+    mat4 inverseView;
 } ubo;
 
 layout(std430, binding = 1) readonly buffer LightBuffer {
@@ -58,6 +63,19 @@ void main() {
         discard;
     }
 
+    float ditherNoise = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+    float distToCam = length(ubo.cameraPos - fragWorldPos);
+    
+    // Trees use X (Start) and Y (End)
+    float fadeStartDistance = ubo.fadeParams.x; 
+    float maxFadeDistance = ubo.fadeParams.y; 
+    
+    float fadeAlpha = 1.0 - clamp((distToCam - fadeStartDistance) / (maxFadeDistance - fadeStartDistance), 0.0, 1.0);
+    
+    if (ditherNoise > fadeAlpha) {
+        discard;
+    }
+
     // Tangent Space normal mapping setup
     vec3 N_geo = normalize(fragNormal);
     vec3 T = normalize(fragTangent);
@@ -84,8 +102,8 @@ void main() {
 
     // Atmospheric Fog calculation
     float dist = length(ubo.cameraPos - fragWorldPos);
-    float fogFactor = clamp((dist - ubo.fogStart) / (ubo.fogEnd - ubo.fogStart), 0.0, 1.0);
-    if (dist > ubo.fogEnd) fogFactor = 1.0;
+    float fogFactor = clamp((dist - ubo.fadeParams.x) / (ubo.fadeParams.y - ubo.fadeParams.x), 0.0, 1.0);
+    if (dist > ubo.fadeParams.y) fogFactor = 1.0;
     vec3 fogColor = vec3(0.6, 0.7, 0.8);
     vec3 finalColor = mix(result, fogColor, fogFactor);
 

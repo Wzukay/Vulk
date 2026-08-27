@@ -8,16 +8,17 @@ layout(location = 3) in float inInstanceWindOffset;
 layout(set = 0, binding = 0) uniform UniformBufferObject {
     mat4 view;
     mat4 proj;
-    layout(offset = 128) vec3 cameraPos;
-    layout(offset = 140) float ambient;
-    layout(offset = 144) float specularPower;
-    layout(offset = 148) uint lightCount;
-    layout(offset = 152) float fogStart;
-    layout(offset = 156) float fogEnd;
-    layout(offset = 160) vec2 screenSize;
-    layout(offset = 176) mat4 inverseViewProj;
-    layout(offset = 240) mat4 inverseProj;
-    layout(offset = 304) mat4 inverseView;
+    vec3 cameraPos;
+    float ambient;
+    vec4 fadeParams;
+    vec2 screenSize;
+    float specularPower;
+    uint lightCount;
+    float fogStart;
+    float fogEnd;
+    mat4 inverseViewProj;
+    mat4 inverseProj;
+    mat4 inverseView;
 } ubo;
 
 layout(push_constant) uniform PushConstants {

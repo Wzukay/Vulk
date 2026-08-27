@@ -7,22 +7,26 @@ struct Light {
     vec4 params;
 };
 
-layout(binding = 0) uniform UniformBufferObject {
+layout(set = 0, binding = 0) uniform UniformBufferObject {
     mat4 view;
     mat4 proj;
     vec3 cameraPos;
     float ambient;
+    vec4 fadeParams;
+    vec2 screenSize;
     float specularPower;
     uint lightCount;
     float fogStart;
     float fogEnd;
+    mat4 inverseViewProj;
+    mat4 inverseProj;
+    mat4 inverseView;
 } ubo;
 
 layout(std430, binding = 1) readonly buffer LightBuffer {
     Light lights[];
 } lightBuffer;
 
-// Your massive bindless global texture arrays
 layout(binding = 2) uniform sampler2D globalTextures[];
 layout(binding = 3) uniform sampler2D normalTextures[];
 
@@ -50,27 +54,38 @@ vec3 CalcBlinnPhong(vec3 N, vec3 V, vec3 L, vec3 lightColor, vec3 albedo, float 
 }
 
 void main() {
-    // CRITICAL BINDLESS LOOKUP: Samples the specific texture index passed by your asset parser!
+    // 1. Texture Lookup
     vec4 albedo = texture(globalTextures[nonuniformEXT(fragTextureId)], fragTexCoord);
     
-    // Support basic transparency alpha discarding (for leaves, windows, flags in Sponza)
+    // 2. Alpha Clip (Increased to 0.5 to cleanly cut out billboard backgrounds)
     if (albedo.a < 0.5) {
         discard;
     }
 
-    // Tangent Space normal mapping setup
+    float ditherNoise = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+    float distToCam = length(ubo.cameraPos - fragWorldPos);
+
+    float maxFadeDistance = ubo.fadeParams.w; 
+    float fadeStartDistance = ubo.fadeParams.z; 
+    
+    float fadeAlpha = 1.0 - clamp((distToCam - fadeStartDistance) / (maxFadeDistance - fadeStartDistance), 0.0, 1.0);
+    
+    if (ditherNoise > fadeAlpha) {
+        discard;
+    }
+
+    // 4. Tangent Space normal mapping setup
     vec3 N_geo = normalize(fragNormal);
     vec3 T = normalize(fragTangent);
     T = normalize(T - N_geo * dot(N_geo, T)); 
     vec3 B = cross(N_geo, T) * fragTangentHandedness;
     mat3 TBN = mat3(T, B, N_geo);
 
-    // Dynamic Normal map bindless lookup
     vec4 sampledNormal = texture(normalTextures[nonuniformEXT(fragNormalTextureId)], fragTexCoord);
     vec3 normalMap = UnpackNormal(sampledNormal);
     vec3 N = normalize(TBN * normalMap);
 
-    // Blinn-Phong lighting calculation
+    // 5. Lighting
     vec3 V = normalize(ubo.cameraPos - fragWorldPos);
     vec3 result = ubo.ambient * albedo.xyz;
 
@@ -82,10 +97,10 @@ void main() {
         result += CalcBlinnPhong(N, V, lightVec, L.color.rgb * L.color.a * atten, albedo.xyz, ubo.specularPower);
     }
 
-    // Atmospheric Fog calculation
-    float dist = length(ubo.cameraPos - fragWorldPos);
-    float fogFactor = clamp((dist - ubo.fogStart) / (ubo.fogEnd - ubo.fogStart), 0.0, 1.0);
-    if (dist > ubo.fogEnd) fogFactor = 1.0;
+    // 6. Fog
+    float fogFactor = clamp((distToCam - ubo.fogStart) / (ubo.fogEnd - ubo.fogStart), 0.0, 1.0);
+    if (distToCam > ubo.fogEnd) fogFactor = 1.0;
+    
     vec3 fogColor = vec3(0.6, 0.7, 0.8);
     vec3 finalColor = mix(result, fogColor, fogFactor);
 

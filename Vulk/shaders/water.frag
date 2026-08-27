@@ -6,16 +6,17 @@ layout(location = 2) in vec3 inNormal;
 
 layout(location = 0) out vec4 outColor;
 
-layout(binding = 0) uniform UniformBufferObject {
+layout(set = 0, binding = 0) uniform UniformBufferObject {
     mat4 view;
     mat4 proj;
     vec3 cameraPos;
     float ambient;
+    vec4 fadeParams;
+    vec2 screenSize;
     float specularPower;
     uint lightCount;
     float fogStart;
     float fogEnd;
-    vec2 screenSize;
     mat4 inverseViewProj;
     mat4 inverseProj;
     mat4 inverseView;

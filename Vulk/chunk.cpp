@@ -17,7 +17,14 @@ void Chunk::Init(VulkanRenderer& renderer) {
 
     m_chunkSize = chunkSize;
 }
+float GetClosestChunkDistance(const glm::vec3& cameraPos, const glm::vec3& chunkCenter, float chunkSize) {
+    float distToCenter = glm::distance(cameraPos, chunkCenter);
+    // 0.75f is roughly half the diagonal of a square (0.707), with a tiny bit of extra safety padding
+    float chunkRadius = chunkSize * 0.75f;
 
+    // Never return a negative distance if we are standing inside the chunk
+    return std::max(0.0f, distToCenter - chunkRadius);
+}
 uint32_t Chunk::Hash2D(int x, int z, int seed) {
     uint32_t h = static_cast<uint32_t>(seed);
     h ^= static_cast<uint32_t>(x) * 374761393U + static_cast<uint32_t>(z) * 668265263U;
@@ -27,12 +34,28 @@ uint32_t Chunk::Hash2D(int x, int z, int seed) {
 std::string ChunkName(int cx, int cz) {
     return "terrain_chunk_" + std::to_string(cx) + "_" + std::to_string(cz);
 }
-int Chunk::DesiredLodForDistance(float distance) const {
-    if (distance < chunkSize)  return 0;
-    if (distance < chunkSize * 1.5f)   return 1;
-    if (distance < chunkSize * 3.0f)   return 2;
-    if (distance < chunkSize * 5.0f)   return 3;
-    return 4;
+int Chunk::DesiredLodForDistance(float distToCenter) const {
+    // Adds chunk footprint as a safety buffer
+    float chunkRadius = chunkSize * 0.75f;
+    float closestEdgeDist = std::max(0.0f, distToCenter - chunkRadius);
+
+    // LOD 5: Complete Cull (Past render distance)
+    if (closestEdgeDist > g_Settings.renderDistance) return 5;
+
+    // LOD 4: Terrain only, NO Trees (Past tree fade end)
+    if (closestEdgeDist > g_Settings.staticFadeEnd) return 4;
+
+    // LOD 3: Terrain + Billboard Trees (Past tree fade start)
+    if (closestEdgeDist > g_Settings.staticFadeStart) return 3;
+
+    // LOD 2: Terrain + Low Poly Trees, NO Grass (Past grass fade end)
+    if (closestEdgeDist > g_Settings.grassFadeEnd) return 2;
+
+    // LOD 1: Terrain + Med Trees + Thin Grass (Past grass fade start)
+    if (closestEdgeDist > g_Settings.grassFadeStart) return 1;
+
+    // LOD 0: High Poly Everything
+    return 0;
 }
 float Chunk::GetHeight(float worldX, float worldZ) {
     return CalculateHeightAndColor(worldX, worldZ).first;
@@ -217,10 +240,10 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
                 else if (result.lod == 1) {
                     rComp.meshName = "assets/models/tree/tree_lod1.obj"; // Decimated mesh (~300 verts)
                 }
-                //else {
-                //    rComp.meshName = "assets/models/tree/tree_billboard.obj"; // 2-triangle cross plane
-                //    tComp.scale = treeData.scale + glm::vec3(5);
-                //}
+                else {
+                    rComp.meshName = "assets/models/tree/tree_billboard.obj"; // 2-triangle cross plane
+                    tComp.scale = treeData.scale * glm::vec3(45.0f, 45.0f, 45.0f) + glm::vec3(10);
+                }
 
                 rComp.type = MeshType::Static;
                 rComp.isInstanced = true;
@@ -754,28 +777,17 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
     // ================================================================
     GenerateChunkTrees(chunkX, chunkZ, outResult.lod, outResult);
 
-    if (outResult.lod > 2) {
+    if (outResult.lod >= 2) {
         return;
     }
 
-    int stride = 2;
-    int bladesPerVertex = 6;
-    float widthMultiplier = 1.0f;
-
-    if (outResult.lod == 1) {
-        stride = 3;
-        bladesPerVertex = 2;
-        widthMultiplier = 2.0f;
-    }
-    else if (outResult.lod == 2) {
-        stride = 6;
-        bladesPerVertex = 1;
-        widthMultiplier = 3.0f;
-    }
+    int stride = (outResult.lod == 1) ? 4 : 2;
+    int bladesPerVertex = (outResult.lod == 1) ? 2 : 6;
+    float widthMultiplier = (outResult.lod == 1) ? 2.0f : 1.0f;
 
     const float JITTER_RADIUS = 6.5f;
 
-    outResult.grassInstances.reserve((outResult.vertices.size() / stride) * bladesPerVertex);
+    outResult.grassInstances.reserve((outResult.vertices.size() / stride)* bladesPerVertex);
 
     for (size_t i = 0; i < outResult.vertices.size(); i += stride) {
         const auto& v = outResult.vertices[i];
@@ -806,10 +818,13 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
 }
 
 void Chunk::GenerateChunkTrees(int chunkX, int chunkZ, int lod, ChunkJobResult& outResult) {
-    // Adaptive density: Sparse up close for performance, dense far away for visuals
-    float stepSize = 24.0f; // LOD 0 (High-poly close up)
-    if (lod == 1) stepSize = 16.0f; // LOD 1 (Mid range)
-    if (lod == 2) stepSize = 10.0f; // LOD 2 (Distant billboards - dense forest look)
+    // CPU CULL: Stop generating trees if the chunk is LOD 4 or higher (past treeFadeEnd)
+    if (lod >= 4) {
+        return;
+    }
+
+    // FIXED STEP SIZE: Every LOD evaluates exact same grid coordinates
+    const float stepSize = 16.0f;
 
     const float startX = chunkX * m_chunkSize;
     const float startZ = chunkZ * m_chunkSize;
@@ -839,9 +854,10 @@ void Chunk::GenerateChunkTrees(int chunkX, int chunkZ, int lod, ChunkJobResult& 
                         TreeInstance tree;
                         tree.position = glm::vec3(x, groundY, z);
                         tree.rotation = glm::vec3(0.0f, static_cast<float>(coordHash % 360), 0.0f);
+
                         float randomScale = 0.08f + (static_cast<float>((coordHash >> 8) % 70) / 1000.0f);
                         tree.scale = glm::vec3(randomScale);
-                        
+
                         outResult.trees.push_back(tree);
                     }
                 }

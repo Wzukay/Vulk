@@ -6,18 +6,30 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 struct UniformBufferObject {
-    glm::mat4 view;
-    glm::mat4 proj;
-    glm::vec3 cameraPos;
-    float ambient;
-    float specularPower;
-    uint32_t lightCount;
-    float fogStart;
-    float fogEnd;
-    glm::vec2 screenSize; float _pad1[2];
-    glm::mat4 inverseViewProj;
-    glm::mat4 inverseProj;
-    glm::mat4 inverseView;
+    alignas(16) glm::mat4 view;              // 64 bytes
+    alignas(16) glm::mat4 proj;              // 64 bytes
+
+    // Chunk 1: 16 bytes
+    alignas(16) glm::vec3 cameraPos;         // 12 bytes
+    float ambient;                           // 4 bytes
+
+    // Chunk 2: 16 bytes
+    alignas(16) glm::vec4 fadeParams;        // 16 bytes
+
+    // Chunk 3: 16 bytes
+    alignas(8)  glm::vec2 screenSize;        // 8 bytes
+    float specularPower;                     // 4 bytes
+    uint32_t lightCount;                     // 4 bytes
+
+    // Chunk 4: 16 bytes (Explicitly padded to prevent C++ from crushing the struct)
+    float fogStart;                          // 4 bytes
+    float fogEnd;                            // 4 bytes
+    float _pad2[2];                          // 8 bytes of padding
+
+    // Matrices (64 bytes each, alignas(16) guarantees std140 matrix boundaries)
+    alignas(16) glm::mat4 inverseViewProj;
+    alignas(16) glm::mat4 inverseProj;
+    alignas(16) glm::mat4 inverseView;
 };
 
 struct Light {

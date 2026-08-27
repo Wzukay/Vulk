@@ -17,6 +17,12 @@ void Settings::LoadFromFile(const std::string& path) {
         if (!(iss >> key >> value)) continue;
 
         if (key == "renderDistance") renderDistance = std::stof(value);
+        else if (key == "fogStart") fogStart = std::stof(value);
+        else if (key == "fogEnd") fogEnd = std::stof(value);
+        else if (key == "treeFadeStart") staticFadeStart = std::stof(value);
+        else if (key == "treeFadeEnd") staticFadeEnd = std::stof(value);
+        else if (key == "grassFadeStart") grassFadeStart = std::stof(value);
+        else if (key == "grassFadeEnd") grassFadeEnd = std::stof(value);
         else if (key == "maxMipLevels") maxMipLevels = std::stoi(value);
         else if (key == "vsync") vsync = (value == "true" || value == "1");
         else if (key == "anisotropicFiltering") anisotropicFiltering = (value == "true" || value == "1");
@@ -34,6 +40,12 @@ void Settings::SaveToFile(const std::string& path) const {
     if (!file) return;
     file << "# Settings file\n";
     file << "renderDistance " << renderDistance << "\n";
+    file << "fogStart " << fogStart << "\n";
+    file << "fogEnd " << fogEnd << "\n";
+    file << "staticFadeStart " << staticFadeStart << "\n";
+    file << "staticFadeEnd " << staticFadeEnd << "\n";
+    file << "grassFadeStart " << grassFadeStart << "\n";
+    file << "grassFadeEnd " << grassFadeEnd << "\n";
     file << "maxMipLevels " << maxMipLevels << "\n";
     file << "vsync " << (vsync ? "true" : "false") << "\n";
     file << "anisotropicFiltering " << (anisotropicFiltering ? "true" : "false") << "\n";

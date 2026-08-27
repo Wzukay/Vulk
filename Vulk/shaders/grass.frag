@@ -11,16 +11,17 @@ layout(location = 0) out vec4 outColor;
 layout(set = 0, binding = 0) uniform UniformBufferObject {
     mat4 view;
     mat4 proj;
-    layout(offset = 128) vec3 cameraPos;
-    layout(offset = 140) float ambient;
-    layout(offset = 144) float specularPower;
-    layout(offset = 148) uint lightCount;
-    layout(offset = 152) float fogStart;
-    layout(offset = 156) float fogEnd;
-    layout(offset = 160) vec2 screenSize;
-    layout(offset = 176) mat4 inverseViewProj;
-    layout(offset = 240) mat4 inverseProj;
-    layout(offset = 304) mat4 inverseView;
+    vec3 cameraPos;
+    float ambient;
+    vec4 fadeParams;
+    vec2 screenSize;
+    float specularPower;
+    uint lightCount;
+    float fogStart;
+    float fogEnd;
+    mat4 inverseViewProj;
+    mat4 inverseProj;
+    mat4 inverseView;
 } ubo;
 
 layout(set = 0, binding = 2) uniform sampler2D textureSamplers[128];
@@ -40,20 +41,17 @@ void main() {
     if (texColor.a < 0.3 || length(texColor.rgb) < 0.15) discard;
 
     // 2. Screen-Space Dithered LOD Dissolve (4x4 Bayer Matrix)
-    // Maps pixel screen coordinates to a smooth, uniform discard pattern
-    const float bayerMatrix[16] = float[16](
-         0.0/16.0, 12.0/16.0,  3.0/16.0, 15.0/16.0,
-         8.0/16.0,  4.0/16.0, 11.0/16.0,  7.0/16.0,
-         2.0/16.0, 14.0/16.0,  1.0/16.0, 13.0/16.0,
-        10.0/16.0,  6.0/16.0,  9.0/16.0,  5.0/16.0
-    );
+    float ditherNoise = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+    float distToCam = length(ubo.cameraPos - inWorldPos);
 
-    int x = int(mod(gl_FragCoord.x, 4.0));
-    int y = int(mod(gl_FragCoord.y, 4.0));
-    float ditherThreshold = bayerMatrix[y * 4 + x];
-
-    // As lodFactor increases from 0.0 to 1.0, pixels are smoothly culled out
-    if (push.lodFactor > ditherThreshold) discard;
+    float maxFadeDistance = ubo.fadeParams.w; 
+    float fadeStartDistance = ubo.fadeParams.z; 
+    
+    float fadeAlpha = 1.0 - clamp((distToCam - fadeStartDistance) / (maxFadeDistance - fadeStartDistance), 0.0, 1.0);
+    
+    if (ditherNoise > fadeAlpha) {
+        discard;
+    }
 
     // 3. Simple, clean lighting
     vec3 N = normalize(inNormal);
@@ -63,6 +61,11 @@ void main() {
     float ambient = ubo.ambient + 0.3; 
     vec3 litColor = texColor.rgb * (ambient + diff * 0.7);
 
-    // Output full texture alpha so remaining pixels write cleanly to the depth buffer
-    outColor = vec4(litColor, texColor.a);
+    float fogFactor = clamp((distToCam - ubo.fogStart) / (ubo.fogEnd - ubo.fogStart), 0.0, 1.0);
+    if (distToCam > ubo.fogEnd) fogFactor = 1.0;
+    
+    vec3 fogColor = vec3(0.6, 0.7, 0.8);
+    vec3 finalColor = mix(litColor, fogColor, fogFactor);
+
+    outColor = vec4(finalColor, 1.0);
 }
