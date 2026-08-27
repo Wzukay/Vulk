@@ -19,36 +19,21 @@ void Game::Init()
 
     chunk.Init(renderer);
 
-    uint32_t sandId = g_AssetManager.LoadTextureFromFile("assets/textures/sand_albedo.dds");   // Index 0
-    uint32_t grassId = g_AssetManager.LoadTextureFromFile("assets/textures/grass2_albedo.dds");  // Index 1
-    uint32_t rockId = g_AssetManager.LoadTextureFromFile("assets/textures/rock_albedo.dds");   // Index 2
-    uint32_t grassBillboardId = g_AssetManager.LoadTextureFromFile("assets/textures/grass_billboard.dds"); // Index 3
+    g_AssetManager.LoadTextureFromFile("assets/textures/sand_albedo.dds");       // ID 0
+    g_AssetManager.LoadTextureFromFile("assets/textures/grass2_albedo.dds");      // ID 1
+    g_AssetManager.LoadTextureFromFile("assets/textures/rock_albedo.dds");       // ID 2
+    g_AssetManager.LoadTextureFromFile("assets/textures/grass_billboard.dds");    // ID 3
 
-    uint32_t sandNormalId = g_AssetManager.LoadNormalTextureFromFile("assets/textures/sand_normal.dds");
-    uint32_t grassNormalId = g_AssetManager.LoadNormalTextureFromFile("assets/textures/grass2_normal.dds");
-    uint32_t rockNormalId = g_AssetManager.LoadNormalTextureFromFile("assets/textures/rock_normal.dds");
-    uint32_t grassBillboardNormalId = g_AssetManager.LoadNormalTextureFromFile("assets/textures/grass_billboard_normal.dds");
+    g_AssetManager.LoadNormalTextureFromFile("assets/textures/sand_normal.dds");       // ID 0
+    g_AssetManager.LoadNormalTextureFromFile("assets/textures/grass2_normal.dds");      // ID 1
+    g_AssetManager.LoadNormalTextureFromFile("assets/textures/rock_normal.dds");       // ID 2
+    g_AssetManager.LoadNormalTextureFromFile("assets/textures/grass_billboard_normal.dds");    // ID 3
 
-    //g_AssetManager.LoadMesh("assets/models/sponza/sponza.obj");
     g_AssetManager.LoadMesh("assets/models/tree/tree.obj");
-
-    Entity sponzaWorldEntity = scene.GetRegistry().CreateEntity();
-
-    //TransformComponent sponzaTransform;
-    //sponzaTransform.position = glm::vec3(100.0f, 20.0f, 200.0f);
-    //sponzaTransform.rotation = glm::vec3(0.0f, 0.0f, 0.0f); // Stands upright naturally
-    //sponzaTransform.scale = glm::vec3(0.3f);
-    //sponzaTransform.isDirty = true;
-    //scene.GetRegistry().AddComponent<TransformComponent>(sponzaWorldEntity, sponzaTransform);
-
-    //RenderComponent sponzaRender;
-    //sponzaRender.meshName = "assets/models/sponza/sponza.obj";
-    //sponzaRender.type = MeshType::Static; //
-    //sponzaRender.isVisible = true;
-    //scene.GetRegistry().AddComponent<RenderComponent>(sponzaWorldEntity, sponzaRender);
+    g_AssetManager.LoadMesh("assets/models/tree/tree_lod1.obj");
+    g_AssetManager.LoadMesh("assets/models/tree/tree_billboard.obj");
 
     scene.AddLight(MakeDirectional(glm::vec3(0.6f, 0.9f, 0.6f), glm::vec3(0.75f, 0.7f, 0.65f), 1.0f));
-    //scene.AddLight(MakePoint(glm::vec3(2.0f, 10.0f, -1.0f), glm::vec3(1.0f, 0.4f, 0.2f), 1.0f, 15.0f));
 
     glfwSetWindowUserPointer(window, &input);
     glfwSetCursorPosCallback(window, [](GLFWwindow* window, double xpos, double ypos) {
@@ -143,7 +128,6 @@ void Game::Loop()
             renderer.UpdateUniformBuffer({ cam.pos, cam.front, cam.up });
 
             chunk.Update(cam.pos, scene, renderer);
-            chunk.PreGenerateChunks(cam.pos, scene, renderer);
 
             renderer.UpdateScene(scene);
         }

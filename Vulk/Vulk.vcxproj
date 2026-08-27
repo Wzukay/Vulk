@@ -74,10 +74,10 @@
     <IncludePath>D:\repos\Vulk\Vulk\include\glfw-3.4.bin.WIN64\include;C:\VulkanSDK\1.4.350.0\Include;D:\repos\Vulk\Vulk\include\asio\include;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <IncludePath>D:\repos\Vulk\Vulk\include\meshoptimizer-1.2\src;D:\repos\Vulk\Vulk\include\imgui;D:\repos\Vulk\Vulk\include\glm-1.0.3;D:\repos\Vulk\Vulk\include\glfw-3.4.bin.WIN64\include;C:\VulkanSDK\1.4.350.0\Include;D:\repos\Vulk\Vulk\include\asio\include;$(IncludePath)</IncludePath>
+    <IncludePath>D:\VulkProj\Vulk\Vulk\include\meshoptimizer-1.2;D:\VulkProj\Vulk\Vulk\include\imgui;D:\VulkProj\Vulk\Vulk\include\glm-1.0.3;D:\VulkProj\Vulk\Vulk\include\glfw-3.4.bin.WIN64\include;C:\VulkanSDK\1.4.357.0\Include;D:\VulkProj\Vulk\Vulk\include\asio\include;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <IncludePath>D:\repos\Vulk\Vulk\include\meshoptimizer-1.2\src;D:\repos\Vulk\Vulk\include\imgui;D:\repos\Vulk\Vulk\include\glm-1.0.3;D:\repos\Vulk\Vulk\include\glfw-3.4.bin.WIN64\include;C:\VulkanSDK\1.4.350.0\Include;D:\repos\Vulk\Vulk\include\asio\include;$(IncludePath)</IncludePath>
+    <IncludePath>D:\VulkProj\Vulk\Vulk\include\meshoptimizer-1.2;D:\VulkProj\Vulk\Vulk\include\imgui;D:\VulkProj\Vulk\Vulk\include\glm-1.0.3;D:\VulkProj\Vulk\Vulk\include\glfw-3.4.bin.WIN64\include;C:\VulkanSDK\1.4.357.0\Include;D:\VulkProj\Vulk\Vulk\include\asio\include;$(IncludePath)</IncludePath>
     <LinkIncremental>true</LinkIncremental>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
@@ -131,7 +131,7 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>C:\VulkanSDK\1.4.350.0\Lib;D:\repos\Vulk\Vulk\include\glfw-3.4.bin.WIN64\lib-vc2022;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>C:\VulkanSDK\1.4.357.0\Lib;D:\VulkProj\Vulk\Vulk\include\glfw-3.4.bin.WIN64\lib-vc2022;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>glfw3.lib;vulkan-1.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalOptions>/NODEFAULTLIB:MSVCRT %(AdditionalOptions)</AdditionalOptions>
     </Link>
@@ -153,7 +153,7 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>C:\VulkanSDK\1.4.350.0\Lib;D:\repos\Vulk\Vulk\include\glfw-3.4.bin.WIN64\lib-vc2022;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>C:\VulkanSDK\1.4.357.0\Lib;D:\VulkProj\Vulk\Vulk\include\glfw-3.4.bin.WIN64\lib-vc2022;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>glfw3.lib;vulkan-1.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>

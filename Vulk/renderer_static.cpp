@@ -239,7 +239,7 @@ void StaticMeshRenderer::Draw(VkCommandBuffer commandBuffer, VkPipelineLayout pi
         vkMapMemory(m_device, m_instanceMemory, 0, sizeof(InstanceData) * m_maxInstances, 0, (void**)&mappedData);
 
         uint32_t currentInstanceOffset = 0;
-        const float maxFoliageDistSq = 800.0f * 800.0f;
+        const float maxFoliageDistSq = 4000.0f * 4000.0f;
 
         for (const auto& pair : m_instancedGroups) {
             const std::string& meshName = pair.first;

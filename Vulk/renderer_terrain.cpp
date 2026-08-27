@@ -159,7 +159,7 @@ void TerrainRenderer::Draw(VkCommandBuffer commandBuffer, VkPipelineLayout pipel
         constants.lodBlend = blend;
 
         vkCmdPushConstants(commandBuffer, pipelineLayout,
-            VK_SHADER_STAGE_VERTEX_BIT,
+            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
             0, sizeof(PushConstants), &constants);
 
         vkCmdDrawIndexed(commandBuffer,

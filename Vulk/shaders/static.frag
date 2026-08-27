@@ -54,7 +54,7 @@ void main() {
     vec4 albedo = texture(globalTextures[nonuniformEXT(fragTextureId)], fragTexCoord);
     
     // Support basic transparency alpha discarding (for leaves, windows, flags in Sponza)
-    if (albedo.a < 0.1) {
+    if (albedo.a < 0.5) {
         discard;
     }
 

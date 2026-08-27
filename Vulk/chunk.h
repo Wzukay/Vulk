@@ -254,5 +254,5 @@ private:
     void EvictUnloadedChunks(Scene& scene, VulkanRenderer& renderer);
 
     static uint32_t Hash2D(int x, int z, int seed);
-    void GenerateChunkTrees(int chunkX, int chunkZ, ChunkJobResult& outResult);
+    void GenerateChunkTrees(int chunkX, int chunkZ, int lod, ChunkJobResult& outResult);
 };
