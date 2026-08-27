@@ -17,6 +17,8 @@ void Settings::LoadFromFile(const std::string& path) {
         if (!(iss >> key >> value)) continue;
 
         if (key == "renderDistance") renderDistance = std::stof(value);
+        else if (key == "renderScale") renderScale = std::stof(value);
+        else if (key == "enableFSR") enableFSR = (value == "true" || value == "1");
         else if (key == "fogStart") fogStart = std::stof(value);
         else if (key == "fogEnd") fogEnd = std::stof(value);
         else if (key == "treeFadeStart") staticFadeStart = std::stof(value);
@@ -40,6 +42,8 @@ void Settings::SaveToFile(const std::string& path) const {
     if (!file) return;
     file << "# Settings file\n";
     file << "renderDistance " << renderDistance << "\n";
+    file << "renderScale " << renderScale << "\n";
+    file << "enableFSR " << (enableFSR ? "true" : "false") << "\n";
     file << "fogStart " << fogStart << "\n";
     file << "fogEnd " << fogEnd << "\n";
     file << "staticFadeStart " << staticFadeStart << "\n";

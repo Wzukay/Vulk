@@ -328,9 +328,11 @@ void VulkanRenderer::InitVulkan() {
 
 	CreateSwapChain();
 	CreateImageViews();
+	CreateOffscreenResolve();
 	CreateDepthResources();
 	CreateColorResources();
 	CreateRenderPass();
+	CreateCompositionPass();
 	CreateFrameBuffers();
 
 	CreateCommandPool();
@@ -354,6 +356,7 @@ void VulkanRenderer::InitVulkan() {
 	g_AssetManager.CreateDefaultNormalTexture();
 
 	CreateGraphicsPipeline();
+	CreateCompositionPipeline();
 
 	m_staticMeshRenderer.Init(logicalDevice, this);
 
@@ -586,9 +589,16 @@ void VulkanRenderer::RecreateSwapChain() {
 		}
 	}
 
+	if (offscreenFramebuffer != VK_NULL_HANDLE) vkDestroyFramebuffer(logicalDevice, offscreenFramebuffer, nullptr);
+	if (offscreenResolveImageView != VK_NULL_HANDLE) vkDestroyImageView(logicalDevice, offscreenResolveImageView, nullptr);
+	if (offscreenResolveImage != VK_NULL_HANDLE) vkDestroyImage(logicalDevice, offscreenResolveImage, nullptr);
+	if (offscreenResolveImageMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, offscreenResolveImageMemory, nullptr);
+	if (offscreenSampler != VK_NULL_HANDLE) vkDestroySampler(logicalDevice, offscreenSampler, nullptr);
+
 	// 3. Recreate swapchain and its dependent resources
 	CreateSwapChain();      // re-creates swapChainImages, swapChainImageFormat, swapChainExtent
 	CreateImageViews();
+	CreateOffscreenResolve();
 	CreateColorResources();
 	CreateDepthResources();
 	CreateFrameBuffers();
@@ -614,11 +624,13 @@ void VulkanRenderer::RecreateSwapChain() {
 	init_info.MinImageCount = 2;
 	init_info.ImageCount = static_cast<uint32_t>(swapChainImages.size());
 	init_info.Allocator = nullptr;
-	init_info.PipelineInfoMain.RenderPass = renderPass;
+	init_info.PipelineInfoMain.RenderPass = compositionRenderPass;
 	init_info.PipelineInfoMain.Subpass = 0;
-	init_info.PipelineInfoMain.MSAASamples = m_currentMsaaSamples;
+	init_info.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
 
 	ImGui_ImplVulkan_Init(&init_info);
+
+	CreateCompositionPipeline();
 }
 
 void VulkanRenderer::CreateImageViews() {
@@ -655,9 +667,7 @@ void VulkanRenderer::CreateRenderPass() {
 	VkAttachmentReference resolveRef{};
 	VkAttachmentReference depthRef{};
 
-	// --- Color attachment ---
 	if (m_currentMsaaSamples != VK_SAMPLE_COUNT_1_BIT) {
-		// Multisampled intermediate attachment
 		VkAttachmentDescription multisampledAttachment{};
 		multisampledAttachment.format = swapChainImageFormat;
 		multisampledAttachment.samples = m_currentMsaaSamples;
@@ -669,7 +679,6 @@ void VulkanRenderer::CreateRenderPass() {
 		multisampledAttachment.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 		attachments.push_back(multisampledAttachment);
 
-		// Resolve attachment (single‑sampled, to swapchain image)
 		VkAttachmentDescription resolveAttachment{};
 		resolveAttachment.format = swapChainImageFormat;
 		resolveAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -678,17 +687,16 @@ void VulkanRenderer::CreateRenderPass() {
 		resolveAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 		resolveAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
 		resolveAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-		resolveAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+		// NEW: Output to shader read instead of presentation!
+		resolveAttachment.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 		attachments.push_back(resolveAttachment);
 
 		colorRef.attachment = 0;
 		colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
 		resolveRef.attachment = 1;
 		resolveRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 	}
 	else {
-		// No MSAA: render directly to the swapchain image (presentable)
 		VkAttachmentDescription colorAttachment{};
 		colorAttachment.format = swapChainImageFormat;
 		colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -697,17 +705,15 @@ void VulkanRenderer::CreateRenderPass() {
 		colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 		colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
 		colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-		colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+		// NEW: Output to shader read instead of presentation!
+		colorAttachment.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 		attachments.push_back(colorAttachment);
 
 		colorRef.attachment = 0;
 		colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-		// No resolve attachment
 		resolveRef.attachment = VK_ATTACHMENT_UNUSED;
 	}
 
-	// --- Depth attachment ---
 	VkAttachmentDescription depthAttachment{};
 	depthAttachment.format = FindDepthFormat();
 	depthAttachment.samples = m_currentMsaaSamples;
@@ -722,7 +728,6 @@ void VulkanRenderer::CreateRenderPass() {
 	depthRef.attachment = static_cast<uint32_t>(attachments.size() - 1);
 	depthRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
-	// --- Subpass ---
 	VkSubpassDescription subpass{};
 	subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
 	subpass.colorAttachmentCount = 1;
@@ -730,43 +735,65 @@ void VulkanRenderer::CreateRenderPass() {
 	subpass.pResolveAttachments = (m_currentMsaaSamples != VK_SAMPLE_COUNT_1_BIT) ? &resolveRef : nullptr;
 	subpass.pDepthStencilAttachment = &depthRef;
 
-	// --- Render pass creation ---
+	// Dependency to ensure it's ready for the composition pass to read
+	VkSubpassDependency dependency{};
+	dependency.srcSubpass = 0;
+	dependency.dstSubpass = VK_SUBPASS_EXTERNAL;
+	dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+	dependency.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+	dependency.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+	dependency.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
 	VkRenderPassCreateInfo renderPassInfo{};
 	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
 	renderPassInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
 	renderPassInfo.pAttachments = attachments.data();
 	renderPassInfo.subpassCount = 1;
 	renderPassInfo.pSubpasses = &subpass;
+	renderPassInfo.dependencyCount = 1;
+	renderPassInfo.pDependencies = &dependency;
 
 	if (vkCreateRenderPass(logicalDevice, &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS) {
-		throw std::runtime_error("Failed to create render pass");
+		throw std::runtime_error("Failed to create 3D render pass.");
 	}
 }
 void VulkanRenderer::CreateFrameBuffers() {
+	// 1. Create the single offscreen framebuffer (Internal Resolution)
+	std::vector<VkImageView> offscreenAttachments;
+	if (m_currentMsaaSamples != VK_SAMPLE_COUNT_1_BIT) {
+		offscreenAttachments = { colorImageView, offscreenResolveImageView, depthImageView };
+	}
+	else {
+		offscreenAttachments = { offscreenResolveImageView, depthImageView };
+	}
 
+	VkFramebufferCreateInfo offscreenInfo{};
+	offscreenInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+	offscreenInfo.renderPass = renderPass; // The 3D pass
+	offscreenInfo.attachmentCount = static_cast<uint32_t>(offscreenAttachments.size());
+	offscreenInfo.pAttachments = offscreenAttachments.data();
+	offscreenInfo.width = GetInternalWidth();
+	offscreenInfo.height = GetInternalHeight();
+	offscreenInfo.layers = 1;
+
+	if (vkCreateFramebuffer(logicalDevice, &offscreenInfo, nullptr, &offscreenFramebuffer) != VK_SUCCESS)
+		throw std::runtime_error("Failed to create offscreen framebuffer");
+
+	// 2. Create the swapchain framebuffers for UI/Composition (Native Resolution)
 	swapChainFramebuffers.resize(swapChainImageViews.size());
-
 	for (size_t i = 0; i < swapChainImageViews.size(); i++) {
-		std::vector<VkImageView> attachments;
+		VkImageView attachment[] = { swapChainImageViews[i] };
+		VkFramebufferCreateInfo fbInfo{};
+		fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+		fbInfo.renderPass = compositionRenderPass; // The UI pass
+		fbInfo.attachmentCount = 1;
+		fbInfo.pAttachments = attachment;
+		fbInfo.width = swapChainExtent.width;
+		fbInfo.height = swapChainExtent.height;
+		fbInfo.layers = 1;
 
-		if (m_currentMsaaSamples != VK_SAMPLE_COUNT_1_BIT) {
-			attachments = { colorImageView, swapChainImageViews[i], depthImageView };
-		}
-		else {
-			attachments = { swapChainImageViews[i], depthImageView };
-		}
-
-		VkFramebufferCreateInfo framebufferInfo{};
-		framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-		framebufferInfo.renderPass = renderPass;
-		framebufferInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
-		framebufferInfo.pAttachments = attachments.data();
-		framebufferInfo.width = swapChainExtent.width;
-		framebufferInfo.height = swapChainExtent.height;
-		framebufferInfo.layers = 1;
-
-		if (vkCreateFramebuffer(logicalDevice, &framebufferInfo, nullptr, &swapChainFramebuffers[i]) != VK_SUCCESS)
-			throw std::runtime_error("Failed to create framebuffer");
+		if (vkCreateFramebuffer(logicalDevice, &fbInfo, nullptr, &swapChainFramebuffers[i]) != VK_SUCCESS)
+			throw std::runtime_error("Failed to create swapchain framebuffer");
 	}
 }
 void VulkanRenderer::CreateCommandPool() {
@@ -815,6 +842,166 @@ void VulkanRenderer::CreateSyncObjects() {
 			throw std::runtime_error("Failed to initialize multi-frame synchronization primitives.");
 		}
 	}
+}
+
+void VulkanRenderer::CreateOffscreenResolve() {
+	CreateImage(GetInternalWidth(), GetInternalHeight(), 1, VK_SAMPLE_COUNT_1_BIT, swapChainImageFormat,
+		VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, offscreenResolveImage, offscreenResolveImageMemory);
+
+	offscreenResolveImageView = CreateImageView(offscreenResolveImage, swapChainImageFormat, VK_IMAGE_ASPECT_COLOR_BIT, 1);
+
+	VkSamplerCreateInfo samplerInfo{};
+	samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+	samplerInfo.magFilter = VK_FILTER_LINEAR;
+	samplerInfo.minFilter = VK_FILTER_LINEAR;
+	samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	samplerInfo.anisotropyEnable = VK_FALSE;
+	samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+
+	if (vkCreateSampler(logicalDevice, &samplerInfo, nullptr, &offscreenSampler) != VK_SUCCESS) {
+		throw std::runtime_error("Failed to create offscreen sampler.");
+	}
+}
+
+void VulkanRenderer::CreateCompositionPass() {
+	VkAttachmentDescription colorAttachment{};
+	colorAttachment.format = swapChainImageFormat;
+	colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+	colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+	colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+	colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+	VkAttachmentReference colorRef{};
+	colorRef.attachment = 0;
+	colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+	VkSubpassDescription subpass{};
+	subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+	subpass.colorAttachmentCount = 1;
+	subpass.pColorAttachments = &colorRef;
+
+	VkRenderPassCreateInfo renderPassInfo{};
+	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+	renderPassInfo.attachmentCount = 1;
+	renderPassInfo.pAttachments = &colorAttachment;
+	renderPassInfo.subpassCount = 1;
+	renderPassInfo.pSubpasses = &subpass;
+
+	if (vkCreateRenderPass(logicalDevice, &renderPassInfo, nullptr, &compositionRenderPass) != VK_SUCCESS) {
+		throw std::runtime_error("Failed to create composition render pass.");
+	}
+}
+
+void VulkanRenderer::CreateCompositionPipeline() {
+	// Layout
+	VkDescriptorSetLayoutBinding samplerBinding{};
+	samplerBinding.binding = 0;
+	samplerBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	samplerBinding.descriptorCount = 1;
+	samplerBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+	VkDescriptorSetLayoutCreateInfo layoutInfo{};
+	layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+	layoutInfo.bindingCount = 1;
+	layoutInfo.pBindings = &samplerBinding;
+	vkCreateDescriptorSetLayout(logicalDevice, &layoutInfo, nullptr, &compositionDescriptorSetLayout);
+
+	// Pool
+	VkDescriptorPoolSize poolSize{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 };
+	VkDescriptorPoolCreateInfo poolInfo{};
+	poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+	poolInfo.poolSizeCount = 1;
+	poolInfo.pPoolSizes = &poolSize;
+	poolInfo.maxSets = 1;
+	vkCreateDescriptorPool(logicalDevice, &poolInfo, nullptr, &compositionDescriptorPool);
+
+	// Set
+	VkDescriptorSetAllocateInfo allocInfo{};
+	allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+	allocInfo.descriptorPool = compositionDescriptorPool;
+	allocInfo.descriptorSetCount = 1;
+	allocInfo.pSetLayouts = &compositionDescriptorSetLayout;
+	vkAllocateDescriptorSets(logicalDevice, &allocInfo, &compositionDescriptorSet);
+
+	// Update Set
+	VkDescriptorImageInfo imageInfo{};
+	imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	imageInfo.imageView = offscreenResolveImageView;
+	imageInfo.sampler = offscreenSampler;
+
+	VkWriteDescriptorSet descriptorWrite{};
+	descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	descriptorWrite.dstSet = compositionDescriptorSet;
+	descriptorWrite.dstBinding = 0;
+	descriptorWrite.dstArrayElement = 0;
+	descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	descriptorWrite.descriptorCount = 1;
+	descriptorWrite.pImageInfo = &imageInfo;
+	vkUpdateDescriptorSets(logicalDevice, 1, &descriptorWrite, 0, nullptr);
+
+	// Pipeline Layout
+	VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+	pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+	pipelineLayoutInfo.setLayoutCount = 1;
+	pipelineLayoutInfo.pSetLayouts = &compositionDescriptorSetLayout;
+	vkCreatePipelineLayout(logicalDevice, &pipelineLayoutInfo, nullptr, &compositionPipelineLayout);
+
+	// Pipeline (No vertex buffers!)
+	auto vertCode = ReadFile("shaders/quad_vert.spv");
+	auto fragCode = ReadFile("shaders/quad_frag.spv");
+	VkShaderModule vMod = CreateShaderModule(logicalDevice, vertCode);
+	VkShaderModule fMod = CreateShaderModule(logicalDevice, fragCode);
+
+	VkPipelineShaderStageCreateInfo stages[] = {
+		{ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, vMod, "main" },
+		{ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fMod, "main" }
+	};
+
+	VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
+	vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+	VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+	inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+	inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+	VkPipelineViewportStateCreateInfo viewportState{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, nullptr, 0, 1, nullptr, 1, nullptr };
+	VkPipelineRasterizationStateCreateInfo rasterizer{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, nullptr, 0, VK_FALSE, VK_FALSE, VK_POLYGON_MODE_FILL, VK_CULL_MODE_BACK_BIT, VK_FRONT_FACE_CLOCKWISE, VK_FALSE, 0, 0, 0, 1.0f };
+	VkPipelineMultisampleStateCreateInfo multisampling{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, nullptr, 0, VK_SAMPLE_COUNT_1_BIT, VK_FALSE, 1.0f, nullptr, VK_FALSE, VK_FALSE };
+	VkPipelineColorBlendAttachmentState colorBlendAttachment{ VK_FALSE, VK_BLEND_FACTOR_ZERO, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD, VK_BLEND_FACTOR_ZERO, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD, VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT };
+	VkPipelineColorBlendStateCreateInfo colorBlending{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, nullptr, 0, VK_FALSE, VK_LOGIC_OP_COPY, 1, &colorBlendAttachment };
+	VkDynamicState dynamicStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+	VkPipelineDynamicStateCreateInfo dynamicState{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, nullptr, 0, 2, dynamicStates };
+
+	VkPipelineDepthStencilStateCreateInfo depthStencil{};
+	depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+	depthStencil.depthTestEnable = VK_FALSE;
+	depthStencil.depthWriteEnable = VK_FALSE;
+	depthStencil.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+
+	VkGraphicsPipelineCreateInfo pInfo{};
+	pInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+	pInfo.stageCount = 2;
+	pInfo.pStages = stages;
+	pInfo.pVertexInputState = &vertexInputInfo;
+	pInfo.pInputAssemblyState = &inputAssembly;
+	pInfo.pViewportState = &viewportState;
+	pInfo.pRasterizationState = &rasterizer;
+	pInfo.pMultisampleState = &multisampling;
+	pInfo.pDepthStencilState = &depthStencil;
+	pInfo.pColorBlendState = &colorBlending;
+	pInfo.pDynamicState = &dynamicState;
+	pInfo.layout = compositionPipelineLayout;
+	pInfo.renderPass = compositionRenderPass;
+
+	vkCreateGraphicsPipelines(logicalDevice, VK_NULL_HANDLE, 1, &pInfo, nullptr, &compositionPipeline);
+	vkDestroyShaderModule(logicalDevice, fMod, nullptr);
+	vkDestroyShaderModule(logicalDevice, vMod, nullptr);
 }
 
 void VulkanRenderer::UpdateTextureDescriptors(const Scene& scene) {
@@ -879,15 +1066,18 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 
 	if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
-		throw std::runtime_error("Failed to start recording graphics buffer channel.");
+		throw std::runtime_error("Failed to start recording graphics buffer.");
 	}
 
+	// ================================================================
+	// PASS 1: OFFSCREEN 3D SCENE (Low Res)
+	// ================================================================
 	VkRenderPassBeginInfo renderPassInfo{};
 	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
 	renderPassInfo.renderPass = renderPass;
-	renderPassInfo.framebuffer = swapChainFramebuffers[imageIndex];
+	renderPassInfo.framebuffer = offscreenFramebuffer;
 	renderPassInfo.renderArea.offset = { 0, 0 };
-	renderPassInfo.renderArea.extent = swapChainExtent;
+	renderPassInfo.renderArea.extent = { GetInternalWidth(), GetInternalHeight() };
 
 	std::vector<VkClearValue> clearValues;
 	if (m_currentMsaaSamples != VK_SAMPLE_COUNT_1_BIT) {
@@ -906,39 +1096,53 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 
 	vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 
-	VkViewport viewport{ 0.0f, 0.0f, (float)swapChainExtent.width, (float)swapChainExtent.height, 0.0f, 1.0f };
+	VkViewport viewport{ 0.0f, 0.0f, (float)GetInternalWidth(), (float)GetInternalHeight(), 0.0f, 1.0f };
 	vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
-
-	VkRect2D scissor{ {0, 0}, swapChainExtent };
+	VkRect2D scissor{ {0, 0}, {GetInternalWidth(), GetInternalHeight()} };
 	vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
 	if (currentScene != nullptr) {
 		m_skybox.Draw(commandBuffer, descriptorSet);
-	}
+		vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
 
-	if (currentScene != nullptr) {
-		// Bind the master descriptors across the graphics context once
-		vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-			pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
-
-		// 1. DRAW STATIC MESHES (Like Sponza) USING THE STATIC PIPELINE MODULE
 		if (staticPipeline != VK_NULL_HANDLE && instancedPipeline != VK_NULL_HANDLE) {
-			m_staticMeshRenderer.Draw(commandBuffer, pipelineLayout, descriptorSet,
-				cameraPosition, frustumPlanes, currentFrame,
-				staticPipeline, instancedPipeline, // Both pipelines handed over cleanly!
-				drawCallCount, culledCount, sceneTotalVertices, sceneTotalIndices);
+			m_staticMeshRenderer.Draw(commandBuffer, pipelineLayout, descriptorSet, cameraPosition, frustumPlanes, currentFrame, staticPipeline, instancedPipeline, drawCallCount, culledCount, sceneTotalVertices, sceneTotalIndices);
 		}
-
-		// 2. DRAW TERRAIN USING THE SPLAT-MAP MULTI-TEXTURE PIPELINE MODULE
 		if (terrainPipeline != VK_NULL_HANDLE) {
 			vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, terrainPipeline);
-			m_terrainRenderer.Draw(commandBuffer, pipelineLayout, descriptorSet,
-				cameraPosition, drawCallCount, culledCount,
-				sceneTotalVertices, sceneTotalIndices);
+			m_terrainRenderer.Draw(commandBuffer, pipelineLayout, descriptorSet, cameraPosition, drawCallCount, culledCount, sceneTotalVertices, sceneTotalIndices);
 		}
-
 		m_waterRenderer.Draw(commandBuffer, descriptorSet, drawCallCount);
 		m_grassRenderer.Draw(commandBuffer, descriptorSet, drawCallCount);
+	}
+	vkCmdEndRenderPass(commandBuffer);
+
+	// ================================================================
+	// PASS 2: COMPOSITION & UI (Native Res)
+	// ================================================================
+	VkRenderPassBeginInfo compPassInfo{};
+	compPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+	compPassInfo.renderPass = compositionRenderPass;
+	compPassInfo.framebuffer = swapChainFramebuffers[imageIndex];
+	compPassInfo.renderArea.offset = { 0, 0 };
+	compPassInfo.renderArea.extent = swapChainExtent;
+
+	VkClearValue compClearColor = { {{0.0f, 0.0f, 0.0f, 1.0f}} };
+	compPassInfo.clearValueCount = 1;
+	compPassInfo.pClearValues = &compClearColor;
+
+	vkCmdBeginRenderPass(commandBuffer, &compPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+
+	VkViewport nativeViewport{ 0.0f, 0.0f, (float)swapChainExtent.width, (float)swapChainExtent.height, 0.0f, 1.0f };
+	vkCmdSetViewport(commandBuffer, 0, 1, &nativeViewport);
+	VkRect2D nativeScissor{ {0, 0}, swapChainExtent };
+	vkCmdSetScissor(commandBuffer, 0, 1, &nativeScissor);
+
+	// Draw the upscaled scene!
+	if (compositionPipeline != VK_NULL_HANDLE) {
+		vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, compositionPipeline);
+		vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, compositionPipelineLayout, 0, 1, &compositionDescriptorSet, 0, nullptr);
+		vkCmdDraw(commandBuffer, 3, 1, 0, 0); // Big triangle
 	}
 
 	if (ImGui::GetDrawData() != nullptr) {
@@ -1412,9 +1616,9 @@ void VulkanRenderer::CreateImGui() {
 	init_info.ImageCount = static_cast<uint32_t>(swapChainImages.size());
 	init_info.Allocator = nullptr;
 
-	init_info.PipelineInfoMain.RenderPass = renderPass;
+	init_info.PipelineInfoMain.RenderPass = compositionRenderPass;
 	init_info.PipelineInfoMain.Subpass = 0;
-	init_info.PipelineInfoMain.MSAASamples = m_currentMsaaSamples;
+	init_info.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
 
 	ImGui_ImplVulkan_Init(&init_info);
 }
@@ -1547,33 +1751,20 @@ VkImageView VulkanRenderer::CreateImageView(VkImage image, VkFormat format, VkIm
 
 void VulkanRenderer::CreateDepthResources() {
 	VkFormat depthFormat = FindDepthFormat();
-
-	CreateImage(
-		swapChainExtent.width,
-		swapChainExtent.height,
-		1,
-		m_currentMsaaSamples,
-		depthFormat,
-		VK_IMAGE_TILING_OPTIMAL,
-		VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-		depthImage,
-		depthImageMemory
-	);
-
+	// NOW USES INTERNAL RESOLUTION
+	CreateImage(GetInternalWidth(), GetInternalHeight(), 1, m_currentMsaaSamples, depthFormat,
+		VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, depthImage, depthImageMemory);
 	depthImageView = CreateImageView(depthImage, depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT, 1);
 }
 void VulkanRenderer::CreateColorResources() {
 	if (m_currentMsaaSamples != VK_SAMPLE_COUNT_1_BIT) {
 		VkFormat colorFormat = swapChainImageFormat;
-		CreateImage(swapChainExtent.width, swapChainExtent.height, 1,
-			m_currentMsaaSamples, colorFormat, VK_IMAGE_TILING_OPTIMAL,
-			VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+		// NOW USES INTERNAL RESOLUTION
+		CreateImage(GetInternalWidth(), GetInternalHeight(), 1, m_currentMsaaSamples, colorFormat,
+			VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
 			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, colorImage, colorImageMemory);
 		colorImageView = CreateImageView(colorImage, colorFormat, VK_IMAGE_ASPECT_COLOR_BIT, 1);
-	}
-	else {
-		// no separate MSAA image needed; colorImage / colorImageView remain VK_NULL_HANDLE
 	}
 }
 
@@ -1830,6 +2021,24 @@ void VulkanRenderer::Cleanup() {
 		}
 	}
 	swapChainFramebuffers.clear();
+
+	if (logicalDevice != VK_NULL_HANDLE) {
+		if (compositionPipeline != VK_NULL_HANDLE) vkDestroyPipeline(logicalDevice, compositionPipeline, nullptr);
+		if (compositionPipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(logicalDevice, compositionPipelineLayout, nullptr);
+		if (compositionRenderPass != VK_NULL_HANDLE) vkDestroyRenderPass(logicalDevice, compositionRenderPass, nullptr);
+		if (compositionDescriptorPool != VK_NULL_HANDLE) vkDestroyDescriptorPool(logicalDevice, compositionDescriptorPool, nullptr);
+		if (compositionDescriptorSetLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(logicalDevice, compositionDescriptorSetLayout, nullptr);
+
+		if (offscreenFramebuffer != VK_NULL_HANDLE) vkDestroyFramebuffer(logicalDevice, offscreenFramebuffer, nullptr);
+		if (offscreenResolveImageView != VK_NULL_HANDLE) vkDestroyImageView(logicalDevice, offscreenResolveImageView, nullptr);
+		if (offscreenResolveImage != VK_NULL_HANDLE) vkDestroyImage(logicalDevice, offscreenResolveImage, nullptr);
+		if (offscreenResolveImageMemory != VK_NULL_HANDLE) vkFreeMemory(logicalDevice, offscreenResolveImageMemory, nullptr);
+		if (offscreenSampler != VK_NULL_HANDLE) vkDestroySampler(logicalDevice, offscreenSampler, nullptr);
+
+		compositionPipeline = VK_NULL_HANDLE;
+		compositionRenderPass = VK_NULL_HANDLE;
+		offscreenFramebuffer = VK_NULL_HANDLE;
+	}
 
 	for (auto imageView : swapChainImageViews) {
 		if (imageView != VK_NULL_HANDLE) {

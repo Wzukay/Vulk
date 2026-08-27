@@ -127,6 +127,21 @@ private:
     VkExtent2D swapChainExtent;
     std::vector<VkImageView> swapChainImageViews;
 
+    // --- Offscreen 3D Targets ---
+    VkImage offscreenResolveImage = VK_NULL_HANDLE;
+    VkDeviceMemory offscreenResolveImageMemory = VK_NULL_HANDLE;
+    VkImageView offscreenResolveImageView = VK_NULL_HANDLE;
+    VkSampler offscreenSampler = VK_NULL_HANDLE;
+    VkFramebuffer offscreenFramebuffer = VK_NULL_HANDLE;
+
+    // --- Composition Pipeline (Native Res UI) ---
+    VkRenderPass compositionRenderPass = VK_NULL_HANDLE;
+    VkPipeline compositionPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout compositionPipelineLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout compositionDescriptorSetLayout = VK_NULL_HANDLE;
+    VkDescriptorPool compositionDescriptorPool = VK_NULL_HANDLE;
+    VkDescriptorSet compositionDescriptorSet = VK_NULL_HANDLE;
+
     VkImage depthImage = VK_NULL_HANDLE;
     VkDeviceMemory depthImageMemory = VK_NULL_HANDLE;
     VkImageView depthImageView = VK_NULL_HANDLE;
@@ -148,8 +163,15 @@ private:
     std::vector<VkFence> inFlightFences;
     std::vector<VkFence> imagesInFlight;
 
+    uint32_t GetInternalWidth() const { return std::max(1u, static_cast<uint32_t>(swapChainExtent.width * g_Settings.renderScale)); }
+    uint32_t GetInternalHeight() const { return std::max(1u, static_cast<uint32_t>(swapChainExtent.height * g_Settings.renderScale)); }
+
     void CreateSwapChain();
     void RecreateSwapChain();
+
+    void CreateOffscreenResolve();
+    void CreateCompositionPass();
+    void CreateCompositionPipeline();
 
     VkImageView CreateImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags, uint32_t mipLevels);
     void CreateImage(uint32_t width, uint32_t height, uint32_t mipLevels,

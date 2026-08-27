@@ -217,5 +217,11 @@
     <None Include="shaders\instanced.frag">
       <Filter>Shaders</Filter>
     </None>
+    <None Include="shaders\quad.vert">
+      <Filter>Shaders</Filter>
+    </None>
+    <None Include="shaders\quad.frag">
+      <Filter>Shaders</Filter>
+    </None>
   </ItemGroup>
 </Project>
