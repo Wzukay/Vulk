@@ -223,5 +223,8 @@
     <None Include="shaders\quad.frag">
       <Filter>Shaders</Filter>
     </None>
+    <None Include="shaders\fsr.frag">
+      <Filter>Shaders</Filter>
+    </None>
   </ItemGroup>
 </Project>

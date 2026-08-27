@@ -945,16 +945,24 @@ void VulkanRenderer::CreateCompositionPipeline() {
 	descriptorWrite.pImageInfo = &imageInfo;
 	vkUpdateDescriptorSets(logicalDevice, 1, &descriptorWrite, 0, nullptr);
 
+	VkPushConstantRange fsrPushConstantRange{};
+	fsrPushConstantRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+	fsrPushConstantRange.offset = 0;
+	fsrPushConstantRange.size = sizeof(FSRConstants);
+
 	// Pipeline Layout
 	VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
 	pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
 	pipelineLayoutInfo.setLayoutCount = 1;
 	pipelineLayoutInfo.pSetLayouts = &compositionDescriptorSetLayout;
+	pipelineLayoutInfo.pushConstantRangeCount = 1;
+	pipelineLayoutInfo.pPushConstantRanges = &fsrPushConstantRange;
+
 	vkCreatePipelineLayout(logicalDevice, &pipelineLayoutInfo, nullptr, &compositionPipelineLayout);
 
-	// Pipeline (No vertex buffers!)
+	std::string fragPath = g_Settings.enableFSR ? "shaders/fsr_frag.spv" : "shaders/quad_frag.spv";
 	auto vertCode = ReadFile("shaders/quad_vert.spv");
-	auto fragCode = ReadFile("shaders/quad_frag.spv");
+	auto fragCode = ReadFile(fragPath);
 	VkShaderModule vMod = CreateShaderModule(logicalDevice, vertCode);
 	VkShaderModule fMod = CreateShaderModule(logicalDevice, fragCode);
 
@@ -1142,6 +1150,13 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 	if (compositionPipeline != VK_NULL_HANDLE) {
 		vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, compositionPipeline);
 		vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, compositionPipelineLayout, 0, 1, &compositionDescriptorSet, 0, nullptr);
+		
+		if (g_Settings.enableFSR) {
+			FSRConstants fc{};
+			fc.sharpness = 0.35f; // Adjustable sharpening intensity
+			vkCmdPushConstants(commandBuffer, compositionPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(FSRConstants), &fc);
+		}
+
 		vkCmdDraw(commandBuffer, 3, 1, 0, 0); // Big triangle
 	}
 
@@ -1829,6 +1844,19 @@ void VulkanRenderer::AddGrass(int64_t key, const std::vector<GrassInstance>& gra
 
 void VulkanRenderer::ApplySettings() {
 	bool needSwapchainRecreate = false;
+
+	if (g_Settings.enableFSR != currentSettings.enableFSR) {
+		currentSettings.enableFSR = g_Settings.enableFSR;
+		vkDeviceWaitIdle(logicalDevice);
+
+		// Destroy old composition pipeline and recreate with the new shader
+		vkDestroyPipeline(logicalDevice, compositionPipeline, nullptr);
+		vkDestroyPipelineLayout(logicalDevice, compositionPipelineLayout, nullptr);
+		vkDestroyDescriptorSetLayout(logicalDevice, compositionDescriptorSetLayout, nullptr);
+		vkDestroyDescriptorPool(logicalDevice, compositionDescriptorPool, nullptr);
+
+		CreateCompositionPipeline();
+	}
 
 	if (g_Settings.vsync != currentSettings.vsync) {
 		currentSettings.vsync = g_Settings.vsync;

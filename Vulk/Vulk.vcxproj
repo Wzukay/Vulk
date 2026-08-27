@@ -218,6 +218,7 @@
     <ClInclude Include="tiny_obj_loader.h" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="shaders\fsr.frag" />
     <None Include="shaders\grass.frag" />
     <None Include="shaders\grass.vert" />
     <None Include="shaders\instanced.frag" />

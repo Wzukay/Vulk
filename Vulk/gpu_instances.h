@@ -32,6 +32,15 @@ struct UniformBufferObject {
     alignas(16) glm::mat4 inverseView;
 };
 
+struct FSRConstants {
+    glm::vec4 const0;
+    glm::vec4 const1;
+    glm::vec4 const2;
+    glm::vec4 const3;
+    float sharpness;
+    float _pad[3];
+};
+
 struct Light {
     alignas(16) glm::vec4 positionOrDir; // w: 0 = directional, 1 = point
     alignas(16) glm::vec4 color;         // rgb = color, a = intensity
