@@ -5,14 +5,14 @@
 #include <stdexcept>
 #include <iostream>
 
-void WaterRenderer::Init(VkDevice device, VkRenderPass renderPass,
+void WaterRenderer::Init(VkDevice device, VkFormat colorFormat, VkFormat depthFormat,
     VkDescriptorSetLayout sharedSetLayout,
     VkSampleCountFlagBits msaaSamples,
     VulkanRenderer* renderer) {
     m_device = device;
     m_renderer = renderer;
     m_startTime = std::chrono::high_resolution_clock::now();
-    CreatePipeline(renderPass, sharedSetLayout, msaaSamples);
+    CreatePipeline(colorFormat, depthFormat, sharedSetLayout, msaaSamples);
 }
 
 void WaterRenderer::Cleanup(VkDevice device) {
@@ -136,10 +136,9 @@ void WaterRenderer::Draw(VkCommandBuffer commandBuffer, VkDescriptorSet sharedDe
 
 // ---- Private helpers ----
 
-void WaterRenderer::CreatePipeline(VkRenderPass renderPass,
+void WaterRenderer::CreatePipeline(VkFormat colorFormat, VkFormat depthFormat,
     VkDescriptorSetLayout sharedSetLayout,
     VkSampleCountFlagBits msaaSamples) {
-    // Load shaders (these paths are the same as before)
     auto vertCode = VulkanRenderer::ReadFile("shaders/water_vert.spv");
     auto fragCode = VulkanRenderer::ReadFile("shaders/water_frag.spv");
 
@@ -162,7 +161,6 @@ void WaterRenderer::CreatePipeline(VkRenderPass renderPass,
 
     VkPipelineShaderStageCreateInfo stages[] = { vertStage, fragStage };
 
-    // Vertex input: WaterVertex { pos, uv }
     VkVertexInputBindingDescription binding{};
     binding.binding = 0;
     binding.stride = sizeof(WaterVertex);
@@ -196,7 +194,6 @@ void WaterRenderer::CreatePipeline(VkRenderPass renderPass,
     viewportState.viewportCount = 1;
     viewportState.scissorCount = 1;
 
-    // Rasterizer: no culling, fill mode
     VkPipelineRasterizationStateCreateInfo rasterizer{};
     rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
     rasterizer.depthClampEnable = VK_FALSE;
@@ -205,25 +202,20 @@ void WaterRenderer::CreatePipeline(VkRenderPass renderPass,
     rasterizer.lineWidth = 1.0f;
     rasterizer.cullMode = VK_CULL_MODE_NONE;
     rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
-    rasterizer.depthBiasEnable = VK_FALSE;
 
     VkPipelineMultisampleStateCreateInfo multisample{};
     multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
     multisample.sampleShadingEnable = VK_FALSE;
     multisample.rasterizationSamples = msaaSamples;
 
-    // Depth test ON, depth write OFF (translucent)
     VkPipelineDepthStencilStateCreateInfo depthStencil{};
     depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
     depthStencil.depthTestEnable = VK_TRUE;
     depthStencil.depthWriteEnable = VK_FALSE;
     depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
-    depthStencil.stencilTestEnable = VK_FALSE;
 
-    // Alpha blending for water
     VkPipelineColorBlendAttachmentState colorBlendAttachment{};
-    colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-        VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
     colorBlendAttachment.blendEnable = VK_TRUE;
     colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
     colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
@@ -259,6 +251,13 @@ void WaterRenderer::CreatePipeline(VkRenderPass renderPass,
         throw std::runtime_error("Failed to create water pipeline layout");
     }
 
+    // --- VULKAN 1.3 DYNAMIC RENDERING ---
+    VkPipelineRenderingCreateInfo pipelineRenderingCreateInfo{};
+    pipelineRenderingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    pipelineRenderingCreateInfo.colorAttachmentCount = 1;
+    pipelineRenderingCreateInfo.pColorAttachmentFormats = &colorFormat;
+    pipelineRenderingCreateInfo.depthAttachmentFormat = depthFormat;
+
     VkGraphicsPipelineCreateInfo pipelineInfo{};
     pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
     pipelineInfo.stageCount = 2;
@@ -272,7 +271,9 @@ void WaterRenderer::CreatePipeline(VkRenderPass renderPass,
     pipelineInfo.pColorBlendState = &colorBlending;
     pipelineInfo.pDynamicState = &dynamicState;
     pipelineInfo.layout = m_pipelineLayout;
-    pipelineInfo.renderPass = renderPass;
+
+    pipelineInfo.pNext = &pipelineRenderingCreateInfo;
+    pipelineInfo.renderPass = VK_NULL_HANDLE;
     pipelineInfo.subpass = 0;
 
     if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_pipeline) != VK_SUCCESS) {

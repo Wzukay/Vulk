@@ -249,9 +249,6 @@ void StaticMeshRenderer::Draw(VkCommandBuffer commandBuffer, VkPipelineLayout pi
             for (const auto& chunkPair : group.chunkBuckets) {
                 const auto& bucket = chunkPair.second;
 
-                // ====================================================================
-                // HIERARCHICAL CULLING: Check the whole chunk instantly!
-                // ====================================================================
                 if (!m_renderer->IsWorldSphereInFrustum(bucket.chunkCenter, bucket.chunkRadius)) {
                     outCulledCount += static_cast<uint32_t>(bucket.transforms.size());
                     continue; // Skip 5,000 trees instantly!

@@ -7,6 +7,7 @@ struct Settings {
     float renderDistance = 5000.0f;
     float renderScale = 0.75f;
     bool enableFSR = false;
+    bool enableSSAO = true;
     int maxMipLevels = 4;
     bool vsync = false;
     bool anisotropicFiltering = true;

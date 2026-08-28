@@ -42,7 +42,7 @@ class GrassRenderer {
 public:
     void Init(VkDevice device, VulkanRenderer* renderer,
         RingBufferUploader* uploader,
-        VkRenderPass renderPass,
+        VkFormat colorFormat, VkFormat depthFormat,
         VkDescriptorSetLayout sharedSetLayout,
         VkSampleCountFlagBits msaaSamples);
     void Cleanup();
@@ -55,7 +55,7 @@ public:
     void RemoveChunk(int64_t key);
     void CancelPendingUpload(int64_t key);
 
-    void CreatePipeline(VkRenderPass renderPass,
+    void CreatePipeline(VkFormat colorFormat, VkFormat depthFormat,
         VkDescriptorSetLayout sharedSetLayout,
         VkSampleCountFlagBits msaaSamples);
 

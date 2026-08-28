@@ -12,6 +12,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <vulkan/vulkan_core.h>
 #include <fstream>
+#include <random>
 
 #include "mesh.h"
 
@@ -132,10 +133,8 @@ private:
     VkDeviceMemory offscreenResolveImageMemory = VK_NULL_HANDLE;
     VkImageView offscreenResolveImageView = VK_NULL_HANDLE;
     VkSampler offscreenSampler = VK_NULL_HANDLE;
-    VkFramebuffer offscreenFramebuffer = VK_NULL_HANDLE;
 
     // --- Composition Pipeline (Native Res UI) ---
-    VkRenderPass compositionRenderPass = VK_NULL_HANDLE;
     VkPipeline compositionPipeline = VK_NULL_HANDLE;
     VkPipelineLayout compositionPipelineLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout compositionDescriptorSetLayout = VK_NULL_HANDLE;
@@ -150,9 +149,6 @@ private:
     VkDeviceMemory colorImageMemory = VK_NULL_HANDLE;
     VkImageView colorImageView = VK_NULL_HANDLE;
 
-    VkRenderPass renderPass = VK_NULL_HANDLE;
-    std::vector<VkFramebuffer> swapChainFramebuffers;
-
     VkCommandPool commandPool = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> commandBuffers;
 
@@ -163,14 +159,24 @@ private:
     std::vector<VkFence> inFlightFences;
     std::vector<VkFence> imagesInFlight;
 
-    uint32_t GetInternalWidth() const { return std::max(1u, static_cast<uint32_t>(swapChainExtent.width * g_Settings.renderScale)); }
-    uint32_t GetInternalHeight() const { return std::max(1u, static_cast<uint32_t>(swapChainExtent.height * g_Settings.renderScale)); }
+    uint32_t GetInternalWidth() const {
+        uint32_t w = std::max(1u, static_cast<uint32_t>(swapChainExtent.width * g_Settings.renderScale));
+        return w + (w % 2);
+    }
+    uint32_t GetInternalHeight() const {
+        uint32_t h = std::max(1u, static_cast<uint32_t>(swapChainExtent.height * g_Settings.renderScale));
+        return h + (h % 2);
+    }
+
+    uint32_t GetSSAOWidth() const { return std::max(1u, GetInternalWidth() / 2); }
+    uint32_t GetSSAOHeight() const { return std::max(1u, GetInternalHeight() / 2); }
+
+    void TransitionImageLayout(VkCommandBuffer cmd, VkImage image, VkImageLayout oldLayout, VkImageLayout newLayout, VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage, VkAccessFlags srcAccess, VkAccessFlags dstAccess, VkImageAspectFlags aspect);
 
     void CreateSwapChain();
     void RecreateSwapChain();
 
     void CreateOffscreenResolve();
-    void CreateCompositionPass();
     void CreateCompositionPipeline();
 
     VkImageView CreateImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags, uint32_t mipLevels);
@@ -184,8 +190,6 @@ private:
     void CreateDepthResources();
     void CreateColorResources();
 
-    void CreateRenderPass();
-    void CreateFrameBuffers();
     void CreateCommandPool();
     void CreateCommandBuffers();
     void CreateSyncObjects();
@@ -199,6 +203,8 @@ private:
     VkSurfaceFormatKHR ChooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& availableFormats);
     VkPresentModeKHR ChooseSwapPresentMode(const std::vector<VkPresentModeKHR>& availablePresentModes);
     VkExtent2D ChooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities);
+
+    void GenerateSSAOResources();
 
 public:
     void DrawFrame();
@@ -286,6 +292,12 @@ private:
     SkyboxRenderer m_skybox;
 
 private:
+    VkRenderPass compositionRenderPass = VK_NULL_HANDLE;
+    std::vector<VkFramebuffer> swapChainFramebuffers;
+
+    void CreateCompositionPass();
+    void CreateFrameBuffers();
+
     VkDescriptorPool imguiDescriptorPool;
 
     void CreateImGuiDescriptorPool();
@@ -328,6 +340,45 @@ private:
 
 public:
     void AddGrass(int64_t key, const std::vector<GrassInstance>& grassInstances);
+
+private:
+    // SSAO Resources
+    VkImage ssaoImage = VK_NULL_HANDLE;
+    VkDeviceMemory ssaoImageMemory = VK_NULL_HANDLE;
+    VkImageView ssaoImageView = VK_NULL_HANDLE;
+    VkSampler ssaoSampler = VK_NULL_HANDLE;
+    VkSampler depthSampler = VK_NULL_HANDLE;
+
+    VkPipeline ssaoPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout ssaoPipelineLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout ssaoDescriptorSetLayout = VK_NULL_HANDLE;
+    VkDescriptorPool ssaoDescriptorPool = VK_NULL_HANDLE;
+    VkDescriptorSet ssaoDescriptorSet = VK_NULL_HANDLE;
+
+    VkBuffer ssaoUBO = VK_NULL_HANDLE;
+    VkDeviceMemory ssaoUBOMemory = VK_NULL_HANDLE;
+    SSAOUBO* ssaoUBOMapped = nullptr;
+
+    // Ping-Pong blur targets
+    VkImage ssaoPingPongImage = VK_NULL_HANDLE;
+    VkDeviceMemory ssaoPingPongImageMemory = VK_NULL_HANDLE;
+    VkImageView ssaoPingPongImageView = VK_NULL_HANDLE;
+
+    VkImage ssaoBlurImage = VK_NULL_HANDLE;
+    VkDeviceMemory ssaoBlurImageMemory = VK_NULL_HANDLE;
+    VkImageView ssaoBlurImageView = VK_NULL_HANDLE;
+
+    VkPipeline ssaoBlurPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout ssaoBlurPipelineLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout ssaoBlurDescriptorSetLayout = VK_NULL_HANDLE;
+    VkDescriptorPool ssaoBlurDescriptorPool = VK_NULL_HANDLE;
+    VkDescriptorSet ssaoBlurDescriptorSetHorizontal = VK_NULL_HANDLE;
+    VkDescriptorSet ssaoBlurDescriptorSetVertical = VK_NULL_HANDLE;
+
+    void CreateSSAOResources();
+    void CreateSSAOPipeline();
+    void CreateSSAOBlurResources();
+    void CreateSSAOBlurPipeline();
 
 #ifdef NDEBUG
     const bool enableValidationLayers = false;

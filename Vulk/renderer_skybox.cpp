@@ -40,7 +40,7 @@ namespace {
 
 } // namespace
 
-void SkyboxRenderer::Init(VkDevice device, VkRenderPass renderPass, VkDescriptorSetLayout sharedSetLayout, VkSampleCountFlagBits msaaSamples) {
+void SkyboxRenderer::Init(VkDevice device, VkFormat colorFormat, VkFormat depthFormat, VkDescriptorSetLayout sharedSetLayout, VkSampleCountFlagBits msaaSamples) {
     std::cout << "[DEBUG] Creating Skybox Pipeline...\n";
 
     skyboxVertModule = LoadShaderModule(device, "shaders/skybox_vert.spv");
@@ -60,8 +60,6 @@ void SkyboxRenderer::Init(VkDevice device, VkRenderPass renderPass, VkDescriptor
 
     VkPipelineShaderStageCreateInfo stages[] = { vertStage, fragStage };
 
-    // No vertex input - the skybox draws a fullscreen triangle and
-    // reconstructs the view ray in the vertex shader.
     VkPipelineVertexInputStateCreateInfo vertexInput{};
     vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     vertexInput.vertexBindingDescriptionCount = 0;
@@ -85,7 +83,7 @@ void SkyboxRenderer::Init(VkDevice device, VkRenderPass renderPass, VkDescriptor
     rasterizer.rasterizerDiscardEnable = VK_FALSE;
     rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
     rasterizer.lineWidth = 1.0f;
-    rasterizer.cullMode = VK_CULL_MODE_NONE; // we want to see sky from inside
+    rasterizer.cullMode = VK_CULL_MODE_NONE;
     rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
     rasterizer.depthBiasEnable = VK_FALSE;
 
@@ -94,7 +92,6 @@ void SkyboxRenderer::Init(VkDevice device, VkRenderPass renderPass, VkDescriptor
     multisample.sampleShadingEnable = VK_FALSE;
     multisample.rasterizationSamples = msaaSamples;
 
-    // Depth test on (so terrain/objects occlude the sky), depth write off.
     VkPipelineDepthStencilStateCreateInfo depthStencil{};
     depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
     depthStencil.depthTestEnable = VK_TRUE;
@@ -117,18 +114,21 @@ void SkyboxRenderer::Init(VkDevice device, VkRenderPass renderPass, VkDescriptor
     dynamicState.dynamicStateCount = 2;
     dynamicState.pDynamicStates = dynamicStates;
 
-    // Reuses the renderer's shared descriptor set layout (UBO + lights +
-    // cubemap all live in the one global bindless set).
     VkPipelineLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     layoutInfo.setLayoutCount = 1;
     layoutInfo.pSetLayouts = &sharedSetLayout;
-    layoutInfo.pushConstantRangeCount = 0;
-    layoutInfo.pPushConstantRanges = nullptr;
 
     if (vkCreatePipelineLayout(device, &layoutInfo, nullptr, &skyboxPipelineLayout) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create skybox pipeline layout");
     }
+
+    // --- VULKAN 1.3 DYNAMIC RENDERING ---
+    VkPipelineRenderingCreateInfo pipelineRenderingCreateInfo{};
+    pipelineRenderingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    pipelineRenderingCreateInfo.colorAttachmentCount = 1;
+    pipelineRenderingCreateInfo.pColorAttachmentFormats = &colorFormat;
+    pipelineRenderingCreateInfo.depthAttachmentFormat = depthFormat;
 
     VkGraphicsPipelineCreateInfo pipelineInfo{};
     pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
@@ -143,14 +143,16 @@ void SkyboxRenderer::Init(VkDevice device, VkRenderPass renderPass, VkDescriptor
     pipelineInfo.pColorBlendState = &colorBlending;
     pipelineInfo.pDynamicState = &dynamicState;
     pipelineInfo.layout = skyboxPipelineLayout;
-    pipelineInfo.renderPass = renderPass;
+
+    // Connect dynamic rendering
+    pipelineInfo.pNext = &pipelineRenderingCreateInfo;
+    pipelineInfo.renderPass = VK_NULL_HANDLE;
     pipelineInfo.subpass = 0;
 
     if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &skyboxPipeline) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create skybox pipeline");
     }
 }
-
 void SkyboxRenderer::LoadTexture(const std::string& folder) {
     m_skyboxTexture = g_AssetManager.LoadCubemapFromFaces(
         folder + "right.tga",

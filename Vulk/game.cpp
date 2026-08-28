@@ -3,6 +3,7 @@
 #include "player_system.h"
 
 #include <chrono>
+#include <random>
 
 GameLogger debugLog;
 static glm::vec3 lastCamPos;
@@ -55,7 +56,12 @@ void Game::Init()
         debugLog.AddLog("[Lobby] Contacting introduction server. Standing by...");
     }
     else {
-        chunk.SetSeed(69696967);
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_int_distribution<int> distrib(1, 10);
+        int myRandomInt = distrib(gen);
+
+        chunk.SetSeed(myRandomInt);
 
         CameraData initialCam = { glm::vec3(100.0f, 60.0f, 250.0f),
                                   glm::normalize(glm::vec3(0.0f, sin(glm::radians(-30.0f)), -cos(glm::radians(-30.0f)))),

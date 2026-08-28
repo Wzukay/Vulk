@@ -32,7 +32,7 @@ struct WaterPushConstants {
 
 class WaterRenderer {
 public:
-    void Init(VkDevice device, VkRenderPass renderPass,
+    void Init(VkDevice device, VkFormat colorFormat, VkFormat depthFormat,
         VkDescriptorSetLayout sharedSetLayout,
         VkSampleCountFlagBits msaaSamples,
         VulkanRenderer* renderer);
@@ -66,7 +66,7 @@ private:
         std::chrono::high_resolution_clock::now();
 
     // Internal helpers
-    void CreatePipeline(VkRenderPass renderPass,
+    void CreatePipeline(VkFormat colorFormat, VkFormat depthFormat,
         VkDescriptorSetLayout sharedSetLayout,
         VkSampleCountFlagBits msaaSamples);
     size_t CreateWaterBodyGPU(const WaterMesh& mesh,

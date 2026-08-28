@@ -9,13 +9,13 @@
 
 void GrassRenderer::Init(VkDevice device, VulkanRenderer* renderer,
     RingBufferUploader* uploader,
-    VkRenderPass renderPass,
+    VkFormat colorFormat, VkFormat depthFormat,
     VkDescriptorSetLayout sharedSetLayout,
     VkSampleCountFlagBits msaaSamples) {
     m_device = device;
     m_renderer = renderer;
     m_uploader = uploader;
-    CreatePipeline(renderPass, sharedSetLayout, msaaSamples);
+    CreatePipeline(colorFormat, depthFormat, sharedSetLayout, msaaSamples);
 }
 
 void GrassRenderer::Cleanup() {
@@ -189,10 +189,9 @@ void GrassRenderer::CancelPendingUpload(int64_t key) {
 
 // ---- Private helpers ----
 
-void GrassRenderer::CreatePipeline(VkRenderPass renderPass,
+void GrassRenderer::CreatePipeline(VkFormat colorFormat, VkFormat depthFormat,
     VkDescriptorSetLayout sharedSetLayout,
     VkSampleCountFlagBits msaaSamples) {
-    // Load shaders
     auto vertCode = VulkanRenderer::ReadFile("shaders/grass_vert.spv");
     auto fragCode = VulkanRenderer::ReadFile("shaders/grass_frag.spv");
 
@@ -210,7 +209,6 @@ void GrassRenderer::CreatePipeline(VkRenderPass renderPass,
     stages[1].module = fragModule;
     stages[1].pName = "main";
 
-    // Vertex input: instance data only
     VkVertexInputBindingDescription bindingDesc{};
     bindingDesc.binding = 0;
     bindingDesc.stride = sizeof(GrassInstance);
@@ -245,7 +243,7 @@ void GrassRenderer::CreatePipeline(VkRenderPass renderPass,
     rasterizer.rasterizerDiscardEnable = VK_FALSE;
     rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
     rasterizer.lineWidth = 1.0f;
-    rasterizer.cullMode = VK_CULL_MODE_NONE;   // render both sides for grass blades
+    rasterizer.cullMode = VK_CULL_MODE_NONE;
     rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
     rasterizer.depthBiasEnable = VK_FALSE;
 
@@ -264,9 +262,8 @@ void GrassRenderer::CreatePipeline(VkRenderPass renderPass,
     depthStencil.stencilTestEnable = VK_FALSE;
 
     VkPipelineColorBlendAttachmentState blendAttachment{};
-    blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-        VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-    blendAttachment.blendEnable = VK_FALSE;   // alpha test used, no blending
+    blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    blendAttachment.blendEnable = VK_FALSE;
 
     VkPipelineColorBlendStateCreateInfo colorBlending{};
     colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
@@ -295,6 +292,13 @@ void GrassRenderer::CreatePipeline(VkRenderPass renderPass,
         throw std::runtime_error("Failed to create grass pipeline layout");
     }
 
+    // --- VULKAN 1.3 DYNAMIC RENDERING ---
+    VkPipelineRenderingCreateInfo pipelineRenderingCreateInfo{};
+    pipelineRenderingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    pipelineRenderingCreateInfo.colorAttachmentCount = 1;
+    pipelineRenderingCreateInfo.pColorAttachmentFormats = &colorFormat;
+    pipelineRenderingCreateInfo.depthAttachmentFormat = depthFormat;
+
     VkGraphicsPipelineCreateInfo pipelineInfo{};
     pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
     pipelineInfo.stageCount = 2;
@@ -308,14 +312,15 @@ void GrassRenderer::CreatePipeline(VkRenderPass renderPass,
     pipelineInfo.pColorBlendState = &colorBlending;
     pipelineInfo.pDynamicState = &dynamicState;
     pipelineInfo.layout = m_pipelineLayout;
-    pipelineInfo.renderPass = renderPass;
+
+    pipelineInfo.pNext = &pipelineRenderingCreateInfo;
+    pipelineInfo.renderPass = VK_NULL_HANDLE;
     pipelineInfo.subpass = 0;
 
     if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_pipeline) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create grass pipeline");
     }
 
-    // Destroy shader modules after pipeline creation
     vkDestroyShaderModule(m_device, vertModule, nullptr);
     vkDestroyShaderModule(m_device, fragModule, nullptr);
 }

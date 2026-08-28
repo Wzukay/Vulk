@@ -32,13 +32,35 @@ struct UniformBufferObject {
     alignas(16) glm::mat4 inverseView;
 };
 
+struct SSAOPushConstants {
+    glm::vec2 screenSize;
+    float radius;
+    float bias;
+};
+
+struct SSAOBlurPushConstants {
+    glm::vec2 screenSize;
+    glm::vec2 blurDirection;
+    float colorSigma;
+    float spatialSigma;
+};
+
+struct SSAOUBO {
+    glm::mat4 projection;
+    glm::mat4 inverseProjection;
+    glm::vec4 samples[24];
+    glm::vec4 noise[16];
+};
+
+// Add to your FSRConstants struct so the UI can toggle it:
 struct FSRConstants {
     glm::vec4 const0;
     glm::vec4 const1;
     glm::vec4 const2;
     glm::vec4 const3;
     float sharpness;
-    float _pad[3];
+    uint32_t enableSSAO;
+    float _pad[2];
 };
 
 struct Light {
