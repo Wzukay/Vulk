@@ -180,6 +180,7 @@
     <ClCompile Include="networkManager.cpp" />
     <ClCompile Include="player.cpp" />
     <ClCompile Include="renderer.cpp" />
+    <ClCompile Include="renderer_boid.cpp" />
     <ClCompile Include="renderer_grass.cpp" />
     <ClCompile Include="renderer_skybox.cpp" />
     <ClCompile Include="renderer_static.cpp" />
@@ -203,6 +204,7 @@
     <ClInclude Include="player.h" />
     <ClInclude Include="player_system.h" />
     <ClInclude Include="renderer.h" />
+    <ClInclude Include="renderer_boid.h" />
     <ClInclude Include="renderer_grass.h" />
     <ClInclude Include="renderer_skybox.h" />
     <ClInclude Include="renderer_static.h" />
@@ -218,6 +220,9 @@
     <ClInclude Include="tiny_obj_loader.h" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="shaders\boid.comp" />
+    <None Include="shaders\boid.frag" />
+    <None Include="shaders\boid.vert" />
     <None Include="shaders\fsr.frag" />
     <None Include="shaders\grass.frag" />
     <None Include="shaders\grass.vert" />

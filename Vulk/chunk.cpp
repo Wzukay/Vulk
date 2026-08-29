@@ -260,6 +260,10 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
             renderer.AddTerrainChunk(resultKey, result.coord.cx, result.coord.cz, result.lod, result.vertices, result.indices);
             renderer.AddGrass(resultKey, result.grassInstances);
 
+            if (!result.butterflies.empty()) {
+                renderer.AddBoid(resultKey, result.butterflies, 4);
+            }
+
             loadedChunks[resultKey] = result.lod;
             loadingChunks.erase(resultKey);
             m_bufferPool.Release({ std::move(result.vertices), std::move(result.indices) });
@@ -424,6 +428,8 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
             renderer.RemoveTerrainChunk(it->first);
             renderer.RemoveWaterBody(it->first);
 
+            renderer.RemoveBoid(it->first);
+
             scene.RemoveChunk(it->first);
 
             it = loadedChunks.erase(it);
@@ -528,50 +534,271 @@ void Chunk::PreGenerateChunks(const glm::vec3& camPos, Scene& scene, VulkanRende
 }
 
 std::pair<float, glm::vec3> Chunk::CalculateHeightAndColor(float worldX, float worldZ) {
-    static thread_local FastNoiseLite baseNoise;
+    // ========================================================================
+    // EXPERIMENT V4 - BROAD GEOLOGY + DIRECTIONAL MOUNTAIN CHAINS
+    //
+    // V2 gave us the right general mountain strength. V3 accidentally
+    // multiplied the FastNoise frequency twice when stretching the rotated
+    // coordinates, effectively making the mountain signal almost constant.
+    // V4 keeps V2's reliable height ranges and adds directionality correctly.
+    // ========================================================================
+
+    static thread_local FastNoiseLite continentNoise;
+    static thread_local FastNoiseLite hillNoise;
+    static thread_local FastNoiseLite mountainNoise;
+    static thread_local FastNoiseLite ridgeNoise;
+    static thread_local FastNoiseLite valleyNoise;
+    static thread_local FastNoiseLite peakNoise;
+    static thread_local FastNoiseLite detailNoise;
+    static thread_local FastNoiseLite plateauNoise;
     static thread_local FastNoiseLite tempNoise;
     static thread_local FastNoiseLite moistNoise;
-    static thread_local FastNoiseLite lakeNoise;
-    static thread_local FastNoiseLite warpNoise;
-    static thread_local bool noiseInitialized = false;
+    static thread_local bool initialized = false;
 
-    if (!noiseInitialized) {
-        baseNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-        baseNoise.SetFractalType(FastNoiseLite::FractalType_FBm);
-        baseNoise.SetFractalOctaves(5);
-        baseNoise.SetFrequency(0.002f);
+    if (!initialized) {
+        // Huge continental layout.
+        continentNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+        continentNoise.SetFractalType(FastNoiseLite::FractalType_FBm);
+        continentNoise.SetFractalOctaves(4);
+        continentNoise.SetFractalLacunarity(2.0f);
+        continentNoise.SetFractalGain(0.50f);
+        continentNoise.SetFrequency(0.00055f);
+
+        // Broad rolling terrain.
+        hillNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+        hillNoise.SetFractalType(FastNoiseLite::FractalType_FBm);
+        hillNoise.SetFractalOctaves(4);
+        hillNoise.SetFractalLacunarity(2.0f);
+        hillNoise.SetFractalGain(0.48f);
+        hillNoise.SetFrequency(0.0022f);
+
+        // Mountain belt frequency: a range should span many chunks.
+        mountainNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+        mountainNoise.SetFractalType(FastNoiseLite::FractalType_FBm);
+        mountainNoise.SetFractalOctaves(3);
+        mountainNoise.SetFractalLacunarity(2.0f);
+        mountainNoise.SetFractalGain(0.52f);
+        mountainNoise.SetFrequency(0.00075f);
+
+        // Ridges are secondary detail, not the mountain silhouette.
+        ridgeNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+        ridgeNoise.SetFractalType(FastNoiseLite::FractalType_FBm);
+        ridgeNoise.SetFractalOctaves(4);
+        ridgeNoise.SetFractalLacunarity(2.0f);
+        ridgeNoise.SetFractalGain(0.50f);
+        ridgeNoise.SetFrequency(0.0025f);
+
+        // Broad internal valleys.
+        valleyNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+        valleyNoise.SetFractalType(FastNoiseLite::FractalType_FBm);
+        valleyNoise.SetFractalOctaves(3);
+        valleyNoise.SetFractalLacunarity(2.0f);
+        valleyNoise.SetFractalGain(0.50f);
+        valleyNoise.SetFrequency(0.0011f);
+
+        // Sparse landmark peaks.
+        peakNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+        peakNoise.SetFrequency(0.00075f);
+
+        // Very small breakup.
+        detailNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+        detailNoise.SetFractalType(FastNoiseLite::FractalType_FBm);
+        detailNoise.SetFractalOctaves(3);
+        detailNoise.SetFractalLacunarity(2.0f);
+        detailNoise.SetFractalGain(0.5f);
+        detailNoise.SetFrequency(0.012f);
+
+        // Broad, low-frequency terrain variation used mainly outside mountains.
+        plateauNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+        plateauNoise.SetFractalType(FastNoiseLite::FractalType_FBm);
+        plateauNoise.SetFractalOctaves(3);
+        plateauNoise.SetFractalLacunarity(2.0f);
+        plateauNoise.SetFractalGain(0.52f);
+        plateauNoise.SetFrequency(0.0016f);
 
         tempNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-        tempNoise.SetFrequency(0.0003f);
+        tempNoise.SetFrequency(0.00028f);
 
         moistNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-        moistNoise.SetFrequency(0.0004f);
+        moistNoise.SetFrequency(0.00036f);
 
-        lakeNoise.SetNoiseType(FastNoiseLite::NoiseType_Cellular);
-        lakeNoise.SetCellularDistanceFunction(FastNoiseLite::CellularDistanceFunction_Euclidean);
-        lakeNoise.SetCellularReturnType(FastNoiseLite::CellularReturnType_CellValue);
-        lakeNoise.SetFrequency(0.0045f);
-
-        warpNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-        warpNoise.SetFrequency(0.01f);
-
-        noiseInitialized = true;
+        initialized = true;
     }
 
-    int seed = s_globalSeed;
-    baseNoise.SetSeed(seed);
+    const int seed = s_globalSeed;
+    continentNoise.SetSeed(seed + 11);
+    hillNoise.SetSeed(seed + 23);
+    mountainNoise.SetSeed(seed + 37);
+    ridgeNoise.SetSeed(seed + 47);
+    valleyNoise.SetSeed(seed + 61);
+    peakNoise.SetSeed(seed + 73);
+    detailNoise.SetSeed(seed + 89);
+    plateauNoise.SetSeed(seed + 97);
     tempNoise.SetSeed(seed + 101);
     moistNoise.SetSeed(seed + 202);
-    lakeNoise.SetSeed(seed + 606);
 
-    const float COLD_BOUND = 0.3f;
-    const float BLEND_RANGE = 0.04f;
+    auto clamp01 = [](float v) {
+        return std::clamp(v, 0.0f, 1.0f);
+        };
 
-    float rawBase = (baseNoise.GetNoise(worldX, worldZ) + 1.0f) * 0.5f;
-    float t = (tempNoise.GetNoise(worldX, worldZ) + 1.0f) * 0.5f;
-    float m = (moistNoise.GetNoise(worldX, worldZ) + 1.0f) * 0.5f;
+    auto smooth = [](float edge0, float edge1, float x) {
+        float t = std::clamp((x - edge0) / (edge1 - edge0), 0.0f, 1.0f);
+        return t * t * (3.0f - 2.0f * t);
+        };
 
-    auto clamp01 = [](float val) { return std::max(0.0f, std::min(1.0f, val)); };
+    auto n01 = [](float n) {
+        return (n + 1.0f) * 0.5f;
+        };
+
+    // ------------------------------------------------------------------------
+    // 1. CONTINENTS / LOWLANDS
+    // ------------------------------------------------------------------------
+    float continent = n01(continentNoise.GetNoise(worldX, worldZ));
+    float landMask = smooth(0.34f, 0.58f, continent);
+    float basinMask = 1.0f - smooth(0.22f, 0.43f, continent);
+
+    float broadHills = n01(hillNoise.GetNoise(worldX, worldZ));
+    broadHills = (broadHills - 0.5f) * 2.0f;
+
+    // Keep the V5 plains more alive: broad hills, secondary undulation, and
+    // occasional tableland character. None of these signals participate in
+    // the mountain mask, so the V4 mountain continuity remains unchanged.
+    float plainUndulation = n01(hillNoise.GetNoise(worldX * 0.48f + 173.0f,
+        worldZ * 0.48f - 91.0f));
+    plainUndulation = (plainUndulation - 0.5f) * 2.0f;
+
+    float height = 3.0f;
+    height += basinMask * broadHills * 4.5f;
+    height += landMask * (9.0f + broadHills * 11.0f);
+    height += landMask * (1.8f * plainUndulation) * (1.0f - basinMask * 0.45f);
+
+    // ------------------------------------------------------------------------
+    // 2. DIRECTIONAL MOUNTAIN BELTS
+    //
+    // Rotate the coordinates, then scale ONE axis.  FastNoise already applies
+    // the configured frequency internally, so we must NOT multiply both axes
+    // by another tiny "frequency" here.  The anisotropic scale only controls
+    // shape direction.
+    // ------------------------------------------------------------------------
+    constexpr float c1 = 0.70710678f;
+    constexpr float s1 = 0.70710678f;
+    constexpr float c2 = 0.86602540f;
+    constexpr float s2 = 0.50000000f;
+
+    float x1 = worldX * c1 + worldZ * s1;
+    float z1 = -worldX * s1 + worldZ * c1;
+
+    float x2 = worldX * c2 - worldZ * s2;
+    float z2 = worldX * s2 + worldZ * c2;
+
+    // Long-axis stretching: variation is slower along the second coordinate,
+    // producing long mountain chains rather than circular islands.
+    float rangeA = n01(mountainNoise.GetNoise(x1, z1 * 0.38f));
+    float rangeB = n01(mountainNoise.GetNoise(x2, z2 * 0.44f));
+
+    // Keep A as the main chain and B as a weaker crossing system.
+    float beltA = smooth(0.50f, 0.68f, rangeA);
+    float beltB = smooth(0.56f, 0.74f, rangeB) * 0.72f;
+
+    float mountainMask = clamp01(std::max(beltA, beltB));
+    mountainMask *= landMask;
+
+    // Soft outer shoulder around every mountain chain.
+    float foothillA = smooth(0.40f, 0.60f, rangeA);
+    float foothillB = smooth(0.46f, 0.64f, rangeB) * 0.70f;
+    float foothillMask = clamp01(std::max(foothillA, foothillB));
+    foothillMask = foothillMask * landMask * (1.0f - mountainMask * 0.88f);
+
+    // ------------------------------------------------------------------------
+    // 3. MASSIF — THE MAIN MOUNTAIN SHAPE
+    // ------------------------------------------------------------------------
+    float massif = n01(hillNoise.GetNoise(worldX * 0.60f, worldZ * 0.60f));
+    massif = smooth(0.30f, 0.76f, massif);
+
+    // Large and stable mountain body.
+    float mountainHeight = 46.0f + massif * 64.0f;
+
+    // Foothills taper naturally into the plains.
+    height += foothillMask * (14.0f + massif * 28.0f);
+    height += mountainMask * mountainHeight;
+
+    // ------------------------------------------------------------------------
+    // 4. BROAD VALLEYS THROUGH THE RANGE
+    // ------------------------------------------------------------------------
+    float valleyA = n01(valleyNoise.GetNoise(x1 * 0.90f, z1 * 0.72f));
+    float valleyB = n01(valleyNoise.GetNoise(x2 * 0.88f, z2 * 0.76f));
+
+    // Only the lower part of each valley signal carves.  This produces broad
+    // passes rather than slicing entire mountains in half.
+    float valleyAAmount = smooth(0.18f, 0.42f, 1.0f - valleyA);
+    float valleyBAmount = smooth(0.20f, 0.44f, 1.0f - valleyB);
+    float valleyMask = std::max(valleyAAmount, valleyBAmount);
+
+    // Carving is deliberately modest. Mountains remain clearly present.
+    height -= mountainMask * valleyMask * (8.0f + massif * 14.0f);
+
+    // ------------------------------------------------------------------------
+    // 5. ROUNDED RIDGES
+    // ------------------------------------------------------------------------
+    float ridgeA = 1.0f - std::abs(ridgeNoise.GetNoise(x1, z1 * 0.70f));
+    float ridgeB = 1.0f - std::abs(ridgeNoise.GetNoise(x2, z2 * 0.78f));
+
+    ridgeA = std::pow(clamp01(ridgeA), 2.4f);
+    ridgeB = std::pow(clamp01(ridgeB), 2.4f);
+
+    float ridge = std::max(ridgeA, ridgeB);
+
+    // Keep valleys visually open and keep ridges subordinate to the massif.
+    ridge *= (1.0f - valleyMask * 0.65f);
+    ridge *= (0.55f + massif * 0.45f);
+
+    height += mountainMask * ridge * 20.0f;
+
+    // ------------------------------------------------------------------------
+    // 6. A FEW BIG PEAKS
+    // ------------------------------------------------------------------------
+    float peakSignal = n01(peakNoise.GetNoise(worldX, worldZ));
+    float peakMask = smooth(0.76f, 0.88f, peakSignal);
+    peakMask *= mountainMask;
+    peakMask *= (1.0f - valleyMask);
+
+    // Sparse, broad peaks — never enough to turn the entire range into spikes.
+    height += peakMask * peakMask * 26.0f;
+
+    // ------------------------------------------------------------------------
+    // 7. SMALL SURFACE DETAIL
+    // ------------------------------------------------------------------------
+    float detail = n01(detailNoise.GetNoise(worldX, worldZ));
+    detail = (detail - 0.5f) * 2.0f;
+
+    float detailWeight = 0.45f;
+    detailWeight += foothillMask * 0.30f;
+    detailWeight += mountainMask * 0.85f;
+    detailWeight *= (1.0f - valleyMask * 0.30f);
+    height += detail * (1.25f * detailWeight);
+
+    // V5-style broad tablelands in otherwise calm lowland regions.
+    // The blend is intentionally weak so plains gain variety without becoming
+    // obviously terraced or disrupting the V4 mountain profile.
+    float plateauSignal = n01(plateauNoise.GetNoise(worldX, worldZ));
+    float plateauMask = smooth(0.67f, 0.82f, plateauSignal);
+    plateauMask *= landMask;
+    plateauMask *= (1.0f - mountainMask * 0.92f);
+    float plateauBase = std::floor(height / 12.0f + 0.5f) * 12.0f;
+    height = std::lerp(height, plateauBase + 1.5f, plateauMask * 0.18f);
+
+    // Final safety compression.  We want rare high peaks, not pathological
+    // needle mountains if multiple signals happen to align.
+    float excess = std::max(0.0f, height - 190.0f);
+    height -= excess * 0.45f;
+    height = std::max(0.0f, height);
+
+    // ------------------------------------------------------------------------
+    // 8. CLIMATE -> MATERIALS ONLY
+    // ------------------------------------------------------------------------
+    float t = clamp01(n01(tempNoise.GetNoise(worldX, worldZ)));
+    float m = clamp01(n01(moistNoise.GetNoise(worldX, worldZ)));
+    const float BLEND_RANGE = 0.035f;
 
     BiomeProperties properties[4];
     properties[0] = GetBiomeProperties(DetermineBiome(clamp01(t - BLEND_RANGE), clamp01(m - BLEND_RANGE)));
@@ -579,19 +806,11 @@ std::pair<float, glm::vec3> Chunk::CalculateHeightAndColor(float worldX, float w
     properties[2] = GetBiomeProperties(DetermineBiome(clamp01(t - BLEND_RANGE), clamp01(m + BLEND_RANGE)));
     properties[3] = GetBiomeProperties(DetermineBiome(clamp01(t + BLEND_RANGE), clamp01(m + BLEND_RANGE)));
 
-    float blendedScale = (properties[0].heightScale + properties[1].heightScale + properties[2].heightScale + properties[3].heightScale) * 0.25f;
-    float blendedExp = (properties[0].exponent + properties[1].exponent + properties[2].exponent + properties[3].exponent) * 0.25f;
-    glm::vec3 blendedWeights = (properties[0].textureWeights + properties[1].textureWeights + properties[2].textureWeights + properties[3].textureWeights) * 0.25f;
+    glm::vec3 blendedWeights =
+        (properties[0].textureWeights + properties[1].textureWeights +
+            properties[2].textureWeights + properties[3].textureWeights) * 0.25f;
 
-    float curvedNoise = std::pow(rawBase, blendedExp);
-    float finalHeight = curvedNoise * blendedScale;
-
-    if (t < COLD_BOUND) {
-        float coldFactor = 1.0f - (t / COLD_BOUND);
-        finalHeight += coldFactor * 20.0f;
-    }
-
-    return { finalHeight, blendedWeights };
+    return { height, blendedWeights };
 }
 
 void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSize,
@@ -777,6 +996,8 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
     // ================================================================
     GenerateChunkTrees(chunkX, chunkZ, outResult.lod, outResult);
 
+    GenerateChunkSwarms(chunkX, chunkZ, outResult.lod, outResult);
+
     if (outResult.lod >= 2) {
         return;
     }
@@ -787,7 +1008,7 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
 
     const float JITTER_RADIUS = 6.5f;
 
-    outResult.grassInstances.reserve((outResult.vertices.size() / stride)* bladesPerVertex);
+    outResult.grassInstances.reserve((outResult.vertices.size() / stride) * bladesPerVertex);
 
     for (size_t i = 0; i < outResult.vertices.size(); i += stride) {
         const auto& v = outResult.vertices[i];
@@ -862,6 +1083,37 @@ void Chunk::GenerateChunkTrees(int chunkX, int chunkZ, int lod, ChunkJobResult& 
                     }
                 }
             }
+        }
+    }
+}
+
+void Chunk::GenerateChunkSwarms(int chunkX, int chunkZ, int lod, ChunkJobResult& outResult) {
+    // Only spawn butterflies in high-detail chunks (LOD 0 or 1)
+    if (lod >= 2) return;
+
+    float centerWorldX = chunkX * m_chunkSize + (m_chunkSize * 0.5f);
+    float centerWorldZ = chunkZ * m_chunkSize + (m_chunkSize * 0.5f);
+    auto [groundY, biomeWeights] = CalculateHeightAndColor(centerWorldX, centerWorldZ);
+
+    uint32_t coordHash = Hash2D(chunkX, chunkZ, s_globalSeed);
+
+    // Spawn in lowlands/foothills with a 40% chance per chunk
+    if (groundY < 80.0f && (coordHash % 100) < 40) {
+        outResult.butterflies.reserve(46);
+        for (int i = 0; i < 46; i++) {
+            BoidInstance b;
+            float jitterX = ((coordHash * (i + 1) % 100) / 100.0f) * 30.0f - 15.0f;
+            float jitterZ = ((coordHash * (i + 3) % 100) / 100.0f) * 30.0f - 15.0f;
+
+            float randomScale = 0.5f + ((coordHash * (i + 7) % 100) / 100.0f) * 0.5f;
+
+            b.position = glm::vec4(centerWorldX + jitterX, groundY + 4.0f + (i % 4), centerWorldZ + jitterZ, randomScale);
+
+            // Randomize starting animation time (w component) so they don't flap in sync
+            float randomTimeOffset = static_cast<float>((coordHash * i) % 1000);
+            b.velocity = glm::vec4(1.0f, 0.0f, 0.0f, randomTimeOffset);
+
+            outResult.butterflies.push_back(b);
         }
     }
 }

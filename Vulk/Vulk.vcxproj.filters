@@ -96,6 +96,9 @@
     <ClCompile Include="ecs.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="renderer_boid.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="game.h">
@@ -179,6 +182,9 @@
     <ClInclude Include="player_system.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="renderer_boid.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <None Include="shaders\shader.frag">
@@ -230,6 +236,15 @@
       <Filter>Shaders</Filter>
     </None>
     <None Include="shaders\ssao_blur.frag">
+      <Filter>Shaders</Filter>
+    </None>
+    <None Include="shaders\boid.comp">
+      <Filter>Shaders</Filter>
+    </None>
+    <None Include="shaders\boid.frag">
+      <Filter>Shaders</Filter>
+    </None>
+    <None Include="shaders\boid.vert">
       <Filter>Shaders</Filter>
     </None>
   </ItemGroup>
