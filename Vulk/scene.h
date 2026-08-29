@@ -100,6 +100,10 @@ public:
     }
 
     void AddLight(const SceneLight& light) { lights.push_back(light); hasModifiedLights = true; }
+    void SetLights(const std::vector<SceneLight>& newLights) {
+        lights = newLights;
+        hasModifiedLights = true; // Flags the VulkanRenderer to upload the new buffer
+    }
     bool HasModifiedLights() const { return hasModifiedLights; }
     void ClearModifiedLightsFlag() const { hasModifiedLights = false; }
     const std::vector<SceneLight>& GetLights() const { return lights; }

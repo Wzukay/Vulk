@@ -40,8 +40,10 @@ struct DayNightManager {
         float moonBlend = glm::smoothstep(0.0f, -0.2f, t);
         if (moonBlend > 0.0f) {
             glm::vec3 moonDir = sunDir * -1.0f;
-            glm::vec3 moonColor = glm::vec3(0.2f, 0.6f, 0.9f); // Teal/Cyan
-            lights.push_back(MakeDirectional(moonDir, moonColor, moonBlend * 0.18f));
+            glm::vec3 moonColor = glm::vec3(0.55f, 0.6f, 0.65f); // Grey/Silver light
+
+            // Dropped the intensity drastically (e.g., from 0.18f to 0.05f)
+            lights.push_back(MakeDirectional(moonDir, moonColor, moonBlend * 0.05f));
         }
 
         scene.SetLights(lights);

@@ -6,7 +6,12 @@
 #include "input.h"
 #include "chunk.h"
 #include "player.h"
+#include "asset_manager.h"
+#include "player_system.h"
+#include "day_night.h"
 
+#include <chrono>
+#include <random>
 #include <iostream>
 #include <string>
 #include <vector>

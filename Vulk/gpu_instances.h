@@ -26,6 +26,10 @@ struct UniformBufferObject {
     float fogEnd;                            // 4 bytes
     float _pad2[2];                          // 8 bytes of padding
 
+    // Sun Data for Procedural Sky
+    alignas(16) glm::vec4 sunDirection;
+    alignas(16) glm::vec4 sunColor;
+
     // Matrices (64 bytes each, alignas(16) guarantees std140 matrix boundaries)
     alignas(16) glm::mat4 inverseViewProj;
     alignas(16) glm::mat4 inverseProj;
