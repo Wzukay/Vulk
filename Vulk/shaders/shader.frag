@@ -18,6 +18,9 @@ layout(set = 0, binding = 0) uniform UniformBufferObject {
     uint lightCount;
     float fogStart;
     float fogEnd;
+    vec2 _pad2;
+    vec4 sunDirection;
+    vec4 sunColor;
     mat4 inverseViewProj;
     mat4 inverseProj;
     mat4 inverseView;

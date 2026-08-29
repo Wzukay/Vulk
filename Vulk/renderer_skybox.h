@@ -15,7 +15,7 @@ public:
     void Draw(VkCommandBuffer commandBuffer, VkDescriptorSet sharedDescriptorSet) const;
     void Cleanup(VkDevice device);
 
-    bool IsReady() const { return m_skyboxTexture.imageView != VK_NULL_HANDLE; }
+    bool IsReady() const { return skyboxPipeline != VK_NULL_HANDLE; }
 
 private:
     VkPipeline skyboxPipeline = VK_NULL_HANDLE;

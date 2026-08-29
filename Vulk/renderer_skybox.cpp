@@ -154,18 +154,7 @@ void SkyboxRenderer::Init(VkDevice device, VkFormat colorFormat, VkFormat depthF
     }
 }
 void SkyboxRenderer::LoadTexture(const std::string& folder) {
-    m_skyboxTexture = g_AssetManager.LoadCubemapFromFaces(
-        folder + "right.tga",
-        folder + "left.tga",
-        folder + "top.tga",
-        folder + "bottom.tga",
-        folder + "back.tga",
-        folder + "front.tga"
-    );
-
-    if (m_skyboxTexture.imageView == VK_NULL_HANDLE) {
-        std::cerr << "[Skybox] Failed to load skybox faces.\n";
-    }
+    
 }
 
 void SkyboxRenderer::UpdateDescriptor(VkDevice device, VkDescriptorSet sharedDescriptorSet) const {

@@ -8,7 +8,7 @@ layout(location = 1) out vec3 fragColor;
 layout(set = 0, binding = 0) uniform UniformBufferObject {
     mat4 view;
     mat4 proj;
-    vec4 cameraPos;
+    vec3 cameraPos;
     float ambient;
     vec4 fadeParams;
     vec2 screenSize;
@@ -16,6 +16,9 @@ layout(set = 0, binding = 0) uniform UniformBufferObject {
     uint lightCount;
     float fogStart;
     float fogEnd;
+    vec2 _pad2;
+    vec4 sunDirection;
+    vec4 sunColor;
     mat4 inverseViewProj;
     mat4 inverseProj;
     mat4 inverseView;

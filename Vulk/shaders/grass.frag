@@ -19,6 +19,9 @@ layout(set = 0, binding = 0) uniform UniformBufferObject {
     uint lightCount;
     float fogStart;
     float fogEnd;
+    vec2 _pad2;
+    vec4 sunDirection;
+    vec4 sunColor;
     mat4 inverseViewProj;
     mat4 inverseProj;
     mat4 inverseView;
@@ -37,10 +40,10 @@ layout(push_constant) uniform PushConstants {
 void main() {
     vec4 texColor = texture(textureSamplers[push.textureId], inUV);
 
-    // 1. Base Cutout: Discard transparent pixels or black backgrounds (JPG hack)
+    // 1. Base Cutout
     if (texColor.a < 0.3 || length(texColor.rgb) < 0.15) discard;
 
-    // 2. Screen-Space Dithered LOD Dissolve (4x4 Bayer Matrix)
+    // 2. Screen-Space Dithered LOD Dissolve
     float ditherNoise = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
     float distToCam = length(ubo.cameraPos - inWorldPos);
 
@@ -53,18 +56,35 @@ void main() {
         discard;
     }
 
-    // 3. Simple, clean lighting
+    // 3. Dynamic Day/Night Lighting
     vec3 N = normalize(inNormal);
-    vec3 lightDir = normalize(vec3(0.5, 1.0, 0.3));
+    vec3 lightDir = normalize(ubo.sunDirection.xyz); // <-- Now tracks the sun/moon!
+    
+    // N dot L for smooth shading
     float diff = max(0.0, dot(N, lightDir));
     
-    float ambient = ubo.ambient + 0.3; 
-    vec3 litColor = texColor.rgb * (ambient + diff * 0.7);
+    // Apply true UBO ambient and true Sun/Moon color
+    vec3 ambientLight = vec3(ubo.ambient);
+    vec3 directionalLight = ubo.sunColor.rgb * ubo.sunColor.a * diff;
+    
+    vec3 litColor = texColor.rgb * (ambientLight + directionalLight);
 
+    // 4. Dynamic Time-of-Day Fog (STYLIZED)
     float fogFactor = clamp((distToCam - ubo.fogStart) / (ubo.fogEnd - ubo.fogStart), 0.0, 1.0);
     if (distToCam > ubo.fogEnd) fogFactor = 1.0;
     
-    vec3 fogColor = vec3(0.6, 0.7, 0.8);
+    vec3 nH  = vec3(0.005, 0.01, 0.02);
+    vec3 twH = vec3(0.45, 0.10, 0.25);
+    vec3 ssH = vec3(1.00, 0.45, 0.10);
+    vec3 dH  = vec3(0.50, 0.75, 0.95);
+    
+    float t = ubo.sunDirection.y;
+    float b1 = smoothstep(-0.20, -0.05, t);
+    float b2 = smoothstep(-0.05,  0.08, t);
+    float b3 = smoothstep( 0.08,  0.35, t);
+    
+    vec3 fogColor = mix(mix(mix(nH, twH, b1), ssH, b2), dH, b3);
+    
     vec3 finalColor = mix(litColor, fogColor, fogFactor);
 
     outColor = vec4(finalColor, 1.0);

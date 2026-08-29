@@ -1,9 +1,5 @@
 #include "game.h"
-#include "asset_manager.h"
-#include "player_system.h"
 
-#include <chrono>
-#include <random>
 
 GameLogger debugLog;
 static glm::vec3 lastCamPos;
@@ -34,8 +30,6 @@ void Game::Init()
     g_AssetManager.LoadMesh("assets/models/tree/tree.obj");
     g_AssetManager.LoadMesh("assets/models/tree/tree_lod1.obj");
     g_AssetManager.LoadMesh("assets/models/tree/tree_billboard.obj");
-
-    scene.AddLight(MakeDirectional(glm::vec3(0.6f, 0.9f, 0.6f), glm::vec3(0.75f, 0.7f, 0.65f), 1.0f));
 
     glfwSetWindowUserPointer(window, &input);
     glfwSetCursorPosCallback(window, [](GLFWwindow* window, double xpos, double ypos) {
@@ -102,6 +96,8 @@ void Game::Loop()
         return;
     }
 
+    DayNightManager dayNight;
+
     while (!renderer.ShouldClose() && isRunning) {
         double currentFrameTime = glfwGetTime();
         float deltaTime = std::min(static_cast<float>(currentFrameTime - lastFrameTime), 0.1f);
@@ -135,6 +131,8 @@ void Game::Loop()
             renderer.UpdateUniformBuffer({ cam.pos, cam.front, cam.up });
 
             chunk.Update(cam.pos, scene, renderer);
+
+            dayNight.Tick(deltaTime, scene);
 
             renderer.UpdateScene(scene);
         }

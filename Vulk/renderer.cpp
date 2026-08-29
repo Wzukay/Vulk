@@ -1485,6 +1485,24 @@ void VulkanRenderer::UpdateUniformBuffer(const CameraData& cam) {
 
 	UpdateFrustumPlanes(ubo.proj * ubo.view);
 
+	if (!currentLights.empty()) {
+		ubo.sunDirection = currentLights[0].positionOrDir;
+		ubo.sunColor = currentLights[0].color;
+
+		float sunY = ubo.sunDirection.y;
+
+		float ambientBlend = glm::smoothstep(-0.1f, 0.3f, sunY);
+
+		// Dropped the night-time ambient floor to 0.01
+		ubo.ambient = glm::mix(0.01f, 0.22f, ambientBlend);
+	}
+	else {
+		// SAFE FALLBACK FOR FRAME 1
+		ubo.sunDirection = glm::vec4(0.0f, 1.0f, 0.0f, 0.0f);
+		ubo.sunColor = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
+		ubo.ambient = 0.22f;
+	}
+
 	memcpy(uniformBufferMapped, &ubo, sizeof(ubo));
 
 	if (g_Settings.enableSSAO && ssaoUBOMapped != nullptr) {
