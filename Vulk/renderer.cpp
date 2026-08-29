@@ -376,6 +376,8 @@ void VulkanRenderer::InitVulkan() {
 
 	m_grassRenderer.Init(logicalDevice, this, &m_uploader, swapChainImageFormat, depthFormat, descriptorSetLayout, m_currentMsaaSamples);
 
+	m_boidRenderer.Init(logicalDevice, this, swapChainImageFormat, depthFormat, descriptorSetLayout, m_currentMsaaSamples);
+
 	currentSettings = g_Settings;
 }
 
@@ -862,6 +864,8 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 	if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) throw std::runtime_error("Failed to start recording.");
 
+	m_boidRenderer.TickCompute(commandBuffer, ImGui::GetIO().DeltaTime);
+
 	if (m_currentMsaaSamples != VK_SAMPLE_COUNT_1_BIT) {
 		TransitionImageLayout(commandBuffer, colorImage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
 	}
@@ -922,6 +926,9 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 		}
 		m_waterRenderer.Draw(commandBuffer, descriptorSet, drawCallCount);
 		m_grassRenderer.Draw(commandBuffer, descriptorSet, drawCallCount);
+
+		vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_boidRenderer.m_graphicsPipeline);
+		m_boidRenderer.Draw(commandBuffer, descriptorSet, drawCallCount);
 	}
 	vkCmdEndRendering(commandBuffer);
 
@@ -2168,6 +2175,13 @@ void VulkanRenderer::AddGrass(int64_t key, const std::vector<GrassInstance>& gra
 	m_grassRenderer.AddGrass(key, grassInstances);
 }
 
+void VulkanRenderer::AddBoid(int64_t chunkKey, const std::vector<BoidInstance>& initialBoids, uint32_t textureId) {
+	m_boidRenderer.AddSwarm(chunkKey, initialBoids, textureId);
+}
+void VulkanRenderer::RemoveBoid(int64_t chunkKey) {
+	m_boidRenderer.RemoveSwarm(chunkKey);
+}
+
 void VulkanRenderer::ApplySettings() {
 	bool needSwapchainRecreate = false;
 
@@ -2356,6 +2370,7 @@ void VulkanRenderer::Cleanup() {
 	m_staticMeshRenderer.Cleanup();
 	m_waterRenderer.Cleanup(logicalDevice);
 	m_skybox.Cleanup(logicalDevice);
+	m_boidRenderer.Cleanup();
 
 	m_pendingDeletionsGlobal.Flush(UINT64_MAX, [&](BufferDeletion& del) {
 		for (size_t i = 0; i < del.buffers.size(); ++i) {

@@ -24,6 +24,7 @@ void Game::Init()
     g_AssetManager.LoadTextureFromFile("assets/textures/grass2_albedo.dds");      // ID 1
     g_AssetManager.LoadTextureFromFile("assets/textures/rock_albedo.dds");       // ID 2
     g_AssetManager.LoadTextureFromFile("assets/textures/grass_billboard.dds");    // ID 3
+    g_AssetManager.LoadTextureFromFile("assets/textures/butterfly_albedo.dds");   // ID 4
 
     g_AssetManager.LoadNormalTextureFromFile("assets/textures/sand_normal.dds");       // ID 0
     g_AssetManager.LoadNormalTextureFromFile("assets/textures/grass2_normal.dds");      // ID 1

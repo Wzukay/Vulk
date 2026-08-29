@@ -132,6 +132,7 @@ struct ChunkJobResult {
 
     std::vector<GrassInstance> grassInstances;
     std::vector<TreeInstance> trees;
+    std::vector<BoidInstance> butterflies;
 
     // Present only if this chunk actually generated water/rivers — replaces
     // the old hasWater/waterMesh and hasRiver/rivers bool+data pairs, so
@@ -255,4 +256,6 @@ private:
 
     static uint32_t Hash2D(int x, int z, int seed);
     void GenerateChunkTrees(int chunkX, int chunkZ, int lod, ChunkJobResult& outResult);
+
+    void GenerateChunkSwarms(int chunkX, int chunkZ, int lod, ChunkJobResult& outResult);
 };

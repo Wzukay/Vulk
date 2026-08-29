@@ -260,6 +260,10 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
             renderer.AddTerrainChunk(resultKey, result.coord.cx, result.coord.cz, result.lod, result.vertices, result.indices);
             renderer.AddGrass(resultKey, result.grassInstances);
 
+            if (!result.butterflies.empty()) {
+                renderer.AddBoid(resultKey, result.butterflies, 4);
+            }
+
             loadedChunks[resultKey] = result.lod;
             loadingChunks.erase(resultKey);
             m_bufferPool.Release({ std::move(result.vertices), std::move(result.indices) });
@@ -423,6 +427,8 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
         if (m_desiredKeysLookup.find(it->first) == m_desiredKeysLookup.end()) {
             renderer.RemoveTerrainChunk(it->first);
             renderer.RemoveWaterBody(it->first);
+
+            renderer.RemoveBoid(it->first);
 
             scene.RemoveChunk(it->first);
 
@@ -990,6 +996,8 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
     // ================================================================
     GenerateChunkTrees(chunkX, chunkZ, outResult.lod, outResult);
 
+    GenerateChunkSwarms(chunkX, chunkZ, outResult.lod, outResult);
+
     if (outResult.lod >= 2) {
         return;
     }
@@ -1075,6 +1083,37 @@ void Chunk::GenerateChunkTrees(int chunkX, int chunkZ, int lod, ChunkJobResult& 
                     }
                 }
             }
+        }
+    }
+}
+
+void Chunk::GenerateChunkSwarms(int chunkX, int chunkZ, int lod, ChunkJobResult& outResult) {
+    // Only spawn butterflies in high-detail chunks (LOD 0 or 1)
+    if (lod >= 2) return;
+
+    float centerWorldX = chunkX * m_chunkSize + (m_chunkSize * 0.5f);
+    float centerWorldZ = chunkZ * m_chunkSize + (m_chunkSize * 0.5f);
+    auto [groundY, biomeWeights] = CalculateHeightAndColor(centerWorldX, centerWorldZ);
+
+    uint32_t coordHash = Hash2D(chunkX, chunkZ, s_globalSeed);
+
+    // Spawn in lowlands/foothills with a 40% chance per chunk
+    if (groundY < 80.0f && (coordHash % 100) < 40) {
+        outResult.butterflies.reserve(46);
+        for (int i = 0; i < 46; i++) {
+            BoidInstance b;
+            float jitterX = ((coordHash * (i + 1) % 100) / 100.0f) * 30.0f - 15.0f;
+            float jitterZ = ((coordHash * (i + 3) % 100) / 100.0f) * 30.0f - 15.0f;
+
+            float randomScale = 0.5f + ((coordHash * (i + 7) % 100) / 100.0f) * 0.5f;
+
+            b.position = glm::vec4(centerWorldX + jitterX, groundY + 4.0f + (i % 4), centerWorldZ + jitterZ, randomScale);
+
+            // Randomize starting animation time (w component) so they don't flap in sync
+            float randomTimeOffset = static_cast<float>((coordHash * i) % 1000);
+            b.velocity = glm::vec4(1.0f, 0.0f, 0.0f, randomTimeOffset);
+
+            outResult.butterflies.push_back(b);
         }
     }
 }

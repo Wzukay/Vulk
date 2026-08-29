@@ -30,6 +30,7 @@
 #include "renderer_grass.h"
 #include "renderer_terrain.h"
 #include "renderer_static.h"
+#include "renderer_boid.h"
 
 #include "ring_buffer_uploader.h"
 
@@ -287,8 +288,6 @@ public:
     void ClearHeightCache();
 
 private:
-    // Owns its own pipeline, shader modules, and cubemap texture; drawn
-    // through the renderer's shared descriptor set (see SkyboxRenderer).
     SkyboxRenderer m_skybox;
 
 private:
@@ -379,6 +378,13 @@ private:
     void CreateSSAOPipeline();
     void CreateSSAOBlurResources();
     void CreateSSAOBlurPipeline();
+
+private:
+    BoidRenderer m_boidRenderer;
+
+public:
+    void AddBoid(int64_t chunkKey, const std::vector<BoidInstance>& initialBoids, uint32_t textureId);
+    void RemoveBoid(int64_t chunkKey);
 
 #ifdef NDEBUG
     const bool enableValidationLayers = false;

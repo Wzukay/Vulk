@@ -1,0 +1,136 @@
+#version 450
+layout(local_size_x = 256) in;
+
+struct Boid {
+    vec4 position; 
+    vec4 velocity; 
+};
+
+layout(std430, binding = 0) readonly buffer BoidDataIn { Boid boidsIn[]; };
+layout(std430, binding = 1) writeonly buffer BoidDataOut { Boid boidsOut[]; };
+
+layout(push_constant) uniform Params {
+    float deltaTime;
+    uint boidCount;
+    float separationRadius;
+    float alignmentRadius;
+    float cohesionRadius;
+    float maxSpeed;
+    float minSpeed;
+    float turnSpeed;
+    vec4 centerAndRadius; 
+    float wanderStrength;
+} params;
+
+vec3 steerTowards(vec3 desiredVel, vec3 currentVel) {
+    vec3 steer = desiredVel - currentVel;
+    float steerLength = length(steer);
+    if (steerLength > params.turnSpeed) {
+        steer = (steer / steerLength) * params.turnSpeed;
+    }
+    return steer;
+}
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= params.boidCount) return;
+
+    vec3 pos = boidsIn[id].position.xyz;
+    vec3 vel = boidsIn[id].velocity.xyz;
+    float time = boidsIn[id].velocity.w; 
+
+    // Re-added the missing separation variables
+    vec3 separation = vec3(0.0);
+    vec3 alignment = vec3(0.0);
+    vec3 cohesion = vec3(0.0);
+    
+    int sepCount = 0;
+    int alignCount = 0;
+    int cohCount = 0;
+
+    for (uint i = 0; i < params.boidCount; i++) {
+        if (i == id) continue;
+        
+        vec3 otherPos = boidsIn[i].position.xyz;
+        vec3 otherVel = boidsIn[i].velocity.xyz;
+        
+        vec3 diff = pos - otherPos;
+        float dist = length(diff);
+
+        // Anti-freeze logic
+        if (dist < 0.001) {
+            diff = vec3(sin(float(id)), 0.1, cos(float(id)));
+            dist = 0.001; 
+        }
+
+        // Re-added the separation accumulator
+        if (dist < params.separationRadius) {
+            // Exponential push: The closer they are, the harder they repel
+            float pushStrength = 1.0 - (dist / params.separationRadius);
+            separation += normalize(diff) * (pushStrength * pushStrength); 
+            sepCount++;
+        }
+        if (dist < params.cohesionRadius) {
+            cohesion += otherPos;
+            cohCount++;
+        }
+    }
+
+    vec3 acceleration = vec3(0.0);
+
+    // 1. Group Steering (Bring back slight separation to prevent merging)
+    if (sepCount > 0) {
+        vec3 desiredSep = normalize(separation) * params.maxSpeed;
+        // MASSIVE priority on staying apart
+        acceleration += steerTowards(desiredSep, vel) * 8.0; 
+    }
+    if (cohCount > 0) {
+        vec3 centerOfFlock = cohesion / float(cohCount);
+        vec3 desiredCoh = normalize(centerOfFlock - pos) * params.maxSpeed;
+        // Extremely weak cohesion so they just barely stay in the same zip code
+        acceleration += steerTowards(desiredCoh, vel) * 0.2; 
+    }
+
+    // 2. Procedural Wander (Highly erratic and fully desynchronized)
+    float randomSeed = fract(sin(float(id) * 12.9898) * 43758.5453);
+    float nTime = time * (1.5 + randomSeed * 2.0) + (randomSeed * 100.0);
+    
+    vec3 wanderDir = normalize(vec3(
+        sin(nTime * 1.7) * cos(nTime * 0.9),
+        sin(nTime * 3.2) * 0.8, 
+        cos(nTime * 1.4) * sin(nTime * 2.1)
+    ));
+    
+    vec3 desiredWander = wanderDir * params.maxSpeed;
+    acceleration += steerTowards(desiredWander, vel) * (params.wanderStrength + randomSeed * 2.0);
+
+    // 3. Follow the drifting C++ anchor
+    vec3 anchor = params.centerAndRadius.xyz;
+    float roamRadius = params.centerAndRadius.w;
+
+    float targetY = anchor.y + 2.5 + sin(time + float(id)) * 1.0; 
+    float altError = targetY - pos.y;
+    vec3 desiredAlt = vec3(vel.x, clamp(altError, -1.0, 1.0) * params.maxSpeed, vel.z);
+    acceleration += steerTowards(desiredAlt, vel) * 2.0;
+
+    float distFromCenter = length(pos.xz - anchor.xz);
+    if (distFromCenter > roamRadius) {
+        vec3 toCenter = normalize(vec3(anchor.x, pos.y, anchor.z) - pos);
+        vec3 desiredReturn = toCenter * params.maxSpeed;
+        float penalty = (distFromCenter - roamRadius) * 0.5;
+        acceleration += steerTowards(desiredReturn, vel) * penalty; 
+    }
+
+    // --- INTEGRATION ---  
+    vel += acceleration * params.deltaTime;
+
+    float speed = length(vel);
+    vec3 dir = vel / (speed + 0.0001); 
+    speed = clamp(speed, params.minSpeed, params.maxSpeed);
+    vel = dir * speed;
+
+    vec3 newPos = pos + vel * params.deltaTime;
+
+    boidsOut[id].position = vec4(newPos, boidsIn[id].position.w);
+    boidsOut[id].velocity = vec4(vel, time + params.deltaTime);
+}
