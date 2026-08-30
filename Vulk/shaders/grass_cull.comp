@@ -1,0 +1,57 @@
+#version 450
+layout(local_size_x = 256) in;
+
+struct GrassInstance {
+    vec3 position;
+    float rotation;
+    vec3 scale;
+    float windOffset;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer InputInstances {
+    GrassInstance inInstances[];
+};
+
+layout(std430, set = 0, binding = 1) writeonly buffer OutputInstances {
+    GrassInstance outInstances[];
+};
+
+struct VkDrawIndirectCommand {
+    uint vertexCount;
+    uint instanceCount;
+    uint firstVertex;
+    uint firstInstance;
+};
+
+layout(std430, set = 0, binding = 2) buffer IndirectBuffer {
+    VkDrawIndirectCommand drawCommand;
+};
+
+layout(push_constant) uniform ComputePush {
+    vec3 cameraPos;
+    float maxDist;
+    uint totalInstances;
+    uint vertexCount;
+} push;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= push.totalInstances) return;
+
+    GrassInstance inst = inInstances[idx];
+
+    // Distance cull per blade
+    float dist = distance(push.cameraPos, inst.position);
+    if (dist > push.maxDist) return;
+
+    // Atomically claim a spot in the output buffer
+    uint outIdx = atomicAdd(drawCommand.instanceCount, 1);
+    outInstances[outIdx] = inst;
+
+    // The first thread configures the draw bounds for the graphics pass
+    if (outIdx == 0) {
+        drawCommand.vertexCount = push.vertexCount;
+        drawCommand.firstVertex = 0;
+        drawCommand.firstInstance = 0;
+    }
+}

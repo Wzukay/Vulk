@@ -865,6 +865,7 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 	if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) throw std::runtime_error("Failed to start recording.");
 
 	m_boidRenderer.TickCompute(commandBuffer, ImGui::GetIO().DeltaTime);
+	m_grassRenderer.Cull(commandBuffer);
 
 	if (m_currentMsaaSamples != VK_SAMPLE_COUNT_1_BIT) {
 		TransitionImageLayout(commandBuffer, colorImage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_ASPECT_COLOR_BIT);

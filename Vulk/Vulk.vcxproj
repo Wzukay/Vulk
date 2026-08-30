@@ -230,6 +230,7 @@
     <None Include="shaders\fsr.frag" />
     <None Include="shaders\grass.frag" />
     <None Include="shaders\grass.vert" />
+    <None Include="shaders\grass_cull.comp" />
     <None Include="shaders\instanced.frag" />
     <None Include="shaders\instanced.vert" />
     <None Include="shaders\quad.frag" />

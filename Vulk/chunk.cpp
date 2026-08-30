@@ -1002,11 +1002,11 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
         return;
     }
 
-    int stride = (outResult.lod == 1) ? 4 : 2;
-    int bladesPerVertex = (outResult.lod == 1) ? 2 : 6;
+    int stride = (outResult.lod == 1) ? 2 : 1;
+    int bladesPerVertex = (outResult.lod == 1) ? 5 : 35;
     float widthMultiplier = (outResult.lod == 1) ? 2.0f : 1.0f;
 
-    const float JITTER_RADIUS = 6.5f;
+    const float JITTER_RADIUS = 12.0f;
 
     outResult.grassInstances.reserve((outResult.vertices.size() / stride) * bladesPerVertex);
 
@@ -1020,7 +1020,11 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
                 float jitterX = (fastRand(rngState) - 0.5f) * 2.0f * JITTER_RADIUS;
                 float jitterZ = (fastRand(rngState) - 0.5f) * 2.0f * JITTER_RADIUS;
 
-                inst.position = v.pos + glm::vec3(jitterX, 0.0f, jitterZ);
+                float bladeX = v.pos.x + jitterX;
+                float bladeZ = v.pos.z + jitterZ;
+                float bladeY = Chunk::GetHeight(bladeX, bladeZ);
+
+                inst.position = glm::vec3(bladeX, bladeY, bladeZ);
                 inst.rotation = fastRand(rngState) * 2.0f * 3.14159f;
 
                 float randVal = fastRand(rngState);

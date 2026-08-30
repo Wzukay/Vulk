@@ -286,5 +286,8 @@
     <None Include="shaders\default.vert">
       <Filter>Shaders\Vertex</Filter>
     </None>
+    <None Include="shaders\grass_cull.comp">
+      <Filter>Shaders\Compute</Filter>
+    </None>
   </ItemGroup>
 </Project>
