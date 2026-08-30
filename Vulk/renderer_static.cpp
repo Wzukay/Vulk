@@ -23,7 +23,9 @@ void StaticMeshRenderer::Init(VkDevice device, VulkanRenderer* renderer) {
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_indexBuffer, m_indexMemory);
 
     // Provision the Instance Buffer (Host Visible for high-speed CPU memory mapping)
-    m_renderer->CreateBuffer(sizeof(InstanceData) * m_maxInstances, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+    constexpr VkDeviceSize FRAMES_IN_FLIGHT = 3;
+    VkDeviceSize totalInstanceBytes = sizeof(InstanceData) * m_maxInstances * FRAMES_IN_FLIGHT;
+    m_renderer->CreateBuffer(totalInstanceBytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         m_instanceBuffer, m_instanceMemory);
 
@@ -231,12 +233,16 @@ void StaticMeshRenderer::Draw(VkCommandBuffer commandBuffer, VkPipelineLayout pi
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, instancedPipeline);
 
         VkBuffer vertexBuffers[] = { m_vertexBuffer, m_instanceBuffer };
-        VkDeviceSize offsets[] = { 0, 0 };
+
+        VkDeviceSize frameInstanceStride = sizeof(InstanceData) * m_maxInstances;
+        VkDeviceSize frameByteOffset = currentFrameIndex * frameInstanceStride;
+
+        VkDeviceSize offsets[] = { 0, frameByteOffset };
         vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, offsets);
         vkCmdBindIndexBuffer(commandBuffer, m_indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
         InstanceData* mappedData;
-        vkMapMemory(m_device, m_instanceMemory, 0, sizeof(InstanceData) * m_maxInstances, 0, (void**)&mappedData);
+        vkMapMemory(m_device, m_instanceMemory, frameByteOffset, frameInstanceStride, 0, (void**)&mappedData);
 
         uint32_t currentInstanceOffset = 0;
         const float maxFoliageDistSq = 4000.0f * 4000.0f;
@@ -251,18 +257,21 @@ void StaticMeshRenderer::Draw(VkCommandBuffer commandBuffer, VkPipelineLayout pi
 
                 if (!m_renderer->IsWorldSphereInFrustum(bucket.chunkCenter, bucket.chunkRadius)) {
                     outCulledCount += static_cast<uint32_t>(bucket.transforms.size());
-                    continue; // Skip 5,000 trees instantly!
+                    continue; 
                 }
 
                 uint32_t visibleCount = 0;
 
-                // If chunk is visible, distance cull its individual trees
                 for (const auto& transform : bucket.transforms) {
                     glm::vec3 pos = glm::vec3(transform[3]);
 
                     if (glm::distance2(pos, cameraPos) > maxFoliageDistSq) {
                         outCulledCount++;
                         continue;
+                    }
+
+                    if (currentInstanceOffset + visibleCount >= m_maxInstances) {
+                        break;
                     }
 
                     mappedData[currentInstanceOffset + visibleCount].modelMatrix = transform;
