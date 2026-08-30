@@ -279,6 +279,24 @@ public:
 private:
     TerrainRenderer m_terrainRenderer;
 
+    VkImage hzbImage = VK_NULL_HANDLE;
+    VkDeviceMemory hzbImageMemory = VK_NULL_HANDLE;
+    VkImageView hzbImageView = VK_NULL_HANDLE;
+    std::vector<VkImageView> hzbMipViews;
+    VkSampler hzbSampler = VK_NULL_HANDLE;
+    uint32_t hzbMipLevels = 1;
+    glm::vec2 hzbDimensions = { 0.0f, 0.0f };
+
+    VkPipeline hzbPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout hzbPipelineLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout hzbDescriptorSetLayout = VK_NULL_HANDLE;
+    VkDescriptorPool hzbDescriptorPool = VK_NULL_HANDLE;
+    std::vector<VkDescriptorSet> hzbDescriptorSets;
+
+    void CreateHZBResources();
+    void CreateHZBPipeline();
+    void GenerateHZB(VkCommandBuffer commandBuffer);
+
 public:
     void AddTerrainChunk(int64_t key, int cx, int cz, int lod,
         const std::vector<ModelVertex>& vertices,
@@ -309,6 +327,7 @@ public:
 
 private:
     glm::vec3 cameraPosition = glm::vec3(0.0f);
+    glm::mat4 m_currentViewProj = glm::mat4(1.0f);
     std::array<FrustumPlane, 6> frustumPlanes;
     void UpdateFrustumPlanes(const glm::mat4& viewProj);
 

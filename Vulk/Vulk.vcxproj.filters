@@ -280,13 +280,19 @@
     <None Include="shaders\boid.vert">
       <Filter>Shaders\Vertex</Filter>
     </None>
-    <None Include="shaders\default.frag">
+    <None Include="shaders\grass_cull.comp">
+      <Filter>Shaders\Compute</Filter>
+    </None>
+    <None Include="shaders\terrain_cull.comp">
+      <Filter>Shaders\Compute</Filter>
+    </None>
+    <None Include="shaders\terrain.frag">
       <Filter>Shaders\Fragment</Filter>
     </None>
-    <None Include="shaders\default.vert">
+    <None Include="shaders\terrain.vert">
       <Filter>Shaders\Vertex</Filter>
     </None>
-    <None Include="shaders\grass_cull.comp">
+    <None Include="shaders\hzb_reduce.comp">
       <Filter>Shaders\Compute</Filter>
     </None>
   </ItemGroup>

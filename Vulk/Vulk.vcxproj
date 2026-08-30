@@ -225,12 +225,11 @@
     <None Include="shaders\boid.frag" />
     <None Include="shaders\boid.vert" />
     <None Include="shaders\common_structures.glsl" />
-    <None Include="shaders\default.frag" />
-    <None Include="shaders\default.vert" />
     <None Include="shaders\fsr.frag" />
     <None Include="shaders\grass.frag" />
     <None Include="shaders\grass.vert" />
     <None Include="shaders\grass_cull.comp" />
+    <None Include="shaders\hzb_reduce.comp" />
     <None Include="shaders\instanced.frag" />
     <None Include="shaders\instanced.vert" />
     <None Include="shaders\quad.frag" />
@@ -241,6 +240,9 @@
     <None Include="shaders\ssao_blur.frag" />
     <None Include="shaders\static.frag" />
     <None Include="shaders\static.vert" />
+    <None Include="shaders\terrain.frag" />
+    <None Include="shaders\terrain.vert" />
+    <None Include="shaders\terrain_cull.comp" />
     <None Include="shaders\water.frag" />
     <None Include="shaders\water.vert" />
   </ItemGroup>

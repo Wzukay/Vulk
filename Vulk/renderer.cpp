@@ -343,6 +343,8 @@ void VulkanRenderer::InitVulkan() {
 	CreateCommandBuffers();
 	CreateSyncObjects();
 
+	CreateHZBResources();
+
 	m_uploader.Init(this, 32 * 1024 * 1024);
 
 	CreateDescriptorSetLayout();
@@ -361,6 +363,7 @@ void VulkanRenderer::InitVulkan() {
 
 	CreateGraphicsPipeline();
 	CreateCompositionPipeline();
+	CreateHZBPipeline();
 
 	VkFormat depthFormat = FindDepthFormat();
 
@@ -373,6 +376,7 @@ void VulkanRenderer::InitVulkan() {
 	m_waterRenderer.Init(logicalDevice, swapChainImageFormat, depthFormat, descriptorSetLayout, m_currentMsaaSamples, this);
 
 	m_terrainRenderer.Init(logicalDevice, this, &m_uploader, 5'000'000, 10'000'000);
+	m_terrainRenderer.UpdateHZBDescriptor(hzbImageView, hzbSampler);
 
 	m_grassRenderer.Init(logicalDevice, this, &m_uploader, swapChainImageFormat, depthFormat, descriptorSetLayout, m_currentMsaaSamples);
 
@@ -451,20 +455,24 @@ void VulkanRenderer::CreateLogicalDevice() {
 
 	VkPhysicalDeviceFeatures deviceFeatures{};
 	deviceFeatures.samplerAnisotropy = VK_TRUE;
+	deviceFeatures.multiDrawIndirect = VK_TRUE;
 
-	VkPhysicalDeviceDynamicRenderingFeatures dynamicRenderingFeature{};
-	dynamicRenderingFeature.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES;
-	dynamicRenderingFeature.dynamicRendering = VK_TRUE;
+	// --- Consolidated Vulkan 1.3 Features ---
+	VkPhysicalDeviceVulkan13Features features13{};
+	features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+	features13.dynamicRendering = VK_TRUE;
 
-	// 2. Request modern Descriptor Indexing features (Vulkan 1.2 core features)
-	VkPhysicalDeviceDescriptorIndexingFeatures indexingFeatures{};
-	indexingFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
-	indexingFeatures.runtimeDescriptorArray = VK_TRUE;
-	indexingFeatures.descriptorBindingPartiallyBound = VK_TRUE;
-	indexingFeatures.descriptorBindingVariableDescriptorCount = VK_TRUE;
-	indexingFeatures.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
-	indexingFeatures.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
-	indexingFeatures.pNext = &dynamicRenderingFeature;
+	// --- Consolidated Vulkan 1.2 Features ---
+	VkPhysicalDeviceVulkan12Features features12{};
+	features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+	features12.samplerFilterMinmax = VK_TRUE; 
+	features12.runtimeDescriptorArray = VK_TRUE;
+	features12.descriptorBindingPartiallyBound = VK_TRUE;
+	features12.descriptorBindingVariableDescriptorCount = VK_TRUE;
+	features12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
+	features12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+
+	features12.pNext = &features13;
 
 	VkDeviceCreateInfo createInfo{};
 	createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -472,7 +480,7 @@ void VulkanRenderer::CreateLogicalDevice() {
 	createInfo.pQueueCreateInfos = queueCreateInfos.data();
 	createInfo.pEnabledFeatures = &deviceFeatures;
 
-	createInfo.pNext = &indexingFeatures;
+	createInfo.pNext = &features12;
 
 	createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
 	createInfo.ppEnabledExtensionNames = deviceExtensions.data();
@@ -867,6 +875,10 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 	m_boidRenderer.TickCompute(commandBuffer, ImGui::GetIO().DeltaTime);
 	m_grassRenderer.Cull(commandBuffer);
 
+	if (currentScene != nullptr) {
+		m_terrainRenderer.Cull(commandBuffer, cameraPosition, m_currentViewProj, hzbDimensions, (float)(hzbMipLevels - 1), currentFrame, culledCount, sceneTotalVertices, sceneTotalIndices);
+	}
+
 	if (m_currentMsaaSamples != VK_SAMPLE_COUNT_1_BIT) {
 		TransitionImageLayout(commandBuffer, colorImage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
 	}
@@ -921,10 +933,12 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 		if (staticPipeline != VK_NULL_HANDLE && instancedPipeline != VK_NULL_HANDLE) {
 			m_staticMeshRenderer.Draw(commandBuffer, pipelineLayout, descriptorSet, cameraPosition, frustumPlanes, currentFrame, staticPipeline, instancedPipeline, drawCallCount, culledCount, sceneTotalVertices, sceneTotalIndices);
 		}
+
 		if (terrainPipeline != VK_NULL_HANDLE) {
 			vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, terrainPipeline);
-			m_terrainRenderer.Draw(commandBuffer, pipelineLayout, descriptorSet, cameraPosition, drawCallCount, culledCount, sceneTotalVertices, sceneTotalIndices);
+			m_terrainRenderer.Draw(commandBuffer, pipelineLayout, currentFrame, drawCallCount);
 		}
+
 		m_waterRenderer.Draw(commandBuffer, descriptorSet, drawCallCount);
 		m_grassRenderer.Draw(commandBuffer, descriptorSet, drawCallCount);
 
@@ -946,6 +960,8 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 			VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
 			VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
 			VK_IMAGE_ASPECT_DEPTH_BIT);
+
+		GenerateHZB(commandBuffer);
 
 		// --- STEP 1: SSAO GENERATION ---
 		TransitionImageLayout(commandBuffer, ssaoImage,
@@ -1275,7 +1291,7 @@ void VulkanRenderer::CreateGraphicsPipeline() {
 		return pipeline;
 		};
 
-	terrainPipeline = compilePipelineHandle("shaders/default_vert.spv", "shaders/default_frag.spv", false);
+	terrainPipeline = compilePipelineHandle("shaders/terrain_vert.spv", "shaders/terrain_frag.spv", false);
 	staticPipeline = compilePipelineHandle("shaders/static_vert.spv", "shaders/static_frag.spv", false);
 	instancedPipeline = compilePipelineHandle("shaders/instanced_vert.spv", "shaders/static_frag.spv", true);
 }
@@ -1483,6 +1499,8 @@ void VulkanRenderer::UpdateUniformBuffer(const CameraData& cam) {
 	ubo.inverseViewProj = glm::inverse(ubo.proj * ubo.view);
 	ubo.inverseProj = glm::inverse(ubo.proj);
 	ubo.inverseView = glm::inverse(ubo.view);
+
+	m_currentViewProj = ubo.proj * ubo.view;
 
 	UpdateFrustumPlanes(ubo.proj * ubo.view);
 
@@ -1692,12 +1710,34 @@ void VulkanRenderer::RecreateSwapChain() {
 		ssaoBlurDescriptorPool = VK_NULL_HANDLE;
 	}
 
+	if (hzbPipeline != VK_NULL_HANDLE) {
+		vkDestroyPipeline(logicalDevice, hzbPipeline, nullptr);
+		vkDestroyPipelineLayout(logicalDevice, hzbPipelineLayout, nullptr);
+		vkDestroyDescriptorSetLayout(logicalDevice, hzbDescriptorSetLayout, nullptr);
+		vkDestroyDescriptorPool(logicalDevice, hzbDescriptorPool, nullptr);
+		hzbPipeline = VK_NULL_HANDLE;
+	}
+	if (hzbImage != VK_NULL_HANDLE) {
+		for (auto view : hzbMipViews) vkDestroyImageView(logicalDevice, view, nullptr);
+		hzbMipViews.clear();
+		vkDestroyImageView(logicalDevice, hzbImageView, nullptr);
+		vkDestroyImage(logicalDevice, hzbImage, nullptr);
+		vkFreeMemory(logicalDevice, hzbImageMemory, nullptr);
+		vkDestroySampler(logicalDevice, hzbSampler, nullptr);
+		hzbImage = VK_NULL_HANDLE;
+	}
+
 	// Recreate resources
 	CreateSwapChain();
 	CreateImageViews();
 	CreateOffscreenResolve();
 	CreateColorResources();
 	CreateDepthResources();
+
+	CreateHZBResources();
+	CreateHZBPipeline();
+
+	m_terrainRenderer.UpdateHZBDescriptor(hzbImageView, hzbSampler);
 
 	// Recreate SSAO targets if enabled/needed
 	CreateSSAOResources();
@@ -2176,6 +2216,230 @@ bool VulkanRenderer::IsSphereInFrustum(const glm::vec3& center, float radius) co
 	return true;
 }
 
+void VulkanRenderer::CreateHZBResources() {
+	uint32_t width = GetInternalWidth();
+	uint32_t height = GetInternalHeight();
+	hzbDimensions = glm::vec2((float)width, (float)height);
+
+	// Calculate how many mip levels we need for the screen size
+	hzbMipLevels = static_cast<uint32_t>(std::floor(std::log2(std::max(width, height)))) + 1;
+
+	// Create the image with STORAGE usage so compute shaders can write to it
+	CreateImage(width, height, hzbMipLevels, VK_SAMPLE_COUNT_1_BIT, VK_FORMAT_R32_SFLOAT,
+		VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, hzbImage, hzbImageMemory);
+
+	// Create the global image view containing all mips
+	hzbImageView = CreateImageView(hzbImage, VK_FORMAT_R32_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT, hzbMipLevels);
+
+	// Create individual image views for EACH mip level so we can bind them independently in compute
+	hzbMipViews.resize(hzbMipLevels);
+	for (uint32_t i = 0; i < hzbMipLevels; i++) {
+		VkImageViewCreateInfo viewInfo{};
+		viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		viewInfo.image = hzbImage;
+		viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		viewInfo.format = VK_FORMAT_R32_SFLOAT;
+		viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		viewInfo.subresourceRange.baseMipLevel = i;
+		viewInfo.subresourceRange.levelCount = 1;
+		viewInfo.subresourceRange.baseArrayLayer = 0;
+		viewInfo.subresourceRange.layerCount = 1;
+		viewInfo.components = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
+
+		if (vkCreateImageView(logicalDevice, &viewInfo, nullptr, &hzbMipViews[i]) != VK_SUCCESS) {
+			throw std::runtime_error("Failed to create HZB mip image view!");
+		}
+	}
+
+	// Create a special sampler that uses MAX reduction (Core in Vulkan 1.2/1.3)
+	VkSamplerCreateInfo samplerInfo{};
+	samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+	samplerInfo.magFilter = VK_FILTER_NEAREST;
+	samplerInfo.minFilter = VK_FILTER_NEAREST;
+	samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+	samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	samplerInfo.minLod = 0.0f;
+	samplerInfo.maxLod = static_cast<float>(hzbMipLevels);
+
+	// Vulkan 1.3 allows hardware min/max filtering
+	VkSamplerReductionModeCreateInfo reductionInfo{};
+	reductionInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_REDUCTION_MODE_CREATE_INFO;
+	reductionInfo.reductionMode = VK_SAMPLER_REDUCTION_MODE_MAX;
+	samplerInfo.pNext = &reductionInfo;
+
+	vkCreateSampler(logicalDevice, &samplerInfo, nullptr, &hzbSampler);
+
+	VkCommandBuffer cmd = BeginSingleTimeCommands();
+
+	VkImageMemoryBarrier initBarrier{};
+	initBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	initBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	initBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	initBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	initBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	initBarrier.image = hzbImage;
+	initBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	initBarrier.subresourceRange.baseMipLevel = 0;
+	initBarrier.subresourceRange.levelCount = hzbMipLevels;
+	initBarrier.subresourceRange.baseArrayLayer = 0;
+	initBarrier.subresourceRange.layerCount = 1;
+	initBarrier.srcAccessMask = 0;
+	initBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &initBarrier);
+
+	// Clear the HZB to 1.0f (the farthest possible depth) so nothing gets accidentally culled on Frame 1
+	VkClearColorValue clearColor = { {1.0f, 1.0f, 1.0f, 1.0f} };
+	vkCmdClearColorImage(cmd, hzbImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clearColor, 1, &initBarrier.subresourceRange);
+
+	// Transition the whole pyramid to READ_ONLY for the culling shader
+	initBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	initBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	initBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	initBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &initBarrier);
+
+	EndSingleTimeCommands(cmd);
+}
+void VulkanRenderer::CreateHZBPipeline() {
+	VkDescriptorSetLayoutBinding inputBinding{ 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+	VkDescriptorSetLayoutBinding outputBinding{ 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+	VkDescriptorSetLayoutBinding bindings[] = { inputBinding, outputBinding };
+
+	VkDescriptorSetLayoutCreateInfo layoutInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 2, bindings };
+	if (vkCreateDescriptorSetLayout(logicalDevice, &layoutInfo, nullptr, &hzbDescriptorSetLayout) != VK_SUCCESS) {
+		throw std::runtime_error("Failed to create HZB descriptor set layout");
+	}
+
+	VkDescriptorPoolSize poolSizes[] = {
+		{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, hzbMipLevels},
+		{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, hzbMipLevels}
+	};
+	VkDescriptorPoolCreateInfo poolInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, nullptr, 0, hzbMipLevels, 2, poolSizes };
+	vkCreateDescriptorPool(logicalDevice, &poolInfo, nullptr, &hzbDescriptorPool);
+
+	std::vector<VkDescriptorSetLayout> layouts(hzbMipLevels, hzbDescriptorSetLayout);
+	VkDescriptorSetAllocateInfo allocInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, nullptr, hzbDescriptorPool, hzbMipLevels, layouts.data() };
+	hzbDescriptorSets.resize(hzbMipLevels);
+	vkAllocateDescriptorSets(logicalDevice, &allocInfo, hzbDescriptorSets.data());
+
+	for (uint32_t i = 0; i < hzbMipLevels; i++) {
+		VkDescriptorImageInfo inputInfo{};
+		inputInfo.sampler = hzbSampler;
+		inputInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		// Mip 0 reads the main scene depth. Subsequent mips read the previous mip.
+		inputInfo.imageView = (i == 0) ? depthImageView : hzbMipViews[i - 1];
+
+		VkDescriptorImageInfo outputInfo{};
+		outputInfo.imageView = hzbMipViews[i];
+		outputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL; // Compute shaders write to GENERAL
+
+		VkWriteDescriptorSet writes[2]{};
+		writes[0] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, hzbDescriptorSets[i], 0, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &inputInfo, nullptr, nullptr };
+		writes[1] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, hzbDescriptorSets[i], 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &outputInfo, nullptr, nullptr };
+		vkUpdateDescriptorSets(logicalDevice, 2, writes, 0, nullptr);
+	}
+
+	VkPushConstantRange pcRange{ VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(glm::vec2) };
+	VkPipelineLayoutCreateInfo pLayoutInfo{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, nullptr, 0, 1, &hzbDescriptorSetLayout, 1, &pcRange };
+	vkCreatePipelineLayout(logicalDevice, &pLayoutInfo, nullptr, &hzbPipelineLayout);
+
+	auto compCode = ReadFile("shaders/hzb_reduce_comp.spv");
+	VkShaderModule compModule = CreateShaderModule(logicalDevice, compCode);
+	VkPipelineShaderStageCreateInfo compStage{ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, compModule, "main" };
+
+	VkComputePipelineCreateInfo pipelineInfo{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, nullptr, 0, compStage, hzbPipelineLayout, VK_NULL_HANDLE, 0 };
+	vkCreateComputePipelines(logicalDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &hzbPipeline);
+
+	vkDestroyShaderModule(logicalDevice, compModule, nullptr);
+}
+void VulkanRenderer::GenerateHZB(VkCommandBuffer commandBuffer) {
+	VkImageMemoryBarrier initBarrier{};
+	initBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	initBarrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	initBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+	initBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	initBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	initBarrier.image = hzbImage;
+	initBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	initBarrier.subresourceRange.baseMipLevel = 0;
+	initBarrier.subresourceRange.levelCount = hzbMipLevels; // Apply to the whole pyramid!
+	initBarrier.subresourceRange.baseArrayLayer = 0;
+	initBarrier.subresourceRange.layerCount = 1;
+	initBarrier.srcAccessMask = 0;
+	initBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+
+	vkCmdPipelineBarrier(commandBuffer,
+		VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		0, 0, nullptr, 0, nullptr, 1, &initBarrier);
+
+	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, hzbPipeline);
+
+	uint32_t currentWidth = static_cast<uint32_t>(hzbDimensions.x);
+	uint32_t currentHeight = static_cast<uint32_t>(hzbDimensions.y);
+
+	for (uint32_t i = 0; i < hzbMipLevels; i++) {
+		// If not the first mip, transition the *previous* mip to READ_ONLY so we can sample from it
+		if (i > 0) {
+			VkImageMemoryBarrier barrier{};
+			barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+			barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+			barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			barrier.image = hzbImage;
+			barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			barrier.subresourceRange.baseMipLevel = i - 1;
+			barrier.subresourceRange.levelCount = 1;
+			barrier.subresourceRange.baseArrayLayer = 0;
+			barrier.subresourceRange.layerCount = 1;
+			barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+			barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+			vkCmdPipelineBarrier(commandBuffer,
+				VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+				0, 0, nullptr, 0, nullptr, 1, &barrier);
+		}
+
+		vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, hzbPipelineLayout, 0, 1, &hzbDescriptorSets[i], 0, nullptr);
+
+		glm::vec2 outSize(currentWidth, currentHeight);
+		vkCmdPushConstants(commandBuffer, hzbPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(glm::vec2), &outSize);
+
+		// 16x16 local workgroup size (defined in the GLSL shader)
+		uint32_t groupCountX = (currentWidth + 15) / 16;
+		uint32_t groupCountY = (currentHeight + 15) / 16;
+		vkCmdDispatch(commandBuffer, groupCountX, groupCountY, 1);
+
+		currentWidth = std::max(1u, currentWidth / 2);
+		currentHeight = std::max(1u, currentHeight / 2);
+	}
+
+	// Transition the final mip to READ_ONLY so the whole pyramid is ready for the terrain culling shader
+	VkImageMemoryBarrier finalBarrier{};
+	finalBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	finalBarrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+	finalBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	finalBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	finalBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	finalBarrier.image = hzbImage;
+	finalBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	finalBarrier.subresourceRange.baseMipLevel = hzbMipLevels - 1;
+	finalBarrier.subresourceRange.levelCount = 1;
+	finalBarrier.subresourceRange.baseArrayLayer = 0;
+	finalBarrier.subresourceRange.layerCount = 1;
+	finalBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+	finalBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+	vkCmdPipelineBarrier(commandBuffer,
+		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		0, 0, nullptr, 0, nullptr, 1, &finalBarrier);
+}
+
 void VulkanRenderer::AddTerrainChunk(int64_t key, int cx, int cz, int lod,
 	const std::vector<ModelVertex>& vertices,
 	const std::vector<uint32_t>& indices)
@@ -2424,6 +2688,16 @@ void VulkanRenderer::Cleanup() {
 		assetManager->Cleanup(logicalDevice);
 	}
 
+	if (hzbImage != VK_NULL_HANDLE) {
+		for (auto view : hzbMipViews) vkDestroyImageView(logicalDevice, view, nullptr);
+		hzbMipViews.clear();
+		vkDestroyImageView(logicalDevice, hzbImageView, nullptr);
+		vkDestroyImage(logicalDevice, hzbImage, nullptr);
+		vkFreeMemory(logicalDevice, hzbImageMemory, nullptr);
+		vkDestroySampler(logicalDevice, hzbSampler, nullptr);
+		hzbImage = VK_NULL_HANDLE;
+	}
+
 	if (logicalDevice != VK_NULL_HANDLE) {
 		if (colorImageView != VK_NULL_HANDLE) vkDestroyImageView(logicalDevice, colorImageView, nullptr);
 		if (colorImage != VK_NULL_HANDLE) vkDestroyImage(logicalDevice, colorImage, nullptr);
@@ -2503,6 +2777,25 @@ void VulkanRenderer::Cleanup() {
 
 		if (ssaoUBOMapped != nullptr) { vkUnmapMemory(logicalDevice, ssaoUBOMemory); ssaoUBOMapped = nullptr; }
 		DestroyBuffer(ssaoUBO, ssaoUBOMemory);
+	}
+
+	if (logicalDevice != VK_NULL_HANDLE) {
+		// Clean up HZB Pipeline
+		if (hzbPipeline != VK_NULL_HANDLE) vkDestroyPipeline(logicalDevice, hzbPipeline, nullptr);
+		if (hzbPipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(logicalDevice, hzbPipelineLayout, nullptr);
+		if (hzbDescriptorSetLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(logicalDevice, hzbDescriptorSetLayout, nullptr);
+		if (hzbDescriptorPool != VK_NULL_HANDLE) vkDestroyDescriptorPool(logicalDevice, hzbDescriptorPool, nullptr);
+
+		// Clean up HZB Images
+		if (hzbImage != VK_NULL_HANDLE) {
+			for (auto view : hzbMipViews) vkDestroyImageView(logicalDevice, view, nullptr);
+			hzbMipViews.clear();
+			vkDestroyImageView(logicalDevice, hzbImageView, nullptr);
+			vkDestroyImage(logicalDevice, hzbImage, nullptr);
+			vkFreeMemory(logicalDevice, hzbImageMemory, nullptr);
+			vkDestroySampler(logicalDevice, hzbSampler, nullptr);
+			hzbImage = VK_NULL_HANDLE;
+		}
 	}
 
 	if (logicalDevice != VK_NULL_HANDLE) {

@@ -24,7 +24,8 @@ layout(push_constant) uniform Constants {
     uint textureId;
     uint normalTextureId;
     uint objectId;
-    float lodBlend; 
+    // We no longer need lodBlend from push constants, but we leave the struct size alone
+    float _padBlend; 
 } push;
 
 layout(location = 0) in vec3 inPosition;
@@ -45,14 +46,17 @@ layout(location = 6) flat out uint fragNormalTextureId;
 layout(location = 7) out vec3 fragColor;
 
 void main() {
-    vec3 finalPos = mix(inPosition, inCoarsePos, push.lodBlend);
-    vec3 finalNormal = mix(inNormal, inCoarseNormal, push.lodBlend);
+    // --- THE UNPACK: Uint-to-Float bitcast ---
+    float dynamicLodBlend = uintBitsToFloat(gl_InstanceIndex);
 
-    vec4 worldPos = push.modelMatrix * vec4(inPosition, 1.0);
+    vec3 finalPos = mix(inPosition, inCoarsePos, dynamicLodBlend);
+    vec3 finalNormal = mix(inNormal, inCoarseNormal, dynamicLodBlend);
+
+    vec4 worldPos = push.modelMatrix * vec4(finalPos, 1.0);
     gl_Position = ubo.proj * ubo.view * worldPos;
 
     mat3 normalMatrix = transpose(inverse(mat3(push.modelMatrix)));
-    vec3 worldNormal = normalize(normalMatrix * inNormal);
+    vec3 worldNormal = normalize(normalMatrix * finalNormal);
 
     float slopeFactor = max(dot(worldNormal, vec3(0.0, 1.0, 0.0)), 0.0);
     float cliffWeight = smoothstep(0.5, 0.8, slopeFactor);
@@ -65,7 +69,7 @@ void main() {
     float totalWeight = blendedWeights.r + blendedWeights.g + blendedWeights.b;
     fragColor = blendedWeights / max(totalWeight, 0.0001);
 
-    fragNormal = normalMatrix * inNormal;
+    fragNormal = normalMatrix * finalNormal;
     fragTangent = normalMatrix * inTangent.xyz;
     fragTangentHandedness = inTangent.w;
 

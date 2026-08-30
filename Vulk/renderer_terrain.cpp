@@ -27,6 +27,44 @@ void TerrainRenderer::Init(VkDevice device, VulkanRenderer* renderer,
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
         m_indexBuffer, m_indexMemory);
 
+    VkDeviceSize chunkDataSize = sizeof(TerrainChunkGPUData) * MAX_TERRAIN_CHUNKS;
+    VkDeviceSize indirectSize = sizeof(VkDrawIndexedIndirectCommand) * MAX_TERRAIN_CHUNKS;
+
+    // Allocate resources per frame-in-flight
+    for (uint32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
+        m_renderer->CreateBuffer(chunkDataSize,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            m_chunkDataBuffers[i], m_chunkDataMemories[i]);
+
+        vkMapMemory(m_device, m_chunkDataMemories[i], 0, VK_WHOLE_SIZE, 0, (void**)&m_chunkDataMappedPtrs[i]);
+
+        m_renderer->CreateBuffer(indirectSize,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+            m_indirectCommandBuffers[i], m_indirectCommandMemories[i]);
+
+        m_renderer->CreateBuffer(sizeof(uint32_t),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            m_drawCountBuffers[i], m_drawCountMemories[i]);
+    }
+
+    CreateComputePipeline();
+
+    VkDescriptorPoolSize poolSizes[2];
+    poolSizes[0] = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3 * FRAMES_IN_FLIGHT };
+    poolSizes[1] = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, FRAMES_IN_FLIGHT };
+
+    VkDescriptorPoolCreateInfo poolInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, nullptr, 0, FRAMES_IN_FLIGHT, 2, poolSizes };
+    vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_computeDescriptorPool);
+
+    std::vector<VkDescriptorSetLayout> layouts(FRAMES_IN_FLIGHT, m_computeDescriptorSetLayout);
+    VkDescriptorSetAllocateInfo allocInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, nullptr, m_computeDescriptorPool, FRAMES_IN_FLIGHT, layouts.data() };
+    vkAllocateDescriptorSets(m_device, &allocInfo, m_computeDescriptorSets.data());
+
+    UpdateComputeDescriptors();
+
     std::cout << "[TerrainRenderer] Initialized with " << maxVertices << " vertices, "
         << maxIndices << " indices.\n";
 }
@@ -34,10 +72,33 @@ void TerrainRenderer::Init(VkDevice device, VulkanRenderer* renderer,
 void TerrainRenderer::Cleanup() {
     if (m_device == VK_NULL_HANDLE) return;
 
-    // Wait for all pending uploads (the uploader is shared, so we just wait for its fences)
-    // The uploader's Tick will have cleaned up completed ones, but we need to make sure.
-    // We'll let the uploader Shutdown handle it; we don't own the uploader.
-    // So we just destroy our own buffers.
+    if (m_computePipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, m_computePipeline, nullptr);
+        m_computePipeline = VK_NULL_HANDLE;
+    }
+    if (m_computePipelineLayout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(m_device, m_computePipelineLayout, nullptr);
+        m_computePipelineLayout = VK_NULL_HANDLE;
+    }
+    if (m_computeDescriptorSetLayout != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(m_device, m_computeDescriptorSetLayout, nullptr);
+        m_computeDescriptorSetLayout = VK_NULL_HANDLE;
+    }
+    if (m_computeDescriptorPool != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(m_device, m_computeDescriptorPool, nullptr);
+        m_computeDescriptorPool = VK_NULL_HANDLE;
+    }
+
+    for (uint32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
+        if (m_chunkDataMappedPtrs[i] != nullptr) {
+            vkUnmapMemory(m_device, m_chunkDataMemories[i]);
+            m_chunkDataMappedPtrs[i] = nullptr;
+        }
+
+        m_renderer->DestroyBuffer(m_chunkDataBuffers[i], m_chunkDataMemories[i]);
+        m_renderer->DestroyBuffer(m_indirectCommandBuffers[i], m_indirectCommandMemories[i]);
+        m_renderer->DestroyBuffer(m_drawCountBuffers[i], m_drawCountMemories[i]);
+    }
 
     m_renderer->DestroyBuffer(m_vertexBuffer, m_vertexMemory);
     m_renderer->DestroyBuffer(m_indexBuffer, m_indexMemory);
@@ -49,7 +110,6 @@ void TerrainRenderer::Cleanup() {
 }
 
 void TerrainRenderer::Tick(uint64_t currentFrame) {
-    // Flush deferred span returns
     m_pendingSpanReturns.Flush(currentFrame, [&](SpanReturn& ret) {
         std::lock_guard<std::mutex> lock(m_terrainAllocMutex);
         m_freeVertexSpans.push_back(ret.vertexSpan);
@@ -64,7 +124,7 @@ void TerrainRenderer::AddTerrainChunk(int64_t key, int cx, int cz, int lod,
 
     auto it = m_pendingFlags.find(key);
     if (it != m_pendingFlags.end()) {
-        *it->second = true; // mark cancelled
+        *it->second = true;
         m_pendingFlags.erase(it);
     }
 
@@ -104,75 +164,75 @@ void TerrainRenderer::RemoveTerrainChunk(int64_t key) {
     m_terrainChunks.erase(it2);
 }
 
-void TerrainRenderer::Draw(VkCommandBuffer commandBuffer, VkPipelineLayout pipelineLayout,
-    VkDescriptorSet descriptorSet, const glm::vec3& cameraPos,
-    uint32_t& outDrawCalls, uint32_t& outCulledCount,
-    uint32_t& outVertexCount, uint32_t& outIndexCount) {
-    if (m_terrainChunks.empty()) return;
+void TerrainRenderer::Cull(VkCommandBuffer commandBuffer, const glm::vec3& cameraPos, const glm::mat4& viewProj,
+    glm::vec2 hzbSize, float maxMip, uint32_t currentFrameIndex,
+    uint32_t& outCulledCount, uint32_t& outVertexCount, uint32_t& outIndexCount) {
+
+    if (m_terrainChunks.empty()) { m_cullChunkCount = 0; return; }
+
+    TerrainChunkGPUData* chunkDataMapped = m_chunkDataMappedPtrs[currentFrameIndex];
+
+    uint32_t chunkIndex = 0;
+    for (auto& [key, chunk] : m_terrainChunks) {
+        if (chunkIndex >= MAX_TERRAIN_CHUNKS) break;
+        if (!chunk.ready) continue;
+
+        chunkDataMapped[chunkIndex] = {
+            glm::vec4(chunk.center, chunk.radius),
+            chunk.indexCount, chunk.indexOffset, chunk.vertexOffset, static_cast<uint32_t>(chunk.lod)
+        };
+        chunkIndex++;
+    }
+
+    m_cullChunkCount = chunkIndex;
+    if (chunkIndex == 0) return;
+
+    uint32_t zero = 0;
+    vkCmdUpdateBuffer(commandBuffer, m_drawCountBuffers[currentFrameIndex], 0, sizeof(uint32_t), &zero);
+    vkCmdFillBuffer(commandBuffer, m_indirectCommandBuffers[currentFrameIndex], 0, sizeof(VkDrawIndexedIndirectCommand) * chunkIndex, 0);
+
+    VkMemoryBarrier transferBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER, nullptr, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT };
+    vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &transferBarrier, 0, nullptr, 0, nullptr);
+
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_computePipeline);
+    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_computePipelineLayout, 0, 1, &m_computeDescriptorSets[currentFrameIndex], 0, nullptr);
+
+    // --- NEW: Simplified Push Constants ---
+    struct ComputePush {
+        glm::mat4 viewProj;
+        glm::vec3 cameraPos;
+        uint32_t totalChunks;
+        glm::vec2 hzbSize;
+        float maxMip;
+    } computePush;
+
+    computePush.viewProj = viewProj;
+    computePush.cameraPos = cameraPos;
+    computePush.totalChunks = chunkIndex;
+    computePush.hzbSize = hzbSize;
+    computePush.maxMip = maxMip;
+
+    vkCmdPushConstants(commandBuffer, m_computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ComputePush), &computePush);
+    vkCmdDispatch(commandBuffer, (chunkIndex + 63) / 64, 1, 1);
+
+    VkMemoryBarrier drawBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER, nullptr, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_INDIRECT_COMMAND_READ_BIT };
+    vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, 0, 1, &drawBarrier, 0, nullptr, 0, nullptr);
+}
+
+void TerrainRenderer::Draw(VkCommandBuffer commandBuffer, VkPipelineLayout pipelineLayout, uint32_t currentFrameIndex, uint32_t& outDrawCalls) {
+    if (m_cullChunkCount == 0) return;
 
     VkBuffer vertexBuffers[] = { m_vertexBuffer };
     VkDeviceSize offsets[] = { 0 };
     vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
     vkCmdBindIndexBuffer(commandBuffer, m_indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
-    const float occlusionRefreshDist = m_chunkSize * 0.25f;
-    bool refreshOcclusion = m_firstOcclusionUpdate ||
-        glm::length2(cameraPos - m_lastOcclusionCameraPos) > (occlusionRefreshDist * occlusionRefreshDist);
+    PushConstants defaultConstants{};
+    defaultConstants.modelMatrix = glm::mat4(1.0f);
+    vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &defaultConstants);
 
-    if (refreshOcclusion) {
-        m_lastOcclusionCameraPos = cameraPos;
-        m_firstOcclusionUpdate = false;
-    }
-
-    for (auto& [key, chunk] : m_terrainChunks) {
-        if (!chunk.ready) continue;
-
-        if (!m_renderer->IsSphereInFrustum(chunk.center, chunk.radius)) {
-            outCulledCount++;
-            continue;
-        }
-
-        if (refreshOcclusion) {
-            chunk.cachedOccluded = IsChunkOccludedInternal(chunk.center, chunk.radius, cameraPos);
-        }
-        if (chunk.cachedOccluded) {
-            outCulledCount++;
-            continue;
-        }
-
-        outVertexCount += chunk.vertexCount;
-        outIndexCount += chunk.indexCount;
-
-        float dist = glm::length(chunk.center - cameraPos);
-        float blend = 0.0f;
-        if (chunk.lod == 0) {
-            float morphEnd = m_chunkSize * 2.0f;
-            float t = glm::clamp(dist / morphEnd, 0.0f, 1.0f);
-            blend = t * t * (3.0f - 2.0f * t);
-        }
-
-        PushConstants constants{};
-        constants.modelMatrix = glm::mat4(1.0f);
-        constants.textureId = 0;
-        constants.normalTextureId = 0;
-        constants.objectId = 0;
-        constants.lodBlend = blend;
-
-        vkCmdPushConstants(commandBuffer, pipelineLayout,
-            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-            0, sizeof(PushConstants), &constants);
-
-        vkCmdDrawIndexed(commandBuffer,
-            chunk.indexCount,
-            1,
-            chunk.indexOffset,
-            chunk.vertexOffset,
-            0);
-
-        outDrawCalls++;
-        outVertexCount += chunk.vertexCount;
-        outIndexCount += chunk.indexCount;
-    }
+    vkCmdDrawIndexedIndirect(commandBuffer, m_indirectCommandBuffers[currentFrameIndex], 0, m_cullChunkCount, sizeof(VkDrawIndexedIndirectCommand));
+    outDrawCalls++;
 }
 
 // ---- private methods ----
@@ -234,7 +294,6 @@ void TerrainRenderer::UploadTerrainChunkAsync(TerrainChunkGPU& chunk,
     chunk.vertexCount = static_cast<uint32_t>(verts.size());
     chunk.indexCount = static_cast<uint32_t>(indices.size());
 
-    // Prepare batch regions
     std::vector<CopyRegion> regions;
     regions.push_back({ verts.data(), vertexSize, m_vertexBuffer, vOffset * sizeof(ModelVertex) });
     regions.push_back({ indices.data(), indexSize, m_indexBuffer, iOffset * sizeof(uint32_t) });
@@ -243,22 +302,18 @@ void TerrainRenderer::UploadTerrainChunkAsync(TerrainChunkGPU& chunk,
     auto keyPtr = std::make_shared<int64_t>(chunk.key);
     auto cancelledFlag = std::make_shared<bool>(false);
 
-    // Store the flag in the map for cancellation
     m_pendingFlags[chunk.key] = cancelledFlag;
 
     m_uploader->QueueBatchUpload(regions, [this, chunkPtr, keyPtr, cancelledFlag]() {
-        // Remove from map (the upload is done; no need to cancel anymore)
         m_pendingFlags.erase(*keyPtr);
 
         if (*cancelledFlag) {
-            // Upload was cancelled; free the allocated spans
             std::lock_guard<std::mutex> lock(m_terrainAllocMutex);
             m_freeVertexSpans.push_back({ chunkPtr->vertexOffset, chunkPtr->vertexCount });
             m_freeIndexSpans.push_back({ chunkPtr->indexOffset, chunkPtr->indexCount });
             return;
         }
 
-        // Replace or insert
         auto oldIt = m_terrainChunks.find(*keyPtr);
         if (oldIt != m_terrainChunks.end()) {
             DeferSpanReturn({ oldIt->second.vertexOffset, oldIt->second.vertexCount },
@@ -285,8 +340,6 @@ bool TerrainRenderer::IsChunkOccluded(const glm::vec3& chunkCenter, float chunkR
     return IsChunkOccludedInternal(chunkCenter, chunkRadius, cameraPos);
 }
 
-// ---- Internal height/occlusion helpers ----
-
 float TerrainRenderer::GetCachedHeightInternal(float worldX, float worldZ) {
     const float GRID = 10.0f;
     int gx = (int)std::floor(worldX / GRID + 0.5f);
@@ -308,7 +361,6 @@ bool TerrainRenderer::IsChunkOccludedInternal(const glm::vec3& chunkCenter, floa
     float distToCenter = glm::length(chunkCenter - cameraPos);
     if (distToCenter < chunkRadius * 2.0f) return false;
 
-    // Corner check
     const float CORNER_MARGIN = 15.0f;
     glm::vec3 offsets[8] = {
         glm::vec3(1,  1,  1), glm::vec3(1,  1, -1),
@@ -324,7 +376,6 @@ bool TerrainRenderer::IsChunkOccludedInternal(const glm::vec3& chunkCenter, floa
         }
     }
 
-    // Raycast
     glm::vec3 dir = glm::normalize(chunkCenter - cameraPos);
     float stepSize = 25.0f;
     int numSamples = (int)(distToCenter / stepSize) + 1;
@@ -353,4 +404,54 @@ bool TerrainRenderer::IsChunkOccludedInternal(const glm::vec3& chunkCenter, floa
         }
     }
     return true;
+}
+
+void TerrainRenderer::CreateComputePipeline() {
+    VkDescriptorSetLayoutBinding chunkLayoutBinding{ 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+    VkDescriptorSetLayoutBinding cmdLayoutBinding{ 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+    VkDescriptorSetLayoutBinding countLayoutBinding{ 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+    VkDescriptorSetLayoutBinding hzbLayoutBinding{ 3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+
+    std::array<VkDescriptorSetLayoutBinding, 4> bindings = { chunkLayoutBinding, cmdLayoutBinding, countLayoutBinding, hzbLayoutBinding };
+
+    VkDescriptorSetLayoutCreateInfo layoutInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, static_cast<uint32_t>(bindings.size()), bindings.data() };
+    vkCreateDescriptorSetLayout(m_device, &layoutInfo, nullptr, &m_computeDescriptorSetLayout);
+
+    VkPushConstantRange pushConstantRange{ VK_SHADER_STAGE_COMPUTE_BIT, 0, 96 };
+
+    VkPipelineLayoutCreateInfo pipelineLayoutInfo{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, nullptr, 0, 1, &m_computeDescriptorSetLayout, 1, &pushConstantRange };
+    vkCreatePipelineLayout(m_device, &pipelineLayoutInfo, nullptr, &m_computePipelineLayout);
+
+    auto computeShaderCode = VulkanRenderer::ReadFile("shaders/terrain_cull_comp.spv");
+    VkShaderModule computeShaderModule = VulkanRenderer::CreateShaderModule(m_device, computeShaderCode);
+
+    VkPipelineShaderStageCreateInfo computeShaderStageInfo{ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, computeShaderModule, "main" };
+
+    VkComputePipelineCreateInfo pipelineInfo{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, nullptr, 0, computeShaderStageInfo, m_computePipelineLayout, VK_NULL_HANDLE, 0 };
+    vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_computePipeline);
+
+    vkDestroyShaderModule(m_device, computeShaderModule, nullptr);
+}
+
+void TerrainRenderer::UpdateComputeDescriptors() {
+    for (uint32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
+        VkDescriptorBufferInfo chunkInfo{ m_chunkDataBuffers[i], 0, sizeof(TerrainChunkGPUData) * MAX_TERRAIN_CHUNKS };
+        VkDescriptorBufferInfo cmdInfo{ m_indirectCommandBuffers[i], 0, sizeof(VkDrawIndexedIndirectCommand) * MAX_TERRAIN_CHUNKS };
+        VkDescriptorBufferInfo countInfo{ m_drawCountBuffers[i], 0, sizeof(uint32_t) };
+
+        VkWriteDescriptorSet writes[3]{};
+        writes[0] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_computeDescriptorSets[i], 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &chunkInfo, nullptr };
+        writes[1] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_computeDescriptorSets[i], 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &cmdInfo, nullptr };
+        writes[2] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_computeDescriptorSets[i], 2, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &countInfo, nullptr };
+
+        vkUpdateDescriptorSets(m_device, 3, writes, 0, nullptr);
+    }
+}
+
+void TerrainRenderer::UpdateHZBDescriptor(VkImageView hzbView, VkSampler hzbSampler) {
+    for (uint32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
+        VkDescriptorImageInfo hzbInfo{ hzbSampler, hzbView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkWriteDescriptorSet write{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_computeDescriptorSets[i], 3, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &hzbInfo, nullptr, nullptr };
+        vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);
+    }
 }

@@ -6,6 +6,7 @@
 #include <mutex>
 #include <atomic>
 #include <glm/glm.hpp>
+#include <array>
 
 #include "mesh.h"  
 #include "gpu_async.h"
@@ -36,6 +37,14 @@ struct TerrainChunkGPU {
     bool cachedOccluded = false;
 };
 
+struct TerrainChunkGPUData {
+    glm::vec4 centerRadius; // xyz = world center, w = bounding radius
+    uint32_t indexCount;
+    uint32_t firstIndex;
+    uint32_t vertexOffset;
+    uint32_t lod;
+};
+
 struct FreeSpan { uint32_t offset; uint32_t count; };
 struct SpanReturn {
     FreeSpan vertexSpan;
@@ -58,10 +67,10 @@ public:
 
     void SetChunkSize(float size) { m_chunkSize = size; }
 
-    void Draw(VkCommandBuffer commandBuffer, VkPipelineLayout pipelineLayout,
-        VkDescriptorSet descriptorSet, const glm::vec3& cameraPos,
-        uint32_t& outDrawCalls, uint32_t& outCulledCount,
-        uint32_t& outVertexCount, uint32_t& outIndexCount);
+    void Draw(VkCommandBuffer commandBuffer, VkPipelineLayout pipelineLayout, uint32_t currentFrameIndex, uint32_t& outDrawCalls);
+    void Cull(VkCommandBuffer commandBuffer, const glm::vec3& cameraPos, const glm::mat4& viewProj,
+        glm::vec2 hzbSize, float maxMip, uint32_t currentFrameIndex,
+        uint32_t& outCulledCount, uint32_t& outVertexCount, uint32_t& outIndexCount);
 
     float GetCachedHeight(float worldX, float worldZ);
     void ClearHeightCache();
@@ -69,7 +78,14 @@ public:
     bool IsChunkOccluded(const glm::vec3& chunkCenter, float chunkRadius,
         const glm::vec3& cameraPos);
 
+    void UpdateHZBDescriptor(VkImageView hzbView, VkSampler hzbSampler);
+
 private:
+    static constexpr uint32_t MAX_TERRAIN_CHUNKS = 1024;
+    static constexpr uint32_t FRAMES_IN_FLIGHT = 3;
+
+    float m_chunkSize = 512.0f;
+
     VkDevice m_device = VK_NULL_HANDLE;
     VulkanRenderer* m_renderer = nullptr;
     RingBufferUploader* m_uploader = nullptr;
@@ -79,6 +95,23 @@ private:
     VkDeviceMemory m_vertexMemory = VK_NULL_HANDLE;
     VkBuffer m_indexBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_indexMemory = VK_NULL_HANDLE;
+
+    VkPipeline m_computePipeline = VK_NULL_HANDLE;
+    VkPipelineLayout m_computePipelineLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_computeDescriptorSetLayout = VK_NULL_HANDLE;
+    VkDescriptorPool m_computeDescriptorPool = VK_NULL_HANDLE;
+
+    // Per-frame compute buffers
+    std::array<VkDescriptorSet, FRAMES_IN_FLIGHT> m_computeDescriptorSets = { VK_NULL_HANDLE };
+    std::array<VkBuffer, FRAMES_IN_FLIGHT> m_chunkDataBuffers = { VK_NULL_HANDLE };
+    std::array<VkDeviceMemory, FRAMES_IN_FLIGHT> m_chunkDataMemories = { VK_NULL_HANDLE };
+    std::array<VkBuffer, FRAMES_IN_FLIGHT> m_indirectCommandBuffers = { VK_NULL_HANDLE };
+    std::array<VkDeviceMemory, FRAMES_IN_FLIGHT> m_indirectCommandMemories = { VK_NULL_HANDLE };
+    std::array<VkBuffer, FRAMES_IN_FLIGHT> m_drawCountBuffers = { VK_NULL_HANDLE };
+    std::array<VkDeviceMemory, FRAMES_IN_FLIGHT> m_drawCountMemories = { VK_NULL_HANDLE };
+    std::array<TerrainChunkGPUData*, FRAMES_IN_FLIGHT> m_chunkDataMappedPtrs = { nullptr };
+
+    uint32_t m_cullChunkCount = 0;
 
     uint32_t m_maxVertices = 0;
     uint32_t m_maxIndices = 0;
@@ -94,22 +127,15 @@ private:
     std::unordered_map<int64_t, TerrainChunkGPU> m_terrainChunks;
 
     std::unordered_map<int64_t, std::shared_ptr<bool>> m_pendingFlags;
-
-    // Deferred span returns (free list delayed by MAX_FRAMES_IN_FLIGHT)
     DeferredQueue<SpanReturn> m_pendingSpanReturns;
 
-    float m_chunkSize = 512.0f;
-
-    // Height cache for occlusion culling
     struct HeightCacheEntry { float height; bool valid; };
     std::unordered_map<int64_t, HeightCacheEntry> m_heightCache;
     std::mutex m_heightCacheMutex;
 
-    // Occlusion culling state
     glm::vec3 m_lastOcclusionCameraPos = glm::vec3(0.0f);
     bool m_firstOcclusionUpdate = true;
 
-    // Internal helpers
     void UploadTerrainChunkAsync(TerrainChunkGPU& chunk,
         const std::vector<ModelVertex>& verts,
         const std::vector<uint32_t>& indices);
@@ -118,4 +144,7 @@ private:
     bool IsChunkOccludedInternal(const glm::vec3& chunkCenter, float chunkRadius,
         const glm::vec3& cameraPos);
     float GetCachedHeightInternal(float worldX, float worldZ);
+
+    void CreateComputePipeline();
+    void UpdateComputeDescriptors();
 };
