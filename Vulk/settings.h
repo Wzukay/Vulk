@@ -26,6 +26,7 @@ struct Settings {
 
     // --- Debug ---
     bool showStats = true;
+    float timeScale = 1.0f;
 
     // --- Window ---
     int windowWidth = 1280;

@@ -1,28 +1,11 @@
 #version 450
+#include "common_structures.glsl"
+
 layout(location = 0) in vec4 inPosScale;
 layout(location = 1) in vec4 inVelTime;
 
 layout(location = 0) out vec2 fragUV;
 layout(location = 1) out vec3 fragColor; 
-
-layout(set = 0, binding = 0) uniform UniformBufferObject {
-    mat4 view;
-    mat4 proj;
-    vec3 cameraPos;
-    float ambient;
-    vec4 fadeParams;
-    vec2 screenSize;
-    float specularPower;
-    uint lightCount;
-    float fogStart;
-    float fogEnd;
-    vec2 _pad2;
-    vec4 sunDirection;
-    vec4 sunColor;
-    mat4 inverseViewProj;
-    mat4 inverseProj;
-    mat4 inverseView;
-} ubo;
 
 const vec2 quadVertices[6] = vec2[](
     vec2(-0.5, -0.5), vec2( 0.5, -0.5), vec2( 0.5,  0.5),

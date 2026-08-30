@@ -185,14 +185,11 @@
     <ClInclude Include="renderer_boid.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="day_night.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <None Include="shaders\shader.frag">
-      <Filter>Shaders</Filter>
-    </None>
-    <None Include="shaders\shader.vert">
-      <Filter>Shaders</Filter>
-    </None>
     <None Include="shaders\skybox.frag">
       <Filter>Shaders</Filter>
     </None>
@@ -245,6 +242,9 @@
       <Filter>Shaders</Filter>
     </None>
     <None Include="shaders\boid.vert">
+      <Filter>Shaders</Filter>
+    </None>
+    <None Include="shaders\common_structures.glsl">
       <Filter>Shaders</Filter>
     </None>
   </ItemGroup>

@@ -1274,7 +1274,7 @@ void VulkanRenderer::CreateGraphicsPipeline() {
 		return pipeline;
 		};
 
-	terrainPipeline = compilePipelineHandle("shaders/vert.spv", "shaders/frag.spv", false);
+	terrainPipeline = compilePipelineHandle("shaders/default_vert.spv", "shaders/default_frag.spv", false);
 	staticPipeline = compilePipelineHandle("shaders/static_vert.spv", "shaders/static_frag.spv", false);
 	instancedPipeline = compilePipelineHandle("shaders/instanced_vert.spv", "shaders/static_frag.spv", true);
 }

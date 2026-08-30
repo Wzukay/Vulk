@@ -5,7 +5,7 @@
 
 struct DayNightManager {
     float timeOfDay = 12.0f;
-    float timeScale = 0.5f;
+    float timeScale = g_Settings.timeScale / 10.0f;
 
     void Tick(float deltaTime, Scene& scene) {
         timeOfDay += deltaTime * timeScale;

@@ -1,4 +1,5 @@
 #version 450
+#include "common_structures.glsl"
 
 layout(location = 0) in vec3 inPos;
 layout(location = 1) in vec2 inUV;
@@ -6,25 +7,6 @@ layout(location = 1) in vec2 inUV;
 layout(location = 0) out vec2 outUV;
 layout(location = 1) out vec3 outWorldPos;
 layout(location = 2) out vec3 outNormal;
-
-layout(set = 0, binding = 0) uniform UniformBufferObject {
-    mat4 view;
-    mat4 proj;
-    vec3 cameraPos;
-    float ambient;
-    vec4 fadeParams;
-    vec2 screenSize;
-    float specularPower;
-    uint lightCount;
-    float fogStart;
-    float fogEnd;
-    vec2 _pad2;
-    vec4 sunDirection;
-    vec4 sunColor;
-    mat4 inverseViewProj;
-    mat4 inverseProj;
-    mat4 inverseView;
-} ubo;
 
 layout(push_constant) uniform PushConstants {
     mat4 modelMatrix;      // identity for now, but kept for flexibility

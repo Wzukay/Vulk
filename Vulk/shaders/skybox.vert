@@ -1,24 +1,7 @@
 #version 450
-layout(location = 0) out vec3 outViewDir;
+#include "common_structures.glsl"
 
-layout(set = 0, binding = 0) uniform UniformBufferObject {
-    mat4 view;
-    mat4 proj;
-    vec3 cameraPos;         // <--- CHANGED BACK TO VEC3!
-    float ambient;
-    vec4 fadeParams;
-    vec2 screenSize;
-    float specularPower;
-    uint lightCount;
-    float fogStart;
-    float fogEnd;
-    vec2 _pad2;
-    vec4 sunDirection;
-    vec4 sunColor;
-    mat4 inverseViewProj;
-    mat4 inverseProj;
-    mat4 inverseView;
-} ubo;
+layout(location = 0) out vec3 outViewDir;
 
 void main() {
     // Generate full screen triangle

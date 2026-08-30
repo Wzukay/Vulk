@@ -32,6 +32,7 @@ void Settings::LoadFromFile(const std::string& path) {
         else if (key == "maxAnisotropy") maxAnisotropy = std::stof(value);
 		else if (key == "msaaSamples") msaaSamples = std::stoi(value);
         else if (key == "showStats") showStats = (value == "true" || value == "1");
+        else if (key == "timeScale") timeScale = std::stof(value);
         else if (key == "windowWidth") windowWidth = std::stoi(value);
         else if (key == "windowHeight") windowHeight = std::stoi(value);
         else if (key == "fullscreen") fullscreen = (value == "true" || value == "1");
@@ -58,6 +59,7 @@ void Settings::SaveToFile(const std::string& path) const {
     file << "maxAnisotropy " << maxAnisotropy << "\n";
 	file << "msaaSamples " << msaaSamples << "\n";
     file << "showStats " << (showStats ? "true" : "false") << "\n";
+    file << "timeScale " << timeScale << "\n";
     file << "windowWidth " << windowWidth << "\n";
     file << "windowHeight " << windowHeight << "\n";
     file << "fullscreen " << (fullscreen ? "true" : "false") << "\n";

@@ -1,28 +1,10 @@
 #version 450
+#include "common_structures.glsl"
 
 layout(location = 0) in vec3 inInstancePos;
 layout(location = 1) in float inInstanceRotation;
 layout(location = 2) in vec3 inInstanceScale;
 layout(location = 3) in float inInstanceWindOffset;
-
-layout(set = 0, binding = 0) uniform UniformBufferObject {
-    mat4 view;
-    mat4 proj;
-    vec3 cameraPos;
-    float ambient;
-    vec4 fadeParams;
-    vec2 screenSize;
-    float specularPower;
-    uint lightCount;
-    float fogStart;
-    float fogEnd;
-    vec2 _pad2;
-    vec4 sunDirection;
-    vec4 sunColor;
-    mat4 inverseViewProj;
-    mat4 inverseProj;
-    mat4 inverseView;
-} ubo;
 
 layout(push_constant) uniform PushConstants {
     float time;

@@ -1,25 +1,8 @@
 #version 450
+#include "common_structures.glsl"
+
 layout(location = 0) in vec3 inViewDir;
 layout(location = 0) out vec4 outColor;
-
-layout(set = 0, binding = 0) uniform UniformBufferObject {
-    mat4 view;
-    mat4 proj;
-    vec3 cameraPos;
-    float ambient;
-    vec4 fadeParams;
-    vec2 screenSize;
-    float specularPower;
-    uint lightCount;
-    float fogStart;
-    float fogEnd;
-    vec2 _pad2;
-    vec4 sunDirection;
-    vec4 sunColor;
-    mat4 inverseViewProj;
-    mat4 inverseProj;
-    mat4 inverseView;
-} ubo;
 
 float hash(vec3 p) {
     p = fract(p * 0.3183099 + 0.1);
