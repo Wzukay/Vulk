@@ -72,25 +72,27 @@ void main() {
                                sphereNormal.x * s + sphereNormal.z * c));
 
     // ---- Wind ----
-    float bendFactor = heightNorm * heightNorm;
-    float adjustedTime = push.time * push.windSpeed + inInstanceWindOffset;
-
-    float baseWave = sin(adjustedTime + inInstancePos.x * 0.15 + inInstancePos.z * 0.15);
-    float microFlutter = sin(adjustedTime * 2.5 + inInstancePos.y) * cos(adjustedTime * 1.8);
-    float totalWave = (baseWave * 1.2 + microFlutter * 0.3);
-
-    // ---- Gust envelope ----
-    float gustTime = push.time * 0.15 + inInstancePos.x * 0.005 + inInstancePos.z * 0.007;
-    float gust = sin(gustTime) * 0.5 + 0.5;
-    gust = gust * 0.4 + 0.8;
-    float finalWindStrength = push.windStrength * gust;
-
-    float windMultiplier = 0.7 + 0.6 * bladeRand;
     float windScale = 1.0 - push.lodFactor;
 
-    rotatedPos.x += totalWave * finalWindStrength * windScale * bendFactor * windMultiplier * 0.5;
-    rotatedPos.z += totalWave * finalWindStrength * 0.2 * windScale * bendFactor * windMultiplier;
-    rotatedPos.y -= (totalWave * totalWave) * finalWindStrength * 0.05 * windScale * bendFactor * windMultiplier;
+    if(windScale > 0.1f){
+        float windMultiplier = 0.7 + 0.6 * bladeRand;
+
+        float bendFactor = heightNorm * heightNorm;
+        float adjustedTime = push.time * push.windSpeed + inInstanceWindOffset;
+
+        float baseWave = sin(adjustedTime + inInstancePos.x * 0.15 + inInstancePos.z * 0.15);
+        float microFlutter = sin(adjustedTime * 2.5 + inInstancePos.y) * cos(adjustedTime * 1.8);
+        float totalWave = (baseWave * 1.2 + microFlutter * 0.3);
+
+        // ---- Gust envelope ----
+        float gustTime = push.time * 0.15 + inInstancePos.x * 0.005 + inInstancePos.z * 0.007;
+        float gust = (sin(gustTime) * 0.5 + 0.5) * 0.4 + 0.8;
+        float finalWindStrength = push.windStrength * gust;
+
+        rotatedPos.x += totalWave * finalWindStrength * windScale * bendFactor * windMultiplier * 0.5;
+        rotatedPos.z += totalWave * finalWindStrength * 0.2 * windScale * bendFactor * windMultiplier;
+        rotatedPos.y -= (totalWave * totalWave) * finalWindStrength * 0.05 * windScale * bendFactor * windMultiplier;
+    }
 
     outWorldPos = rotatedPos + inInstancePos;
     gl_Position = ubo.proj * ubo.view * vec4(outWorldPos, 1.0);

@@ -225,6 +225,8 @@
     <None Include="shaders\boid.frag" />
     <None Include="shaders\boid.vert" />
     <None Include="shaders\common_structures.glsl" />
+    <None Include="shaders\default.frag" />
+    <None Include="shaders\default.vert" />
     <None Include="shaders\fsr.frag" />
     <None Include="shaders\grass.frag" />
     <None Include="shaders\grass.vert" />

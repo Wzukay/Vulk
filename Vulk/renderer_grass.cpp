@@ -135,10 +135,15 @@ void GrassRenderer::Draw(VkCommandBuffer commandBuffer, VkDescriptorSet sharedDe
         float lodStart = maxGrassDist * 0.75f;
         float lodFactor = std::clamp((dist - lodStart) / (maxGrassDist - lodStart), 0.0f, 1.0f);
 
+        uint32_t vertexCount = 12;
+        if (dist > maxGrassDist * 0.5f) {
+            vertexCount = 6;
+        }
+
         // Push constants
         GrassPushConstants push{};
         push.time = time;
-        push.textureId = 3;   // grass texture index, adjust if needed
+        push.textureId = 3;
         push.windStrength = 1.7f;
         push.windSpeed = 2.5f;
         push.lodFactor = lodFactor;
@@ -151,7 +156,8 @@ void GrassRenderer::Draw(VkCommandBuffer commandBuffer, VkDescriptorSet sharedDe
         VkBuffer buffers[] = { chunk.instanceBuffer };
         VkDeviceSize offsets[] = { 0 };
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, buffers, offsets);
-        vkCmdDraw(commandBuffer, 12, chunk.instanceCount, 0, 0);
+
+        vkCmdDraw(commandBuffer, vertexCount, chunk.instanceCount, 0, 0);
 
         outDrawCalls++;
     }
