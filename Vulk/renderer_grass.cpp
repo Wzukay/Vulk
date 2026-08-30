@@ -198,13 +198,18 @@ void GrassRenderer::Cull(VkCommandBuffer commandBuffer) {
 
     for (const auto* chunk : m_visibleChunksThisFrame) {
         float dist = glm::length(chunk->center - camPos);
-        uint32_t vertexCount = (dist > maxGrassDist * 0.5f) ? 6 : 12; // LOD Logic
+        uint32_t vertexCount = 9; // LOD Logic
 
         GrassComputePushConstants cPush{};
         cPush.cameraPos = camPos;
         cPush.maxDist = maxGrassDist;
         cPush.totalInstances = chunk->instanceCount;
         cPush.vertexCount = vertexCount;
+
+        const auto& planes = m_renderer->GetFrustumPlanes(); // You'll need to add a quick getter for this in renderer.h
+        for (int i = 0; i < 6; ++i) {
+            cPush.frustumPlanes[i] = glm::vec4(planes[i].normal, planes[i].distance);
+        }
 
         vkCmdPushConstants(commandBuffer, m_computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(GrassComputePushConstants), &cPush);
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_computePipelineLayout, 0, 1, &chunk->computeDescriptorSet, 0, nullptr);

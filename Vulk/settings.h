@@ -10,6 +10,7 @@ struct Settings {
     bool enableSSAO = true;
     int maxMipLevels = 4;
     bool vsync = false;
+    int frameCap = 0;
     bool anisotropicFiltering = true;
     float maxAnisotropy = 16.0f;
     int msaaSamples = 4;

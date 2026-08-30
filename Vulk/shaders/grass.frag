@@ -5,10 +5,11 @@
 layout(location = 0) in vec2 inUV;
 layout(location = 1) in vec3 inWorldPos;
 layout(location = 2) in vec3 inNormal;
-layout(location = 3) in float inBladeRand;
 
 layout(location = 0) out vec4 outColor;
 
+// Kept the binding so the pipeline layout descriptor doesn't complain, 
+// even though we aren't sampling it anymore.
 layout(set = 0, binding = 2) uniform sampler2D textureSamplers[128];
 
 layout(push_constant) uniform PushConstants {
@@ -20,27 +21,30 @@ layout(push_constant) uniform PushConstants {
 } push;
 
 void main() {
-    vec4 texColor = texture(textureSamplers[push.textureId], inUV);
+    // --- 1. Procedural Geometry Color (NO TEXTURES, NO DISCARD) ---
+    vec3 rootColor = vec3(0.008, 0.035, 0.006);
+    vec3 tipColor  = vec3(0.065, 0.220, 0.030);
+    
+    // Use inUV.y to blend from root to tip
+    vec3 baseAlbedo = mix(rootColor, tipColor, inUV.y);
 
-    // 1. Base Cutout
-    if (texColor.a < 0.3 || length(texColor.rgb) < 0.15) discard;
-
-    // 2. Screen-Space Dithered LOD Dissolve
-    float ditherNoise = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
     float distToCam = length(ubo.cameraPos - inWorldPos);
 
     float maxFadeDistance = ubo.fadeParams.w; 
-    float fadeStartDistance = ubo.fadeParams.z; 
-    
-    float fadeAlpha = 1.0 - clamp((distToCam - fadeStartDistance) / (maxFadeDistance - fadeStartDistance), 0.0, 1.0);
-    
-    if (ditherNoise > fadeAlpha) {
-        discard;
+    float fadeStartDistance = ubo.fadeParams.z;
+
+    if (distToCam > fadeStartDistance) {
+        float ditherNoise = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+        float fadeAlpha = 1.0 - clamp((distToCam - fadeStartDistance) / (maxFadeDistance - fadeStartDistance), 0.0, 1.0);
+        
+        if (ditherNoise > fadeAlpha) {
+            discard;
+        }
     }
 
-    // 3. Dynamic Day/Night Lighting
+    // --- 2. Dynamic Day/Night Lighting ---
     vec3 N = normalize(inNormal);
-    vec3 lightDir = normalize(ubo.sunDirection.xyz); // <-- Now tracks the sun/moon!
+    vec3 lightDir = normalize(ubo.sunDirection.xyz);
     
     // N dot L for smooth shading
     float diff = max(0.0, dot(N, lightDir));
@@ -49,9 +53,10 @@ void main() {
     vec3 ambientLight = vec3(ubo.ambient);
     vec3 directionalLight = ubo.sunColor.rgb * ubo.sunColor.a * diff;
     
-    vec3 litColor = texColor.rgb * (ambientLight + directionalLight);
+    // Apply lighting to our procedural geometry color
+    vec3 litColor = baseAlbedo * (ambientLight + directionalLight);
 
-    // 4. Dynamic Time-of-Day Fog (STYLIZED)
+    // --- 3. Dynamic Time-of-Day Fog (STYLIZED) ---
     float fogFactor = clamp((distToCam - ubo.fogStart) / (ubo.fogEnd - ubo.fogStart), 0.0, 1.0);
     if (distToCam > ubo.fogEnd) fogFactor = 1.0;
     

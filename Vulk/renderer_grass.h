@@ -53,6 +53,10 @@ struct GrassComputePushConstants {
     float maxDist;
     uint32_t totalInstances;
     uint32_t vertexCount;
+
+    glm::vec2 _padding;
+
+    glm::vec4 frustumPlanes[6];
 };
 
 class GrassRenderer {

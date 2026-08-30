@@ -1753,6 +1753,21 @@ void VulkanRenderer::DrawGUI() {
 	ImGui::Text("Ms/Frame: %.3f ms", 1000.0f / ImGui::GetIO().Framerate);
 
 	ImGui::Separator();
+	ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "PACING");
+
+	if (!g_Settings.vsync) {
+		if (g_Settings.frameCap == 0) {
+			ImGui::Text("Frame Cap: Uncapped");
+		}
+		else {
+			ImGui::Text("Frame Cap: %d FPS", g_Settings.frameCap);
+		}
+	}
+	else {
+		ImGui::Text("V-Sync Active");
+	}
+
+	ImGui::Separator();
 
 	// GEOMETRY SECTION
 	ImGui::TextColored(ImVec4(0.0f, 0.7f, 1.0f, 1.0f), "GEOMETRY");

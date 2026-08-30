@@ -28,6 +28,7 @@ void Settings::LoadFromFile(const std::string& path) {
         else if (key == "grassFadeEnd") grassFadeEnd = std::stof(value);
         else if (key == "maxMipLevels") maxMipLevels = std::stoi(value);
         else if (key == "vsync") vsync = (value == "true" || value == "1");
+        else if (key == "frameCap") frameCap = std::stoi(value);
         else if (key == "anisotropicFiltering") anisotropicFiltering = (value == "true" || value == "1");
         else if (key == "maxAnisotropy") maxAnisotropy = std::stof(value);
 		else if (key == "msaaSamples") msaaSamples = std::stoi(value);
@@ -55,6 +56,7 @@ void Settings::SaveToFile(const std::string& path) const {
     file << "grassFadeEnd " << grassFadeEnd << "\n";
     file << "maxMipLevels " << maxMipLevels << "\n";
     file << "vsync " << (vsync ? "true" : "false") << "\n";
+    file << "frameCap " << frameCap << "\n";
     file << "anisotropicFiltering " << (anisotropicFiltering ? "true" : "false") << "\n";
     file << "maxAnisotropy " << maxAnisotropy << "\n";
 	file << "msaaSamples " << msaaSamples << "\n";

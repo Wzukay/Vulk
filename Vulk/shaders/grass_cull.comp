@@ -32,6 +32,7 @@ layout(push_constant) uniform ComputePush {
     float maxDist;
     uint totalInstances;
     uint vertexCount;
+    vec4 frustumPlanes[6];
 } push;
 
 void main() {
@@ -43,6 +44,12 @@ void main() {
     // Distance cull per blade
     float dist = distance(push.cameraPos, inst.position);
     if (dist > push.maxDist) return;
+
+    for (int i = 0; i < 6; i++) {
+        if (dot(push.frustumPlanes[i].xyz, inst.position) + push.frustumPlanes[i].w + 10.0 < 0.0) {
+        return; 
+    }
+    }
 
     // Atomically claim a spot in the output buffer
     uint outIdx = atomicAdd(drawCommand.instanceCount, 1);

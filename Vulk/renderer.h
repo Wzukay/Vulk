@@ -313,6 +313,7 @@ private:
     void UpdateFrustumPlanes(const glm::mat4& viewProj);
 
 public:
+    const std::array<FrustumPlane, 6>& GetFrustumPlanes() const { return frustumPlanes; }
     const glm::vec3& GetCameraPosition() const { return cameraPosition; }
     bool IsSphereInFrustum(const glm::vec3& center, float radius) const;
     bool IsWorldSphereInFrustum(const glm::vec3& center, float radius) const { // NEW

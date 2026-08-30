@@ -1,6 +1,5 @@
 #include "game.h"
 
-
 GameLogger debugLog;
 static glm::vec3 lastCamPos;
 extern ControlMode g_CurrentMode;
@@ -99,6 +98,9 @@ void Game::Loop()
     DayNightManager dayNight;
 
     while (!renderer.ShouldClose() && isRunning) {
+        // --- NEW: Record Frame Start Time ---
+        auto frameStartTime = std::chrono::high_resolution_clock::now();
+
         double currentFrameTime = glfwGetTime();
         float deltaTime = std::min(static_cast<float>(currentFrameTime - lastFrameTime), 0.1f);
         lastFrameTime = currentFrameTime;
@@ -138,6 +140,23 @@ void Game::Loop()
         }
 
         renderer.DrawFrame();
+
+        if (g_Settings.frameCap > 0 && !g_Settings.vsync) {
+            double targetMs = 1000.0 / g_Settings.frameCap;
+
+            while (true) {
+                auto currentTime = std::chrono::high_resolution_clock::now();
+                double elapsedMs = std::chrono::duration<double, std::milli>(currentTime - frameStartTime).count();
+
+                if (elapsedMs >= targetMs) {
+                    break;
+                }
+
+                if (targetMs - elapsedMs > 1.0) {
+                    std::this_thread::yield();
+                }
+            }
+        }
     }
 
     std::cout << "Closing and dropping pipelines...\n";

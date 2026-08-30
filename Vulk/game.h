@@ -11,6 +11,7 @@
 #include "day_night.h"
 
 #include <chrono>
+#include <thread>
 #include <random>
 #include <iostream>
 #include <string>
