@@ -52,7 +52,7 @@ void TerrainRenderer::Init(VkDevice device, VulkanRenderer* renderer,
 
     CreateComputePipeline();
 
-    VkDescriptorPoolSize poolSizes[2];
+    VkDescriptorPoolSize poolSizes[2] = {};
     poolSizes[0] = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3 * FRAMES_IN_FLIGHT };
     poolSizes[1] = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, FRAMES_IN_FLIGHT };
 
@@ -115,6 +115,12 @@ void TerrainRenderer::Tick(uint64_t currentFrame) {
         m_freeVertexSpans.push_back(ret.vertexSpan);
         m_freeIndexSpans.push_back(ret.indexSpan);
         });
+
+    // Fix 5: Prevent unbounded cache growth 
+    std::lock_guard<std::mutex> lock(m_heightCacheMutex);
+    if (m_heightCache.size() > 50000) {
+        m_heightCache.clear();
+    }
 }
 
 void TerrainRenderer::AddTerrainChunk(int64_t key, int cx, int cz, int lod,
@@ -172,14 +178,27 @@ void TerrainRenderer::Cull(VkCommandBuffer commandBuffer, const glm::vec3& camer
 
     TerrainChunkGPUData* chunkDataMapped = m_chunkDataMappedPtrs[currentFrameIndex];
 
-    uint32_t chunkIndex = 0;
-    for (auto& [key, chunk] : m_terrainChunks) {
-        if (chunkIndex >= MAX_TERRAIN_CHUNKS) break;
+    // --- 1. GATHER AND SORT CHUNKS FRONT-TO-BACK ---
+    std::vector<std::pair<float, const TerrainChunkGPU*>> sortedChunks;
+    sortedChunks.reserve(m_terrainChunks.size());
+
+    for (const auto& [key, chunk] : m_terrainChunks) {
         if (!chunk.ready) continue;
+        float distSq = glm::length2(chunk.center - cameraPos);
+        sortedChunks.push_back({ distSq, &chunk });
+    }
+
+    std::sort(sortedChunks.begin(), sortedChunks.end(),
+        [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    uint32_t chunkIndex = 0;
+    for (const auto& pair : sortedChunks) {
+        if (chunkIndex >= MAX_TERRAIN_CHUNKS) break;
+        const TerrainChunkGPU* chunk = pair.second;
 
         chunkDataMapped[chunkIndex] = {
-            glm::vec4(chunk.center, chunk.radius),
-            chunk.indexCount, chunk.indexOffset, chunk.vertexOffset, static_cast<uint32_t>(chunk.lod)
+            glm::vec4(chunk->center, chunk->radius),
+            chunk->indexCount, chunk->indexOffset, chunk->vertexOffset, static_cast<uint32_t>(chunk->lod)
         };
         chunkIndex++;
     }
@@ -197,15 +216,7 @@ void TerrainRenderer::Cull(VkCommandBuffer commandBuffer, const glm::vec3& camer
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_computePipeline);
     vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_computePipelineLayout, 0, 1, &m_computeDescriptorSets[currentFrameIndex], 0, nullptr);
 
-    // --- NEW: Simplified Push Constants ---
-    struct ComputePush {
-        glm::mat4 viewProj;
-        glm::vec3 cameraPos;
-        uint32_t totalChunks;
-        glm::vec2 hzbSize;
-        float maxMip;
-    } computePush;
-
+    ComputePush computePush{};
     computePush.viewProj = viewProj;
     computePush.cameraPos = cameraPos;
     computePush.totalChunks = chunkIndex;

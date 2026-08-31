@@ -17,21 +17,13 @@ void Chunk::Init(VulkanRenderer& renderer) {
 
     m_chunkSize = chunkSize;
 }
-float GetClosestChunkDistance(const glm::vec3& cameraPos, const glm::vec3& chunkCenter, float chunkSize) {
-    float distToCenter = glm::distance(cameraPos, chunkCenter);
-    // 0.75f is roughly half the diagonal of a square (0.707), with a tiny bit of extra safety padding
-    float chunkRadius = chunkSize * 0.75f;
-
-    // Never return a negative distance if we are standing inside the chunk
-    return std::max(0.0f, distToCenter - chunkRadius);
-}
 uint32_t Chunk::Hash2D(int x, int z, int seed) {
     uint32_t h = static_cast<uint32_t>(seed);
     h ^= static_cast<uint32_t>(x) * 374761393U + static_cast<uint32_t>(z) * 668265263U;
     h = (h ^ (h >> 13)) * 1274126177U;
     return h ^ (h >> 16);
 }
-std::string ChunkName(int cx, int cz) {
+static std::string ChunkName(int cx, int cz) {
     return "terrain_chunk_" + std::to_string(cx) + "_" + std::to_string(cz);
 }
 int Chunk::DesiredLodForDistance(float distToCenter) const {
@@ -57,65 +49,7 @@ int Chunk::DesiredLodForDistance(float distToCenter) const {
     // LOD 0: High Poly Everything
     return 0;
 }
-float Chunk::GetHeight(float worldX, float worldZ) {
-    return CalculateHeightAndColor(worldX, worldZ).first;
-}
-float Chunk::GetCachedHeightFromGrid(float worldX, float worldZ) {
-    // 1. Convert world coordinates to chunk grid coordinates
-    int chunkX = static_cast<int>(std::floor(worldX / m_chunkSize));
-    int chunkZ = static_cast<int>(std::floor(worldZ / m_chunkSize));
 
-    int64_t chunkKey = ChunkCoord{ chunkX, chunkZ }.Key();
-    auto it = s_activeChunkGrids.find(chunkKey);
-
-    // Fallback: If chunk isn't loaded in memory yet, evaluate raw noise.
-    // NOTE: CalculateHeightAndColor MUST be a static method for this line to compile!
-    if (it == s_activeChunkGrids.end() || it->second.heightData.empty()) {
-        return CalculateHeightAndColor(worldX, worldZ).first;
-    }
-
-    // 2. Get normalized local position within the chunk [0.0 to 1.0]
-    float localX = (worldX - (chunkX * m_chunkSize)) / m_chunkSize;
-    float localZ = (worldZ - (chunkZ * m_chunkSize)) / m_chunkSize;
-
-    // 3. Map to exact array cell indices
-    const int res = it->second.resolution;
-    float gridX = localX * (res - 1);
-    float gridZ = localZ * (res - 1);
-
-    int x0 = std::clamp(static_cast<int>(gridX), 0, res - 2);
-    int z0 = std::clamp(static_cast<int>(gridZ), 0, res - 2);
-    int x1 = x0 + 1;
-    int z1 = z0 + 1;
-
-    // 4. Fetch the 4 corner heights from the cached array
-    const auto& heights = it->second.heightData;
-    float h00 = heights[z0 * res + x0];
-    float h10 = heights[z0 * res + x1];
-    float h01 = heights[z1 * res + x0];
-    float h11 = heights[z1 * res + x1];
-
-    // 5. Bilinear interpolation for smooth sub-grid height estimation
-    float tx = gridX - x0;
-    float tz = gridZ - z0;
-    float h0 = std::lerp(h00, h10, tx);
-    float h1 = std::lerp(h01, h11, tx);
-
-    return std::lerp(h0, h1, tz);
-}
-void Chunk::RemoveGridCache(int64_t chunkKey) {
-    s_activeChunkGrids.erase(chunkKey);
-}
-bool Chunk::HasCameraShiftedNoticeably(const glm::vec3& camPos, const glm::vec3& camForward) {
-    glm::vec3 diff = camPos - m_lastPreGenCamPos;
-    float distSq = glm::dot(diff, diff);
-    if (distSq > (MOVE_THRESHOLD * MOVE_THRESHOLD)) return true;
-
-    float angleCos = glm::dot(glm::normalize(camForward), glm::normalize(m_lastPreGenCamForward));
-    if (angleCos < ROTATE_THRESHOLD) return true;
-
-    return false;
-}
 glm::vec3 Chunk::ChunkBoundsCenter(int cx, int cz) const {
     float centerX = cx * chunkSize + chunkSize * 0.5f;
     float centerZ = cz * chunkSize + chunkSize * 0.5f;
@@ -126,6 +60,7 @@ float Chunk::ChunkBoundsRadius() const {
     float heightMargin = 100.0f;
     return std::sqrt(footprintRadius * footprintRadius + heightMargin * heightMargin);
 }
+
 std::vector<glm::vec2> Chunk::ConvexHull(std::vector<glm::vec2> points) {
     if (points.size() <= 3) return points;
     std::sort(points.begin(), points.end(),
@@ -461,78 +396,6 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
     return false;
 }
 
-void Chunk::PreGenerateChunks(const glm::vec3& camPos, Scene& scene, VulkanRenderer& renderer) {
-    if (m_shuttingDown) return;
-
-    glm::vec3 diff = camPos - m_lastPreGenCamPos;
-    float distSq = glm::dot(diff, diff);
-    if (distSq < (MOVE_THRESHOLD * MOVE_THRESHOLD)) return;
-    m_lastPreGenCamPos = camPos;
-
-    int camChunkX = (int)std::floor(camPos.x / chunkSize);
-    int camChunkZ = (int)std::floor(camPos.z / chunkSize);
-    int preGenRadius = viewDistanceChunks + 2;
-
-    size_t preGenDispatchedThisFrame = 0;
-    const size_t MAX_PREGEN_PER_FRAME_BUDGET = 2;
-
-    for (int dz = -preGenRadius; dz <= preGenRadius; ++dz) {
-        for (int dx = -preGenRadius; dx <= preGenRadius; ++dx) {
-            if (preGenDispatchedThisFrame >= MAX_PREGEN_PER_FRAME_BUDGET) return;
-
-            int cx = camChunkX + dx;
-            int cz = camChunkZ + dz;
-            int64_t key = ChunkCoord{ cx, cz }.Key();
-
-            if (m_desiredKeysLookup.find(key) != m_desiredKeysLookup.end()) continue;
-
-            glm::vec3 center = ChunkBoundsCenter(cx, cz);
-            float distanceToCam = glm::distance(center, camPos);
-            int desiredLod = DesiredLodForDistance(distanceToCam);
-
-            int targetResolution = resolution;
-            if (desiredLod == 1)      targetResolution = ((resolution - 1) / 2) + 1;
-            else if (desiredLod == 2) targetResolution = ((resolution - 1) / 4) + 1;
-
-            if (loadedChunks.find(key) != loadedChunks.end() && loadedChunks[key] <= desiredLod) continue;
-            if (loadingChunks.find(key) != loadingChunks.end() && loadingChunks[key] == desiredLod) continue;
-
-            float radius = ChunkBoundsRadius();
-            if (!renderer.IsWorldSphereInFrustum(center, radius)) continue;
-
-            if (loadingChunks.find(key) != loadingChunks.end()) {
-                for (auto& activeJob : asyncResults) {
-                    if (activeJob.key == key) {
-                        activeJob.cancelToken->store(true, std::memory_order_relaxed);
-                    }
-                }
-            }
-
-            loadingChunks[key] = desiredLod;
-            preGenDispatchedThisFrame++;
-
-            auto cancelToken = std::make_shared<std::atomic<bool>>(false);
-            float size = chunkSize;
-            int s = s_globalSeed;
-
-            auto future = threadPool.Enqueue([cx, cz, targetResolution, size, key, desiredLod, cancelToken, this]() {
-                ChunkJobResult jobData;
-                jobData.coord = ChunkCoord{ cx, cz };
-                jobData.lod = desiredLod;
-
-                PooledMeshBuffers buffers = m_bufferPool.Acquire();
-                jobData.vertices = std::move(buffers.vertices);
-                jobData.indices = std::move(buffers.indices);
-
-                GenerateChunk(cx, cz, targetResolution, size, jobData, cancelToken);
-                return jobData;
-                });
-
-            asyncResults.push_back({ std::move(future), cancelToken, key });
-        }
-    }
-}
-
 std::pair<float, glm::vec3> Chunk::CalculateHeightAndColor(float worldX, float worldZ) {
     // ========================================================================
     // EXPERIMENT V4 - BROAD GEOLOGY + DIRECTIONAL MOUNTAIN CHAINS
@@ -800,7 +663,7 @@ std::pair<float, glm::vec3> Chunk::CalculateHeightAndColor(float worldX, float w
     float m = clamp01(n01(moistNoise.GetNoise(worldX, worldZ)));
     const float BLEND_RANGE = 0.035f;
 
-    BiomeProperties properties[4];
+    BiomeProperties properties[4] = {};
     properties[0] = GetBiomeProperties(DetermineBiome(clamp01(t - BLEND_RANGE), clamp01(m - BLEND_RANGE)));
     properties[1] = GetBiomeProperties(DetermineBiome(clamp01(t + BLEND_RANGE), clamp01(m - BLEND_RANGE)));
     properties[2] = GetBiomeProperties(DetermineBiome(clamp01(t - BLEND_RANGE), clamp01(m + BLEND_RANGE)));
@@ -811,6 +674,55 @@ std::pair<float, glm::vec3> Chunk::CalculateHeightAndColor(float worldX, float w
             properties[2].textureWeights + properties[3].textureWeights) * 0.25f;
 
     return { height, blendedWeights };
+}
+float Chunk::GetHeight(float worldX, float worldZ) {
+    return CalculateHeightAndColor(worldX, worldZ).first;
+}
+float Chunk::GetCachedHeightFromGrid(float worldX, float worldZ) {
+    // 1. Convert world coordinates to chunk grid coordinates
+    int chunkX = static_cast<int>(std::floor(worldX / m_chunkSize));
+    int chunkZ = static_cast<int>(std::floor(worldZ / m_chunkSize));
+
+    int64_t chunkKey = ChunkCoord{ chunkX, chunkZ }.Key();
+    auto it = s_activeChunkGrids.find(chunkKey);
+
+    // Fallback: If chunk isn't loaded in memory yet, evaluate raw noise.
+    // NOTE: CalculateHeightAndColor MUST be a static method for this line to compile!
+    if (it == s_activeChunkGrids.end() || it->second.heightData.empty()) {
+        return CalculateHeightAndColor(worldX, worldZ).first;
+    }
+
+    // 2. Get normalized local position within the chunk [0.0 to 1.0]
+    float localX = (worldX - (chunkX * m_chunkSize)) / m_chunkSize;
+    float localZ = (worldZ - (chunkZ * m_chunkSize)) / m_chunkSize;
+
+    // 3. Map to exact array cell indices
+    const int res = it->second.resolution;
+    float gridX = localX * (res - 1);
+    float gridZ = localZ * (res - 1);
+
+    int x0 = std::clamp(static_cast<int>(gridX), 0, res - 2);
+    int z0 = std::clamp(static_cast<int>(gridZ), 0, res - 2);
+    int x1 = x0 + 1;
+    int z1 = z0 + 1;
+
+    // 4. Fetch the 4 corner heights from the cached array
+    const auto& heights = it->second.heightData;
+    float h00 = heights[z0 * res + x0];
+    float h10 = heights[z0 * res + x1];
+    float h01 = heights[z1 * res + x0];
+    float h11 = heights[z1 * res + x1];
+
+    // 5. Bilinear interpolation for smooth sub-grid height estimation
+    float tx = gridX - x0;
+    float tz = gridZ - z0;
+    float h0 = std::lerp(h00, h10, tx);
+    float h1 = std::lerp(h01, h11, tx);
+
+    return std::lerp(h0, h1, tz);
+}
+void Chunk::RemoveGridCache(int64_t chunkKey) {
+    s_activeChunkGrids.erase(chunkKey);
 }
 
 void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSize,
@@ -897,7 +809,7 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
             float hD = GetCachedHeight(x, z - 1);
             float hU = GetCachedHeight(x, z + 1);
 
-            ModelVertex v;
+            ModelVertex v{};
             v.pos = glm::vec3(worldX, h, worldZ);
             v.texCoord = glm::vec2(worldX * 0.02f, worldZ * 0.02f);
             v.color = GetCachedColor(x, z);
@@ -974,6 +886,7 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
         outResult.indices.size(),
         outResult.vertices.size()
     );
+
     std::vector<ModelVertex> rearrangedVertices(outResult.vertices.size());
     meshopt_optimizeVertexFetch(
         rearrangedVertices.data(),
@@ -1015,7 +928,7 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
 
         if (v.normal.y > 0.75f && v.pos.y > -5.0f && v.color.y >= 0.8f) {
             for (int n = 0; n < bladesPerVertex; n++) {
-                GrassInstance inst;
+                GrassInstance inst{};
 
                 float jitterX = (fastRand(rngState) - 0.5f) * 2.0f * JITTER_RADIUS;
                 float jitterZ = (fastRand(rngState) - 0.5f) * 2.0f * JITTER_RADIUS;
@@ -1041,7 +954,6 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
         }
     }
 }
-
 void Chunk::GenerateChunkTrees(int chunkX, int chunkZ, int lod, ChunkJobResult& outResult) {
     // CPU CULL: Stop generating trees if the chunk is LOD 4 or higher (past treeFadeEnd)
     if (lod >= 4) {
@@ -1076,7 +988,7 @@ void Chunk::GenerateChunkTrees(int chunkX, int chunkZ, int lod, ChunkJobResult& 
                     auto [groundY, biomeColor] = CalculateHeightAndColor(x, z);
 
                     if (groundY > 2.0f && groundY < 85.0f && biomeColor.y >= 0.7f) {
-                        TreeInstance tree;
+                        TreeInstance tree{};
                         tree.position = glm::vec3(x, groundY, z);
                         tree.rotation = glm::vec3(0.0f, static_cast<float>(coordHash % 360), 0.0f);
 
@@ -1090,7 +1002,6 @@ void Chunk::GenerateChunkTrees(int chunkX, int chunkZ, int lod, ChunkJobResult& 
         }
     }
 }
-
 void Chunk::GenerateChunkSwarms(int chunkX, int chunkZ, int lod, ChunkJobResult& outResult) {
     // Only spawn butterflies in high-detail chunks (LOD 0 or 1)
     if (lod >= 2) return;
@@ -1105,7 +1016,7 @@ void Chunk::GenerateChunkSwarms(int chunkX, int chunkZ, int lod, ChunkJobResult&
     if (groundY < 80.0f && (coordHash % 100) < 40) {
         outResult.butterflies.reserve(46);
         for (int i = 0; i < 46; i++) {
-            BoidInstance b;
+            BoidInstance b{};
             float jitterX = ((coordHash * (i + 1) % 100) / 100.0f) * 30.0f - 15.0f;
             float jitterZ = ((coordHash * (i + 3) % 100) / 100.0f) * 30.0f - 15.0f;
 
@@ -1138,4 +1049,13 @@ void Chunk::Shutdown() {
         }
     }
     asyncResults.clear();
+}
+
+static float GetClosestChunkDistance(const glm::vec3& cameraPos, const glm::vec3& chunkCenter, float chunkSize) {
+    float distToCenter = glm::distance(cameraPos, chunkCenter);
+    // 0.75f is roughly half the diagonal of a square (0.707), with a tiny bit of extra safety padding
+    float chunkRadius = chunkSize * 0.75f;
+
+    // Never return a negative distance if we are standing inside the chunk
+    return std::max(0.0f, distToCenter - chunkRadius);
 }

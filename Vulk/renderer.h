@@ -45,14 +45,29 @@ struct QueueFamilyIndices {
     std::optional<uint32_t> graphicsFamily;
     std::optional<uint32_t> presentFamily;
 
-    bool isComplete() {
+    const bool isComplete() {
         return graphicsFamily.has_value() && presentFamily.has_value();
     }
 };
 struct SwapChainSupportDetails {
-    VkSurfaceCapabilitiesKHR capabilities;
+    VkSurfaceCapabilitiesKHR capabilities = {};
     std::vector<VkSurfaceFormatKHR> formats;
     std::vector<VkPresentModeKHR> presentModes;
+};
+
+struct RenderTarget {
+    VkImage image = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkImageView view = VK_NULL_HANDLE;
+    VkSampler sampler = VK_NULL_HANDLE; // leave VK_NULL_HANDLE if this target has no dedicated sampler
+
+    void Destroy(VkDevice device) {
+        if (device == VK_NULL_HANDLE) return;
+        if (sampler != VK_NULL_HANDLE) { vkDestroySampler(device, sampler, nullptr); sampler = VK_NULL_HANDLE; }
+        if (view != VK_NULL_HANDLE) { vkDestroyImageView(device, view, nullptr);  view = VK_NULL_HANDLE; }
+        if (image != VK_NULL_HANDLE) { vkDestroyImage(device, image, nullptr);     image = VK_NULL_HANDLE; }
+        if (memory != VK_NULL_HANDLE) { vkFreeMemory(device, memory, nullptr);      memory = VK_NULL_HANDLE; }
+    }
 };
 
 class VulkanRenderer {
@@ -130,10 +145,7 @@ private:
     std::vector<VkImageView> swapChainImageViews;
 
     // --- Offscreen 3D Targets ---
-    VkImage offscreenResolveImage = VK_NULL_HANDLE;
-    VkDeviceMemory offscreenResolveImageMemory = VK_NULL_HANDLE;
-    VkImageView offscreenResolveImageView = VK_NULL_HANDLE;
-    VkSampler offscreenSampler = VK_NULL_HANDLE;
+    RenderTarget offscreenTarget;
 
     // --- Composition Pipeline (Native Res UI) ---
     VkPipeline compositionPipeline = VK_NULL_HANDLE;
@@ -142,13 +154,8 @@ private:
     VkDescriptorPool compositionDescriptorPool = VK_NULL_HANDLE;
     VkDescriptorSet compositionDescriptorSet = VK_NULL_HANDLE;
 
-    VkImage depthImage = VK_NULL_HANDLE;
-    VkDeviceMemory depthImageMemory = VK_NULL_HANDLE;
-    VkImageView depthImageView = VK_NULL_HANDLE;
-
-    VkImage colorImage = VK_NULL_HANDLE;
-    VkDeviceMemory colorImageMemory = VK_NULL_HANDLE;
-    VkImageView colorImageView = VK_NULL_HANDLE;
+    RenderTarget depthTarget;  // .sampler is the depth-read sampler used by SSAO/HZB
+    RenderTarget colorTarget;  // MSAA target; no dedicated sampler
 
     VkCommandPool commandPool = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> commandBuffers;
@@ -209,6 +216,7 @@ private:
 
 public:
     void DrawFrame();
+    void UpdateDRS();
 
 private:
     Settings currentSettings;
@@ -279,11 +287,8 @@ public:
 private:
     TerrainRenderer m_terrainRenderer;
 
-    VkImage hzbImage = VK_NULL_HANDLE;
-    VkDeviceMemory hzbImageMemory = VK_NULL_HANDLE;
-    VkImageView hzbImageView = VK_NULL_HANDLE;
+    RenderTarget hzbTarget;
     std::vector<VkImageView> hzbMipViews;
-    VkSampler hzbSampler = VK_NULL_HANDLE;
     uint32_t hzbMipLevels = 1;
     glm::vec2 hzbDimensions = { 0.0f, 0.0f };
 
@@ -362,11 +367,9 @@ public:
 
 private:
     // SSAO Resources
-    VkImage ssaoImage = VK_NULL_HANDLE;
-    VkDeviceMemory ssaoImageMemory = VK_NULL_HANDLE;
-    VkImageView ssaoImageView = VK_NULL_HANDLE;
-    VkSampler ssaoSampler = VK_NULL_HANDLE;
-    VkSampler depthSampler = VK_NULL_HANDLE;
+    RenderTarget ssaoTarget;         // .sampler is reused for reading ssaoBlurTarget/ssaoPingPongTarget too
+    RenderTarget ssaoPingPongTarget; // no dedicated sampler — sampled via ssaoTarget.sampler
+    RenderTarget ssaoBlurTarget;     // no dedicated sampler — sampled via ssaoTarget.sampler
 
     VkPipeline ssaoPipeline = VK_NULL_HANDLE;
     VkPipelineLayout ssaoPipelineLayout = VK_NULL_HANDLE;
@@ -377,15 +380,6 @@ private:
     VkBuffer ssaoUBO = VK_NULL_HANDLE;
     VkDeviceMemory ssaoUBOMemory = VK_NULL_HANDLE;
     SSAOUBO* ssaoUBOMapped = nullptr;
-
-    // Ping-Pong blur targets
-    VkImage ssaoPingPongImage = VK_NULL_HANDLE;
-    VkDeviceMemory ssaoPingPongImageMemory = VK_NULL_HANDLE;
-    VkImageView ssaoPingPongImageView = VK_NULL_HANDLE;
-
-    VkImage ssaoBlurImage = VK_NULL_HANDLE;
-    VkDeviceMemory ssaoBlurImageMemory = VK_NULL_HANDLE;
-    VkImageView ssaoBlurImageView = VK_NULL_HANDLE;
 
     VkPipeline ssaoBlurPipeline = VK_NULL_HANDLE;
     VkPipelineLayout ssaoBlurPipelineLayout = VK_NULL_HANDLE;

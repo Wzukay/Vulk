@@ -5,6 +5,9 @@
 #include <unordered_map>
 #include <string>
 #include <memory>
+#include <array>
+#include <mutex>
+#include <atomic>
 
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/glm.hpp>
@@ -23,19 +26,12 @@ struct GrassInstance {
 };
 
 struct GrassChunkGPU {
-    VkBuffer instanceBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory instanceMemory = VK_NULL_HANDLE;
-
-    // NEW: Compute Shader Output Buffers
-    VkBuffer culledBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory culledMemory = VK_NULL_HANDLE;
-
-    VkBuffer indirectBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory indirectMemory = VK_NULL_HANDLE;
-
-    VkDescriptorSet computeDescriptorSet = VK_NULL_HANDLE;
-
+    uint32_t instanceOffset = 0;
+    uint32_t indirectOffset = 0;
     uint32_t instanceCount = 0;
+
+    std::array<VkDescriptorSet, 3> computeDescriptorSets = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
+
     glm::vec3 center = glm::vec3(0.0f);
     float radius = 0.0f;
 };
@@ -59,6 +55,11 @@ struct GrassComputePushConstants {
     glm::vec4 frustumPlanes[6];
 };
 
+struct GrassGarbage {
+    std::array<VkDescriptorSet, 3> sets;
+    uint64_t safeFrame;
+};
+
 class GrassRenderer {
 public:
     void Init(VkDevice device, VulkanRenderer* renderer,
@@ -71,8 +72,8 @@ public:
     void AddGrass(int64_t key, const std::vector<GrassInstance>& grassInstances);
     void Tick(uint64_t currentFrame);
 
-    void Cull(VkCommandBuffer commandBuffer); // NEW: Compute step
-    void Draw(VkCommandBuffer commandBuffer, VkDescriptorSet sharedDescriptorSet, uint32_t& outDrawCalls) const;
+    void Cull(VkCommandBuffer commandBuffer, uint32_t currentFrameIndex);
+    void Draw(VkCommandBuffer commandBuffer, VkDescriptorSet sharedDescriptorSet, uint32_t currentFrameIndex, uint32_t& outDrawCalls) const;
 
     bool HasChunk(int64_t key) const;
     void RemoveChunk(int64_t key);
@@ -89,14 +90,39 @@ private:
     VulkanRenderer* m_renderer = nullptr;
     RingBufferUploader* m_uploader = nullptr;
 
-    // NEW: List to pass visible chunks from Cull to Draw
+    // --- SUBALLOCATOR GLOBALS ---
+    uint32_t m_maxInstances = 5000000;
+    uint32_t m_maxIndirect = 5000;
+
+    VkBuffer m_instanceBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_instanceMemory = VK_NULL_HANDLE;
+
+    std::array<VkBuffer, 3> m_culledBuffers = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
+    std::array<VkDeviceMemory, 3> m_culledMemories = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
+
+    std::array<VkBuffer, 3> m_indirectBuffers = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
+    std::array<VkDeviceMemory, 3> m_indirectMemories = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
+
+    struct FreeSpan { uint32_t offset; uint32_t count; };
+    struct SpanReturn { FreeSpan instanceSpan; FreeSpan indirectSpan; };
+
+    std::vector<FreeSpan> m_freeInstanceSpans;
+    std::vector<FreeSpan> m_freeIndirectSpans;
+    std::atomic<uint32_t> m_nextInstanceOffset{ 0 };
+    std::atomic<uint32_t> m_nextIndirectOffset{ 0 };
+    std::mutex m_allocMutex;
+    DeferredQueue<SpanReturn> m_pendingSpanReturns;
+    std::vector<GrassGarbage> m_garbageSets;
+
+    std::pair<uint32_t, uint32_t> AllocateSpace(uint32_t instanceCount, uint32_t indirectCount);
+    void DeferSpanReturn(const FreeSpan& instSpan, const FreeSpan& indSpan, uint64_t safeFrame);
+    // ----------------------------
+
     mutable std::vector<const GrassChunkGPU*> m_visibleChunksThisFrame;
 
-    // Graphics Pipeline
     VkPipeline m_pipeline = VK_NULL_HANDLE;
     VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
 
-    // Compute Pipeline Resources
     VkDescriptorPool m_computeDescriptorPool = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_computeSetLayout = VK_NULL_HANDLE;
     VkPipeline m_computePipeline = VK_NULL_HANDLE;

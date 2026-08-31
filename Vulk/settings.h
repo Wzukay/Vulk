@@ -5,6 +5,8 @@
 struct Settings {
     // --- Rendering ---
     float renderDistance = 5000.0f;
+    bool enableDRS = false;
+    int targetFPS = 60;
     float renderScale = 0.75f;
     bool enableFSR = false;
     bool enableSSAO = true;

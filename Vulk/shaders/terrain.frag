@@ -1,30 +1,12 @@
 #version 450
 #extension GL_EXT_nonuniform_qualifier : require
+#include "common_structures.glsl"
 
 struct Light {
     vec4 positionOrDir;
     vec4 color;
     vec4 params;
 };
-
-layout(set = 0, binding = 0) uniform UniformBufferObject {
-    mat4 view;
-    mat4 proj;
-    vec3 cameraPos;
-    float ambient;
-    vec4 fadeParams;
-    vec2 screenSize;
-    float specularPower;
-    uint lightCount;
-    float fogStart;
-    float fogEnd;
-    vec2 _pad2;
-    vec4 sunDirection;
-    vec4 sunColor;
-    mat4 inverseViewProj;
-    mat4 inverseProj;
-    mat4 inverseView;
-} ubo;
 
 layout(std430, binding = 1) readonly buffer LightBuffer {
     Light lights[];
@@ -45,12 +27,15 @@ layout(location = 7) in vec3 fragColor; // Splat weights (r=sand, g=grass, b=roc
 layout(location = 0) out vec4 outColor;
 
 vec4 TriplanarSample(uint textureId, vec3 pos, vec3 weights) {
-    vec4 x = texture(globalTextures[textureId], pos.yz);
-    vec4 y = texture(globalTextures[textureId], pos.xz);
-    vec4 z = texture(globalTextures[textureId], pos.xy);
-    return x * weights.x + y * weights.y + z * weights.z;
+    vec4 result = vec4(0.0);
+    // Dynamic branching skips memory reads if the axis weight is visually zero
+    if (weights.x > 0.001) result += texture(globalTextures[textureId], pos.yz) * weights.x;
+    if (weights.y > 0.001) result += texture(globalTextures[textureId], pos.xz) * weights.y;
+    if (weights.z > 0.001) result += texture(globalTextures[textureId], pos.xy) * weights.z;
+    return result;
 }
 
+// 1. UnpackNormal MUST be defined first
 vec3 UnpackNormal(vec4 sampledNormal) {
     // Extract Red (X) and Green (Y) and transform from [0, 1] texture space to [-1, 1] simulation space
     vec2 normalXY = sampledNormal.rg * 2.0 - 1.0;
@@ -59,13 +44,14 @@ vec3 UnpackNormal(vec4 sampledNormal) {
     return vec3(normalXY, normalZ);
 }
 
+// 2. Now TriplanarSampleNormal can safely call UnpackNormal
 vec3 TriplanarSampleNormal(uint textureId, vec3 pos, vec3 weights) {
-    vec3 x = UnpackNormal(texture(normalTextures[textureId], pos.yz));
-    vec3 y = UnpackNormal(texture(normalTextures[textureId], pos.xz));
-    vec3 z = UnpackNormal(texture(normalTextures[textureId], pos.xy));
-    return x * weights.x + y * weights.y + z * weights.z;
+    vec3 result = vec3(0.0);
+    if (weights.x > 0.001) result += UnpackNormal(texture(normalTextures[textureId], pos.yz)) * weights.x;
+    if (weights.y > 0.001) result += UnpackNormal(texture(normalTextures[textureId], pos.xz)) * weights.y;
+    if (weights.z > 0.001) result += UnpackNormal(texture(normalTextures[textureId], pos.xy)) * weights.z;
+    return result;
 }
-
 vec3 CalcBlinnPhong(vec3 N, vec3 V, vec3 L, vec3 lightColor, vec3 albedo, float specPower) {
     vec3 H = normalize(L + V);
     float diff = max(dot(N, L), 0.0);

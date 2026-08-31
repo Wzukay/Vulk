@@ -2,6 +2,8 @@
 #include <vulkan/vulkan_core.h>
 #include <vector>
 #include <unordered_map>
+#include <atomic>
+#include <mutex>
 #include <glm/glm.hpp>
 
 class VulkanRenderer;
@@ -21,19 +23,18 @@ struct BoidComputeParams {
     float minSpeed;
     float turnSpeed;
     glm::vec4 centerAndRadius;
-    float wanderStrength; // ADD THIS
-    float pad[3];         // Padding to maintain 16-byte alignment
+    float wanderStrength;
+    float pad[3];
 };
 
 struct BoidSwarmGPU {
-    VkBuffer buffers[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
-    VkDeviceMemory memories[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
-    VkDescriptorSet computeSets[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+    uint32_t boidOffset = 0;
     uint32_t boidCount = 0;
     uint32_t textureId = 0;
     int pingPongIndex = 0;
 
-    // NEW: Drifting anchor tracking
+    VkDescriptorSet computeSets[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+
     glm::vec3 baseCenter = glm::vec3(0.0f);
     glm::vec3 currentCenter = glm::vec3(0.0f);
     float lifeTime = 0.0f;
@@ -57,6 +58,17 @@ private:
         uint64_t safeFrame;
     };
     std::vector<BoidGarbage> m_garbageSets;
+
+    struct FreeSpan { uint32_t offset; uint32_t count; };
+    std::vector<FreeSpan> m_freeBoidSpans;
+    std::atomic<uint32_t> m_nextBoidOffset{ 0 };
+    std::mutex m_allocMutex;
+
+    uint32_t AllocateSpace(uint32_t boidCount);
+
+    uint32_t m_maxBoids = 100000;
+    VkBuffer m_boidBuffers[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+    VkDeviceMemory m_boidMemories[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
 
     VkDevice m_device = VK_NULL_HANDLE;
     VulkanRenderer* m_renderer = nullptr;

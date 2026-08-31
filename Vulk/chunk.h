@@ -204,7 +204,6 @@ public:
     void SetSeed(int s) { s_globalSeed = s; }
     void SetRandomSeed() { s_globalSeed = std::rand() % 1000000; }
     bool Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& renderer);
-    void PreGenerateChunks(const glm::vec3& camPos, Scene& scene, VulkanRenderer& renderer);
 
     static float GetCachedHeightFromGrid(float worldX, float worldZ);
     static void RemoveGridCache(int64_t chunkKey);
@@ -242,20 +241,19 @@ private:
     static std::unordered_map<int64_t, ChunkGridCache> s_activeChunkGrids;
 
     void UpdateFogParamsBasedOnData(VulkanRenderer& renderer);
+
     glm::vec3 ChunkBoundsCenter(int cx, int cz) const;
-    bool HasCameraShiftedNoticeably(const glm::vec3& camPos, const glm::vec3& camForward);
     float ChunkBoundsRadius() const;
+
+    static std::vector<glm::vec2> ConvexHull(std::vector<glm::vec2> points);
+    static std::pair<float, glm::vec3> CalculateHeightAndColor(float worldX, float worldZ);
+    int DesiredLodForDistance(float distance) const;
+
+    static uint32_t Hash2D(int x, int z, int seed);
+
     void GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSize,
         ChunkJobResult& outResult,
         std::shared_ptr<std::atomic<bool>> cancelToken = nullptr);
-    static std::vector<glm::vec2> ConvexHull(std::vector<glm::vec2> points);
-    static std::pair<float, glm::vec3> CalculateHeightAndColor(float worldX, float worldZ);
-
-    int DesiredLodForDistance(float distance) const;
-    void EvictUnloadedChunks(Scene& scene, VulkanRenderer& renderer);
-
-    static uint32_t Hash2D(int x, int z, int seed);
     void GenerateChunkTrees(int chunkX, int chunkZ, int lod, ChunkJobResult& outResult);
-
     void GenerateChunkSwarms(int chunkX, int chunkZ, int lod, ChunkJobResult& outResult);
 };

@@ -1,19 +1,12 @@
 #version 450
-layout(local_size_x = 256) in;
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
 struct GrassInstance {
     vec3 position;
     float rotation;
     vec3 scale;
     float windOffset;
-};
-
-layout(std430, set = 0, binding = 0) readonly buffer InputInstances {
-    GrassInstance inInstances[];
-};
-
-layout(std430, set = 0, binding = 1) writeonly buffer OutputInstances {
-    GrassInstance outInstances[];
 };
 
 struct VkDrawIndirectCommand {
@@ -23,42 +16,74 @@ struct VkDrawIndirectCommand {
     uint firstInstance;
 };
 
-layout(std430, set = 0, binding = 2) buffer IndirectBuffer {
-    VkDrawIndirectCommand drawCommand;
-};
+// Bindings setup to match renderer_grass.cpp
+layout(std430, set = 0, binding = 0) readonly buffer InInstances { GrassInstance inData[]; };
+layout(std430, set = 0, binding = 1) writeonly buffer OutInstances { GrassInstance outData[]; };
+layout(std430, set = 0, binding = 2) buffer DrawCmd { VkDrawIndirectCommand cmd; };
 
-layout(push_constant) uniform ComputePush {
+layout(push_constant) uniform GrassComputePushConstants {
     vec3 cameraPos;
     float maxDist;
     uint totalInstances;
     uint vertexCount;
+    vec2 _padding;
     vec4 frustumPlanes[6];
 } push;
+
+// Fast pseudo-random hash based on instance ID
+float hash(uint n) {
+    n = (n << 13U) ^ n;
+    n = n * (n * n * 15731U + 789221U) + 1376312589U;
+    return float(n & 0x7fffffffU) / float(0x7fffffff);
+}
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= push.totalInstances) return;
 
-    GrassInstance inst = inInstances[idx];
+    GrassInstance inst = inData[idx];
+    vec3 pos = inst.position;
 
-    // Distance cull per blade
-    float dist = distance(push.cameraPos, inst.position);
+    // 1. GPU Frustum Culling
+    bool visible = true;
+    for (int i = 0; i < 6; i++) {
+        // A radius buffer of 1.5 units to account for blade scale and wind bending
+        if (dot(push.frustumPlanes[i].xyz, pos) + push.frustumPlanes[i].w + 1.5 < 0.0) {
+            visible = false;
+            break;
+        }
+    }
+    if (!visible) return;
+
+    // 2. Maximum Distance Cutoff
+    float dist = length(pos - push.cameraPos);
     if (dist > push.maxDist) return;
 
-    for (int i = 0; i < 6; i++) {
-        if (dot(push.frustumPlanes[i].xyz, inst.position) + push.frustumPlanes[i].w + 10.0 < 0.0) {
-        return; 
-    }
+    // 3. Distance-Based Density Thinning (Stochastic Culling)
+    float fadeStart = push.maxDist * 0.35; // Start dropping grass at 35% of max render distance
+    float fadeEnd   = push.maxDist * 0.95; // Thin down to 5% density by the far edge
+
+    if (dist > fadeStart) {
+        float t = clamp((dist - fadeStart) / (fadeEnd - fadeStart), 0.0, 1.0);
+        // Exponential falloff looks more natural than linear
+        t = t * t; 
+        
+        float survivalProbability = mix(1.0, 0.05, t); 
+
+        // If our random hash is greater than the survival probability, kill the thread!
+        if (hash(idx) > survivalProbability) {
+            return;
+        }
     }
 
-    // Atomically claim a spot in the output buffer
-    uint outIdx = atomicAdd(drawCommand.instanceCount, 1);
-    outInstances[outIdx] = inst;
+    // 4. Passed all tests! Add to the draw buffer.
+    uint outIdx = atomicAdd(cmd.instanceCount, 1);
+    outData[outIdx] = inst;
 
-    // The first thread configures the draw bounds for the graphics pass
+    // Ensure the indirect command arguments are set properly for the draw call
     if (outIdx == 0) {
-        drawCommand.vertexCount = push.vertexCount;
-        drawCommand.firstVertex = 0;
-        drawCommand.firstInstance = 0;
+        cmd.vertexCount = push.vertexCount;
+        cmd.firstVertex = 0;
+        cmd.firstInstance = 0;
     }
 }

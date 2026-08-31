@@ -1,10 +1,19 @@
 #include "renderer_boid.h"
 #include "renderer.h"
 #include <stdexcept>
+#include <algorithm>
 
 void BoidRenderer::Init(VkDevice device, VulkanRenderer* renderer, VkFormat colorFormat, VkFormat depthFormat, VkDescriptorSetLayout sharedSetLayout, VkSampleCountFlagBits msaaSamples) {
     m_device = device;
     m_renderer = renderer;
+
+    VkDeviceSize bufferSize = m_maxBoids * sizeof(BoidInstance);
+    for (int i = 0; i < 2; i++) {
+        m_renderer->CreateBuffer(bufferSize,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+            m_boidBuffers[i], m_boidMemories[i]);
+    }
 
     CreateComputePipeline();
     CreateGraphicsPipeline(colorFormat, depthFormat, sharedSetLayout, msaaSamples);
@@ -13,12 +22,12 @@ void BoidRenderer::Init(VkDevice device, VulkanRenderer* renderer, VkFormat colo
 void BoidRenderer::Cleanup() {
     if (m_device == VK_NULL_HANDLE) return;
 
-    for (auto& [key, swarm] : m_swarms) {
-        for (int i = 0; i < 2; i++) {
-            m_renderer->DestroyBuffer(swarm.buffers[i], swarm.memories[i]);
-        }
+    for (int i = 0; i < 2; i++) {
+        m_renderer->DestroyBuffer(m_boidBuffers[i], m_boidMemories[i]);
     }
+
     m_swarms.clear();
+    m_freeBoidSpans.clear();
 
     for (const auto& gc : m_garbageSets) {
         vkFreeDescriptorSets(m_device, m_descriptorPool, 2, gc.sets);
@@ -34,8 +43,26 @@ void BoidRenderer::Cleanup() {
     vkDestroyPipelineLayout(m_device, m_graphicsPipelineLayout, nullptr);
 }
 
+uint32_t BoidRenderer::AllocateSpace(uint32_t boidCount) {
+    std::lock_guard<std::mutex> lock(m_allocMutex);
+    uint32_t aligned = (boidCount + 7) & ~7; // Pad to multiple of 8 (256 bytes)
+
+    auto it = std::find_if(m_freeBoidSpans.begin(), m_freeBoidSpans.end(),
+        [&](const FreeSpan& s) { return s.count >= aligned; });
+    if (it != m_freeBoidSpans.end()) {
+        uint32_t offset = it->offset;
+        if (it->count == aligned) m_freeBoidSpans.erase(it);
+        else { it->offset += aligned; it->count -= aligned; }
+        return offset;
+    }
+    else {
+        uint32_t offset = m_nextBoidOffset.fetch_add(aligned);
+        if (offset + aligned > m_maxBoids) throw std::runtime_error("Boid buffer overflow");
+        return offset;
+    }
+}
+
 void BoidRenderer::AddSwarm(int64_t chunkKey, const std::vector<BoidInstance>& initialBoids, uint32_t textureId) {
-    // Prevent memory leaks when terrain chunk LODs update and regenerate swarms
     if (m_swarms.find(chunkKey) != m_swarms.end()) {
         RemoveSwarm(chunkKey);
     }
@@ -47,39 +74,38 @@ void BoidRenderer::AddSwarm(int64_t chunkKey, const std::vector<BoidInstance>& i
     if (!initialBoids.empty()) {
         swarm.baseCenter = glm::vec3(initialBoids[0].position);
         swarm.currentCenter = swarm.baseCenter;
-        swarm.lifeTime = 0.0f; // Start clock
+        swarm.lifeTime = 0.0f;
     }
 
-    VkDeviceSize bufferSize = sizeof(BoidInstance) * swarm.boidCount;
+    uint32_t boidOffset = AllocateSpace(swarm.boidCount);
+    swarm.boidOffset = boidOffset;
 
-    for (int i = 0; i < 2; i++) {
-        m_renderer->CreateBuffer(bufferSize,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-            swarm.buffers[i], swarm.memories[i]);
-    }
+    VkDeviceSize offsetBytes = boidOffset * sizeof(BoidInstance);
+    VkDeviceSize sizeBytes = swarm.boidCount * sizeof(BoidInstance);
 
     VkBuffer stagingBuffer;
     VkDeviceMemory stagingMemory;
-    m_renderer->CreateBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingMemory);
+    m_renderer->CreateBuffer(sizeBytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingMemory);
 
     void* data;
-    vkMapMemory(m_device, stagingMemory, 0, bufferSize, 0, &data);
-    memcpy(data, initialBoids.data(), bufferSize);
+    vkMapMemory(m_device, stagingMemory, 0, sizeBytes, 0, &data);
+    memcpy(data, initialBoids.data(), sizeBytes);
     vkUnmapMemory(m_device, stagingMemory);
 
     VkCommandBuffer cmd = m_renderer->BeginSingleTimeCommands();
-    VkBufferCopy copyRegion{ 0, 0, bufferSize };
-    vkCmdCopyBuffer(cmd, stagingBuffer, swarm.buffers[0], 1, &copyRegion);
+    VkBufferCopy copyRegion{ 0, offsetBytes, sizeBytes };
+    vkCmdCopyBuffer(cmd, stagingBuffer, m_boidBuffers[0], 1, &copyRegion);
     m_renderer->EndSingleTimeCommands(cmd);
     m_renderer->DestroyBuffer(stagingBuffer, stagingMemory);
 
     VkDescriptorSetLayout layouts[] = { m_computeSetLayout, m_computeSetLayout };
     VkDescriptorSetAllocateInfo allocInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, nullptr, m_descriptorPool, 2, layouts };
-    vkAllocateDescriptorSets(m_device, &allocInfo, swarm.computeSets);
+    if (vkAllocateDescriptorSets(m_device, &allocInfo, swarm.computeSets) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to allocate boid descriptor sets");
+    }
 
-    VkDescriptorBufferInfo bInfo0{ swarm.buffers[0], 0, bufferSize };
-    VkDescriptorBufferInfo bInfo1{ swarm.buffers[1], 0, bufferSize };
+    VkDescriptorBufferInfo bInfo0{ m_boidBuffers[0], offsetBytes, sizeBytes };
+    VkDescriptorBufferInfo bInfo1{ m_boidBuffers[1], offsetBytes, sizeBytes };
 
     VkWriteDescriptorSet writes[4]{};
     writes[0] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, swarm.computeSets[0], 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &bInfo0, nullptr };
@@ -94,18 +120,14 @@ void BoidRenderer::AddSwarm(int64_t chunkKey, const std::vector<BoidInstance>& i
 void BoidRenderer::RemoveSwarm(int64_t chunkKey) {
     auto it = m_swarms.find(chunkKey);
     if (it != m_swarms.end()) {
-        BufferDeletion del;
-        del.buffers.push_back(it->second.buffers[0]);
-        del.buffers.push_back(it->second.buffers[1]);
-        del.memories.push_back(it->second.memories[0]);
-        del.memories.push_back(it->second.memories[1]);
-        m_renderer->DeferBufferDeletion(std::move(del));
+        std::lock_guard<std::mutex> lock(m_allocMutex);
+        uint32_t aligned = (it->second.boidCount + 7) & ~7;
+        m_freeBoidSpans.push_back({ it->second.boidOffset, aligned });
 
-        // Defer freeing descriptor sets to avoid in-flight command buffer errors
-        BoidGarbage gc;
+        BoidGarbage gc{};
         gc.sets[0] = it->second.computeSets[0];
         gc.sets[1] = it->second.computeSets[1];
-        gc.safeFrame = m_renderer->GetFrameCounter() + 3; // MAX_FRAMES_IN_FLIGHT
+        gc.safeFrame = m_renderer->GetFrameCounter() + 3;
         m_garbageSets.push_back(gc);
 
         m_swarms.erase(it);
@@ -123,53 +145,46 @@ void BoidRenderer::TickCompute(VkCommandBuffer computeCmd, float deltaTime) {
             ++it;
         }
     }
-    
+
     if (m_swarms.empty()) return;
 
     vkCmdBindPipeline(computeCmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_computePipeline);
 
+    // Apply Fix 5: Hoist static parameters outside the loop
+    BoidComputeParams basePc{};
+    basePc.deltaTime = deltaTime;
+    basePc.separationRadius = 12.0f;
+    basePc.alignmentRadius = 0.0f;
+    basePc.cohesionRadius = 20.0f;
+    basePc.maxSpeed = 15.0f;
+    basePc.minSpeed = 6.0f;
+    basePc.turnSpeed = 5.0f;
+    basePc.wanderStrength = 2.5f;
+
     for (auto& [key, swarm] : m_swarms) {
         vkCmdBindDescriptorSets(computeCmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_computePipelineLayout, 0, 1, &swarm.computeSets[swarm.pingPongIndex], 0, nullptr);
 
-        // Advance time for this specific swarm
         swarm.lifeTime += deltaTime;
-
-        // Slowly drift the swarm's target destination across the chunk
-        float driftSpeed = 0.8f; // Increased from 0.3f
-        float driftRadius = 150.0f; // Let them explore a massive 300-unit area of the chunk
+        float driftSpeed = 0.8f;
+        float driftRadius = 150.0f;
         swarm.currentCenter.x = swarm.baseCenter.x + sin(swarm.lifeTime * driftSpeed) * driftRadius;
         swarm.currentCenter.z = swarm.baseCenter.z + cos(swarm.lifeTime * driftSpeed * 0.8f) * driftRadius;
 
-        BoidComputeParams pc{};
-        pc.deltaTime = deltaTime;
-        pc.boidCount = swarm.boidCount;
+        basePc.boidCount = swarm.boidCount;
+        basePc.centerAndRadius = glm::vec4(swarm.currentCenter, 60.0f);
 
-        pc.separationRadius = 12.0f;
-        pc.alignmentRadius = 0.0f;
-        pc.cohesionRadius = 20.0f;
-
-        // Faster cruising speeds
-        pc.maxSpeed = 15.0f;
-        pc.minSpeed = 6.0f;
-        pc.turnSpeed = 5.0f;
-
-        pc.centerAndRadius = glm::vec4(swarm.currentCenter, 60.0f);
-        pc.wanderStrength = 2.5f;
-
-        vkCmdPushConstants(computeCmd, m_computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(BoidComputeParams), &pc);
+        vkCmdPushConstants(computeCmd, m_computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(BoidComputeParams), &basePc);
 
         uint32_t groupCount = (swarm.boidCount + 255) / 256;
         vkCmdDispatch(computeCmd, groupCount, 1, 1);
     }
 
-    // Single global barrier for ALL swarms at once (huge performance boost over barrier-per-chunk)
     VkMemoryBarrier barrier{};
     barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
     barrier.dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
     vkCmdPipelineBarrier(computeCmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
 
-    // Swap indices for next frame
     for (auto& [key, swarm] : m_swarms) {
         swarm.pingPongIndex = 1 - swarm.pingPongIndex;
     }
@@ -182,8 +197,8 @@ void BoidRenderer::Draw(VkCommandBuffer drawCmd, VkDescriptorSet sharedDescripto
     vkCmdBindDescriptorSets(drawCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_graphicsPipelineLayout, 0, 1, &sharedDescriptorSet, 0, nullptr);
 
     for (const auto& [key, swarm] : m_swarms) {
-        VkBuffer buffers[] = { swarm.buffers[swarm.pingPongIndex] };
-        VkDeviceSize offsets[] = { 0 };
+        VkBuffer buffers[] = { m_boidBuffers[swarm.pingPongIndex] };
+        VkDeviceSize offsets[] = { swarm.boidOffset * sizeof(BoidInstance) };
         vkCmdBindVertexBuffers(drawCmd, 0, 1, buffers, offsets);
 
         vkCmdPushConstants(drawCmd, m_graphicsPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(uint32_t), &swarm.textureId);
@@ -198,13 +213,15 @@ void BoidRenderer::CreateComputePipeline() {
     VkDescriptorSetLayoutBinding bindings[] = { readBinding, writeBinding };
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 2, bindings };
-    vkCreateDescriptorSetLayout(m_device, &layoutInfo, nullptr, &m_computeSetLayout);
+    if (vkCreateDescriptorSetLayout(m_device, &layoutInfo, nullptr, &m_computeSetLayout) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create boid compute layout");
+    }
 
-    // Increased pool capacity to handle hundreds of active chunks simultaneously
     VkDescriptorPoolSize poolSize{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2000 };
-    // Added FREE_DESCRIPTOR_SET flag so RemoveSwarm doesn't cause pool fragmentation
     VkDescriptorPoolCreateInfo poolInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, nullptr, VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, 1000, 1, &poolSize };
-    vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_descriptorPool);
+    if (vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_descriptorPool) != VK_SUCCESS) {
+        throw std::runtime_error("Failed to create boid descriptor pool");
+    }
 
     VkPushConstantRange pushRange{ VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(BoidComputeParams) };
     VkPipelineLayoutCreateInfo pLayoutInfo{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, nullptr, 0, 1, &m_computeSetLayout, 1, &pushRange };

@@ -46,9 +46,14 @@ struct TerrainChunkGPUData {
 };
 
 struct FreeSpan { uint32_t offset; uint32_t count; };
-struct SpanReturn {
-    FreeSpan vertexSpan;
-    FreeSpan indexSpan;
+struct SpanReturn { FreeSpan vertexSpan; FreeSpan indexSpan; };
+
+struct ComputePush {
+    glm::mat4 viewProj;
+    glm::vec3 cameraPos;
+    uint32_t totalChunks;
+    glm::vec2 hzbSize;
+    float maxMip;
 };
 
 class TerrainRenderer {

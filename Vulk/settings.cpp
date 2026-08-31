@@ -17,6 +17,8 @@ void Settings::LoadFromFile(const std::string& path) {
         if (!(iss >> key >> value)) continue;
 
         if (key == "renderDistance") renderDistance = std::stof(value);
+        else if (key == "enableDRS") enableDRS = (value == "true" || value == "1");
+        else if (key == "targetFPS") targetFPS = std::stof(value);
         else if (key == "renderScale") renderScale = std::stof(value);
         else if (key == "enableFSR") enableFSR = (value == "true" || value == "1");
         else if (key == "enableSSAO") enableSSAO = (value == "true" || value == "1");
@@ -45,6 +47,8 @@ void Settings::SaveToFile(const std::string& path) const {
     if (!file) return;
     file << "# Settings file\n";
     file << "renderDistance " << renderDistance << "\n";
+    file << "enableDRS " << (enableDRS ? "true" : "false") << "\n";
+    file << "targetFPS " << targetFPS << "\n";
     file << "renderScale " << renderScale << "\n";
     file << "enableFSR " << (enableFSR ? "true" : "false") << "\n";
     file << "enableSSAO " << (enableSSAO ? "true" : "false") << "\n";
