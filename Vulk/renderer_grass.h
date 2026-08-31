@@ -46,11 +46,11 @@ struct GrassPushConstants {
 
 struct GrassComputePushConstants {
     glm::vec3 cameraPos;
-    float maxDist;
+    float fadeStart;
     uint32_t totalInstances;
     uint32_t vertexCount;
-
-    glm::vec2 _padding;
+    float fadeEnd;
+    float _padding;
 
     glm::vec4 frustumPlanes[6];
 };

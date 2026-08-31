@@ -25,8 +25,11 @@ void main() {
     vec3 rootColor = vec3(0.008, 0.035, 0.006);
     vec3 tipColor  = vec3(0.065, 0.220, 0.030);
     
-    // Use inUV.y to blend from root to tip
-    vec3 baseAlbedo = mix(rootColor, tipColor, inUV.y);
+    float colorVar = fract(sin(dot(inWorldPos.xz, vec2(12.9898, 78.233))) * 43758.5453);
+    
+    vec3 localTip = mix(tipColor, vec3(0.12, 0.28, 0.05), colorVar * 0.6);
+    
+    vec3 baseAlbedo = mix(rootColor, localTip, inUV.y);
 
     float distToCam = length(ubo.cameraPos - inWorldPos);
 

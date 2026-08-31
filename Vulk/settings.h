@@ -17,15 +17,23 @@ struct Settings {
     float maxAnisotropy = 16.0f;
     int msaaSamples = 4;
 
-    // --- World & LOD Distances (The Source of Truth) ---
-    float fogStart = 3500.0f;
-    float fogEnd = 5000.0f;
+    // --- World & LOD Distances (Normalized Ratios 0.0 to 1.0) ---
+    float fogStartRatio = 0.70f;        // 70% of renderDistance
+    float fogEndRatio = 1.0f;           // 100% of renderDistance
 
-    float staticFadeStart = 1200.0f;
-    float staticFadeEnd = 1536.0f;     // Should match where Chunk LOD 3 culls
+    float staticFadeStartRatio = 0.24f; // 24% of renderDistance
+    float staticFadeEndRatio = 0.307f;  // ~30.7% of renderDistance
 
-    float grassFadeStart = 400.0f;
-    float grassFadeEnd = 600.0f;     // Grass usually culls much earlier than trees
+    float grassFadeStartRatio = 0.08f;  // 8% of renderDistance
+    float grassFadeEndRatio = 0.12f;    // 12% of renderDistance
+
+    // Helper getters for the engine to retrieve absolute world-space distances
+    float GetFogStart() const { return renderDistance * fogStartRatio; }
+    float GetFogEnd() const { return renderDistance * fogEndRatio; }
+    float GetStaticFadeStart() const { return renderDistance * staticFadeStartRatio; }
+    float GetStaticFadeEnd() const { return renderDistance * staticFadeEndRatio; }
+    float GetGrassFadeStart() const { return renderDistance * grassFadeStartRatio; }
+    float GetGrassFadeEnd() const { return renderDistance * grassFadeEndRatio; }
 
     // --- Debug ---
     bool showStats = true;

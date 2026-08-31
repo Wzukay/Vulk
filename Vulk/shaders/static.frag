@@ -50,8 +50,8 @@ void main() {
     float ditherNoise = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
     float distToCam = length(ubo.cameraPos - fragWorldPos);
 
-    float maxFadeDistance = ubo.fadeParams.w; 
-    float fadeStartDistance = ubo.fadeParams.z; 
+    float fadeStartDistance = ubo.fadeParams.x; 
+    float maxFadeDistance = ubo.fadeParams.y; 
     
     float fadeAlpha = 1.0 - clamp((distToCam - fadeStartDistance) / (maxFadeDistance - fadeStartDistance), 0.0, 1.0);
     

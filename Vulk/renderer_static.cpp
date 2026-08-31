@@ -197,8 +197,7 @@ void StaticMeshRenderer::Draw(VkCommandBuffer commandBuffer, VkPipelineLayout pi
     VkPipeline staticPipeline, VkPipeline instancedPipeline,
     uint32_t& outDrawCalls, uint32_t& outCulledCount,
     uint32_t& outVertexCount, uint32_t& outIndexCount) {
-
-    // 1. UNIQUE MESHES (Sponza, Players, etc.)
+    
     if (!m_staticDrawList.empty()) {
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, staticPipeline);
 

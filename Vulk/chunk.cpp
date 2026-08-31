@@ -35,16 +35,16 @@ int Chunk::DesiredLodForDistance(float distToCenter) const {
     if (closestEdgeDist > g_Settings.renderDistance) return 5;
 
     // LOD 4: Terrain only, NO Trees (Past tree fade end)
-    if (closestEdgeDist > g_Settings.staticFadeEnd) return 4;
+    if (closestEdgeDist > g_Settings.GetStaticFadeEnd()) return 4;
 
     // LOD 3: Terrain + Billboard Trees (Past tree fade start)
-    if (closestEdgeDist > g_Settings.staticFadeStart) return 3;
+    if (closestEdgeDist > g_Settings.GetStaticFadeStart()) return 3;
 
     // LOD 2: Terrain + Low Poly Trees, NO Grass (Past grass fade end)
-    if (closestEdgeDist > g_Settings.grassFadeEnd) return 2;
+    if (closestEdgeDist > g_Settings.GetGrassFadeEnd()) return 2;
 
     // LOD 1: Terrain + Med Trees + Thin Grass (Past grass fade start)
-    if (closestEdgeDist > g_Settings.grassFadeStart) return 1;
+    if (closestEdgeDist > g_Settings.GetGrassFadeStart()) return 1;
 
     // LOD 0: High Poly Everything
     return 0;
@@ -166,23 +166,24 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
                 tComp.scale = treeData.scale;
 
                 tComp.isDirty = true;
-                scene.GetRegistry().AddComponent<TransformComponent>(treeEntity, tComp);
 
                 RenderComponent rComp;
                 if (result.lod == 0) {
                     rComp.meshName = "assets/models/tree/tree.obj"; // Full 1k vert mesh
                 }
-                else if (result.lod == 1) {
+                else if (result.lod <= 2) { // FIX: Keep the 3D mesh alive through LOD 2!
                     rComp.meshName = "assets/models/tree/tree_lod1.obj"; // Decimated mesh (~300 verts)
                 }
                 else {
                     rComp.meshName = "assets/models/tree/tree_billboard.obj"; // 2-triangle cross plane
-                    tComp.scale = treeData.scale * glm::vec3(45.0f, 45.0f, 45.0f) + glm::vec3(10);
+                    tComp.scale = treeData.scale + glm::vec3(10.0f);
                 }
 
                 rComp.type = MeshType::Static;
                 rComp.isInstanced = true;
                 rComp.isVisible = true;
+
+                scene.GetRegistry().AddComponent<TransformComponent>(treeEntity, tComp);
                 scene.GetRegistry().AddComponent<RenderComponent>(treeEntity, rComp);
 
                 ChunkPropComponent cComp;
@@ -397,15 +398,6 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
 }
 
 std::pair<float, glm::vec3> Chunk::CalculateHeightAndColor(float worldX, float worldZ) {
-    // ========================================================================
-    // EXPERIMENT V4 - BROAD GEOLOGY + DIRECTIONAL MOUNTAIN CHAINS
-    //
-    // V2 gave us the right general mountain strength. V3 accidentally
-    // multiplied the FastNoise frequency twice when stretching the rotated
-    // coordinates, effectively making the mountain signal almost constant.
-    // V4 keeps V2's reliable height ranges and adds directionality correctly.
-    // ========================================================================
-
     static thread_local FastNoiseLite continentNoise;
     static thread_local FastNoiseLite hillNoise;
     static thread_local FastNoiseLite mountainNoise;
@@ -416,6 +408,7 @@ std::pair<float, glm::vec3> Chunk::CalculateHeightAndColor(float worldX, float w
     static thread_local FastNoiseLite plateauNoise;
     static thread_local FastNoiseLite tempNoise;
     static thread_local FastNoiseLite moistNoise;
+    static thread_local FastNoiseLite dirtNoise; // --- NEW: Dirt patch noise ---
     static thread_local bool initialized = false;
 
     if (!initialized) {
@@ -485,6 +478,12 @@ std::pair<float, glm::vec3> Chunk::CalculateHeightAndColor(float worldX, float w
         moistNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
         moistNoise.SetFrequency(0.00036f);
 
+        // --- NEW: Dirt Patch Generator ---
+        dirtNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+        dirtNoise.SetFractalType(FastNoiseLite::FractalType_FBm);
+        dirtNoise.SetFractalOctaves(3);
+        dirtNoise.SetFrequency(0.015f); // Frequency dictates patch size (0.015 = ~60 units wide)
+
         initialized = true;
     }
 
@@ -499,6 +498,7 @@ std::pair<float, glm::vec3> Chunk::CalculateHeightAndColor(float worldX, float w
     plateauNoise.SetSeed(seed + 97);
     tempNoise.SetSeed(seed + 101);
     moistNoise.SetSeed(seed + 202);
+    dirtNoise.SetSeed(seed + 303);
 
     auto clamp01 = [](float v) {
         return std::clamp(v, 0.0f, 1.0f);
@@ -523,9 +523,6 @@ std::pair<float, glm::vec3> Chunk::CalculateHeightAndColor(float worldX, float w
     float broadHills = n01(hillNoise.GetNoise(worldX, worldZ));
     broadHills = (broadHills - 0.5f) * 2.0f;
 
-    // Keep the V5 plains more alive: broad hills, secondary undulation, and
-    // occasional tableland character. None of these signals participate in
-    // the mountain mask, so the V4 mountain continuity remains unchanged.
     float plainUndulation = n01(hillNoise.GetNoise(worldX * 0.48f + 173.0f,
         worldZ * 0.48f - 91.0f));
     plainUndulation = (plainUndulation - 0.5f) * 2.0f;
@@ -537,11 +534,6 @@ std::pair<float, glm::vec3> Chunk::CalculateHeightAndColor(float worldX, float w
 
     // ------------------------------------------------------------------------
     // 2. DIRECTIONAL MOUNTAIN BELTS
-    //
-    // Rotate the coordinates, then scale ONE axis.  FastNoise already applies
-    // the configured frequency internally, so we must NOT multiply both axes
-    // by another tiny "frequency" here.  The anisotropic scale only controls
-    // shape direction.
     // ------------------------------------------------------------------------
     constexpr float c1 = 0.70710678f;
     constexpr float s1 = 0.70710678f;
@@ -554,19 +546,15 @@ std::pair<float, glm::vec3> Chunk::CalculateHeightAndColor(float worldX, float w
     float x2 = worldX * c2 - worldZ * s2;
     float z2 = worldX * s2 + worldZ * c2;
 
-    // Long-axis stretching: variation is slower along the second coordinate,
-    // producing long mountain chains rather than circular islands.
     float rangeA = n01(mountainNoise.GetNoise(x1, z1 * 0.38f));
     float rangeB = n01(mountainNoise.GetNoise(x2, z2 * 0.44f));
 
-    // Keep A as the main chain and B as a weaker crossing system.
     float beltA = smooth(0.50f, 0.68f, rangeA);
     float beltB = smooth(0.56f, 0.74f, rangeB) * 0.72f;
 
     float mountainMask = clamp01(std::max(beltA, beltB));
     mountainMask *= landMask;
 
-    // Soft outer shoulder around every mountain chain.
     float foothillA = smooth(0.40f, 0.60f, rangeA);
     float foothillB = smooth(0.46f, 0.64f, rangeB) * 0.70f;
     float foothillMask = clamp01(std::max(foothillA, foothillB));
@@ -578,10 +566,8 @@ std::pair<float, glm::vec3> Chunk::CalculateHeightAndColor(float worldX, float w
     float massif = n01(hillNoise.GetNoise(worldX * 0.60f, worldZ * 0.60f));
     massif = smooth(0.30f, 0.76f, massif);
 
-    // Large and stable mountain body.
     float mountainHeight = 46.0f + massif * 64.0f;
 
-    // Foothills taper naturally into the plains.
     height += foothillMask * (14.0f + massif * 28.0f);
     height += mountainMask * mountainHeight;
 
@@ -591,13 +577,10 @@ std::pair<float, glm::vec3> Chunk::CalculateHeightAndColor(float worldX, float w
     float valleyA = n01(valleyNoise.GetNoise(x1 * 0.90f, z1 * 0.72f));
     float valleyB = n01(valleyNoise.GetNoise(x2 * 0.88f, z2 * 0.76f));
 
-    // Only the lower part of each valley signal carves.  This produces broad
-    // passes rather than slicing entire mountains in half.
     float valleyAAmount = smooth(0.18f, 0.42f, 1.0f - valleyA);
     float valleyBAmount = smooth(0.20f, 0.44f, 1.0f - valleyB);
     float valleyMask = std::max(valleyAAmount, valleyBAmount);
 
-    // Carving is deliberately modest. Mountains remain clearly present.
     height -= mountainMask * valleyMask * (8.0f + massif * 14.0f);
 
     // ------------------------------------------------------------------------
@@ -611,7 +594,6 @@ std::pair<float, glm::vec3> Chunk::CalculateHeightAndColor(float worldX, float w
 
     float ridge = std::max(ridgeA, ridgeB);
 
-    // Keep valleys visually open and keep ridges subordinate to the massif.
     ridge *= (1.0f - valleyMask * 0.65f);
     ridge *= (0.55f + massif * 0.45f);
 
@@ -625,7 +607,6 @@ std::pair<float, glm::vec3> Chunk::CalculateHeightAndColor(float worldX, float w
     peakMask *= mountainMask;
     peakMask *= (1.0f - valleyMask);
 
-    // Sparse, broad peaks — never enough to turn the entire range into spikes.
     height += peakMask * peakMask * 26.0f;
 
     // ------------------------------------------------------------------------
@@ -640,9 +621,6 @@ std::pair<float, glm::vec3> Chunk::CalculateHeightAndColor(float worldX, float w
     detailWeight *= (1.0f - valleyMask * 0.30f);
     height += detail * (1.25f * detailWeight);
 
-    // V5-style broad tablelands in otherwise calm lowland regions.
-    // The blend is intentionally weak so plains gain variety without becoming
-    // obviously terraced or disrupting the V4 mountain profile.
     float plateauSignal = n01(plateauNoise.GetNoise(worldX, worldZ));
     float plateauMask = smooth(0.67f, 0.82f, plateauSignal);
     plateauMask *= landMask;
@@ -650,14 +628,12 @@ std::pair<float, glm::vec3> Chunk::CalculateHeightAndColor(float worldX, float w
     float plateauBase = std::floor(height / 12.0f + 0.5f) * 12.0f;
     height = std::lerp(height, plateauBase + 1.5f, plateauMask * 0.18f);
 
-    // Final safety compression.  We want rare high peaks, not pathological
-    // needle mountains if multiple signals happen to align.
     float excess = std::max(0.0f, height - 190.0f);
     height -= excess * 0.45f;
     height = std::max(0.0f, height);
 
     // ------------------------------------------------------------------------
-    // 8. CLIMATE -> MATERIALS ONLY
+    // 8. CLIMATE & TEXTURE WEIGHTS
     // ------------------------------------------------------------------------
     float t = clamp01(n01(tempNoise.GetNoise(worldX, worldZ)));
     float m = clamp01(n01(moistNoise.GetNoise(worldX, worldZ)));
@@ -672,6 +648,25 @@ std::pair<float, glm::vec3> Chunk::CalculateHeightAndColor(float worldX, float w
     glm::vec3 blendedWeights =
         (properties[0].textureWeights + properties[1].textureWeights +
             properties[2].textureWeights + properties[3].textureWeights) * 0.25f;
+
+    // --- NEW: CARVE DIRT PATCHES INTO GRASS BIOMES ---
+    // If this area is mostly grass (y channel is dominant)
+    if (blendedWeights.y > 0.4f) {
+        float dNoise = n01(dirtNoise.GetNoise(worldX, worldZ)); // 0 to 1
+
+        // Convert 35% of grassy areas into dirt patches
+        if (dNoise < 0.35f) {
+            // Smoothly blend the edges of the dirt patch
+            float blend = smooth(0.20f, 0.35f, dNoise);
+
+            float grassAmount = blendedWeights.y;
+            blendedWeights.y = std::lerp(0.0f, grassAmount, blend);
+
+            // Transfer the removed grass weight into the sand/dirt channel (x)
+            blendedWeights.z += grassAmount * (1.0f - blend);
+        }
+    }
+    // -------------------------------------------------
 
     return { height, blendedWeights };
 }
@@ -904,52 +899,78 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
         };
     uint32_t rngState = static_cast<uint32_t>(chunkX * 73856 + chunkZ * 19349 + 1);
 
-    // ================================================================
-    // ---- TREE generation (Deterministic World-Space scatter) ----
-    // ================================================================
     GenerateChunkTrees(chunkX, chunkZ, outResult.lod, outResult);
 
     GenerateChunkSwarms(chunkX, chunkZ, outResult.lod, outResult);
 
-    if (outResult.lod >= 2) {
-        return;
-    }
+    if (outResult.lod <= 1) {
 
-    int stride = (outResult.lod == 1) ? 2 : 1;
-    int bladesPerVertex = (outResult.lod == 1) ? 10 : 50;
-    float widthMultiplier = (outResult.lod == 1) ? 1.5f : 1.0f;
+        const float GRASS_STEP = 6.0f; // Fixed world-space grid step
+        int bladesPerCell = 18;        // High density per cell
+        const float JITTER_RADIUS = 3.5f;
 
-    const float JITTER_RADIUS = 14.0f;
+        int gridCells = (int)(m_chunkSize / GRASS_STEP);
+        outResult.grassInstances.reserve(gridCells * gridCells * bladesPerCell);
 
-    outResult.grassInstances.reserve((outResult.vertices.size() / stride) * bladesPerVertex);
+        // Iterate over a fixed spatial grid instead of the terrain vertices
+        for (float localX = 0.0f; localX < m_chunkSize; localX += GRASS_STEP) {
+            for (float localZ = 0.0f; localZ < m_chunkSize; localZ += GRASS_STEP) {
 
-    for (size_t i = 0; i < outResult.vertices.size(); i += stride) {
-        const auto& v = outResult.vertices[i];
+                float baseX = originX + localX;
+                float baseZ = originZ + localZ;
 
-        if (v.normal.y > 0.75f && v.pos.y > -5.0f && v.color.y >= 0.8f) {
-            for (int n = 0; n < bladesPerVertex; n++) {
-                GrassInstance inst{};
+                auto [baseY, baseColor] = CalculateHeightAndColor(baseX, baseZ);
 
-                float jitterX = (fastRand(rngState) - 0.5f) * 2.0f * JITTER_RADIUS;
-                float jitterZ = (fastRand(rngState) - 0.5f) * 2.0f * JITTER_RADIUS;
+                // Broad cull: avoid ocean and dirt patches
+                if (baseY <= -5.0f || baseColor.y < 0.2f) continue;
 
-                float bladeX = v.pos.x + jitterX;
-                float bladeZ = v.pos.z + jitterZ;
-                float bladeY = Chunk::GetHeight(bladeX, bladeZ);
+                // Coarse slope check to avoid spawning grass on cliffs
+                float hR = CalculateHeightAndColor(baseX + 2.0f, baseZ).first;
+                float hU = CalculateHeightAndColor(baseX, baseZ + 2.0f).first;
+                glm::vec3 normal = glm::normalize(glm::vec3(baseY - hR, 2.0f, baseY - hU));
+                if (normal.y < 0.75f) continue;
 
-                inst.position = glm::vec3(bladeX, bladeY, bladeZ);
-                inst.rotation = fastRand(rngState) * 2.0f * 3.14159f;
+                float densityMask = glm::smoothstep(0.35f, 0.85f, baseColor.y);
 
-                float randVal = fastRand(rngState);
+                // Create a deterministic hash seed locked to the exact world coordinate
+                uint32_t cellHash = Hash2D(static_cast<int>(baseX * 10), static_cast<int>(baseZ * 10), s_globalSeed);
 
-                float height = 1.2f + (randVal * 1.2f);
-                float baseWidth = height * 1.35f;
-                float finalWidth = baseWidth * widthMultiplier;
+                for (int n = 0; n < bladesPerCell; n++) {
+                    // Unique, stable seed for every individual blade
+                    uint32_t bladeSeed = cellHash + n;
 
-                inst.scale = glm::vec3(finalWidth, height, finalWidth);
-                inst.windOffset = fastRand(rngState) * 50.0f;
+                    auto fastRand = [](uint32_t& state) -> float {
+                        state ^= state << 13; state ^= state >> 17; state ^= state << 5;
+                        return (float)state / (float)UINT32_MAX;
+                        };
 
-                outResult.grassInstances.push_back(inst);
+                    if (fastRand(bladeSeed) > densityMask) continue;
+
+                    // Jitter the blade inside the cell
+                    float r = sqrt(fastRand(bladeSeed)) * JITTER_RADIUS;
+                    float theta = fastRand(bladeSeed) * 2.0f * 3.14159f;
+                    float bladeX = baseX + r * cos(theta);
+                    float bladeZ = baseZ + r * sin(theta);
+
+                    // Exact height and color for the final blade position
+                    auto [bladeY, bladeActualColor] = CalculateHeightAndColor(bladeX, bladeZ);
+
+                    // Strict cull if jitter pushed it into a dirt patch
+                    if (bladeActualColor.y < 0.35f) continue;
+
+                    GrassInstance inst{};
+                    inst.position = glm::vec3(bladeX, bladeY, bladeZ);
+                    inst.rotation = fastRand(bladeSeed) * 2.0f * 3.14159f;
+
+                    float height = 1.4f + (fastRand(bladeSeed) * 1.8f);
+                    height *= std::lerp(0.4f, 1.0f, densityMask);
+
+                    float baseWidth = 0.65f + (fastRand(bladeSeed) * 0.45f);
+                    inst.scale = glm::vec3(baseWidth, height, baseWidth);
+                    inst.windOffset = fastRand(bladeSeed) * 50.0f;
+
+                    outResult.grassInstances.push_back(inst);
+                }
             }
         }
     }

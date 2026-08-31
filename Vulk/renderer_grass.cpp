@@ -246,7 +246,8 @@ void GrassRenderer::AddGrass(int64_t key, const std::vector<GrassInstance>& gras
 void GrassRenderer::Cull(VkCommandBuffer commandBuffer, uint32_t currentFrameIndex) {
     if (m_grassChunks.empty() || m_computePipeline == VK_NULL_HANDLE) return;
 
-    const float maxGrassDist = 5000;
+    const float fadeStart = g_Settings.GetGrassFadeStart();
+    const float fadeEnd = g_Settings.GetGrassFadeEnd();
     const glm::vec3& camPos = m_renderer->GetCameraPosition();
 
     m_visibleChunksThisFrame.clear();
@@ -256,11 +257,11 @@ void GrassRenderer::Cull(VkCommandBuffer commandBuffer, uint32_t currentFrameInd
         if (!m_renderer->IsSphereInFrustum(chunk.center, chunk.radius)) continue;
 
         float dist = glm::length(chunk.center - camPos);
-        if (dist > maxGrassDist + chunk.radius) continue;
+
+        if (dist > fadeEnd + chunk.radius) continue;
 
         m_visibleChunksThisFrame.push_back(&chunk);
 
-        // Reset the instanceCount (offset + 4) inside the chunk's allocated block
         vkCmdFillBuffer(commandBuffer, m_indirectBuffers[currentFrameIndex], chunk.indirectOffset * sizeof(VkDrawIndirectCommand) + 4, 4, 0);
     }
 
@@ -274,9 +275,11 @@ void GrassRenderer::Cull(VkCommandBuffer commandBuffer, uint32_t currentFrameInd
     for (const auto* chunk : m_visibleChunksThisFrame) {
         GrassComputePushConstants cPush{};
         cPush.cameraPos = camPos;
-        cPush.maxDist = maxGrassDist;
+        cPush.fadeStart = fadeStart;
         cPush.totalInstances = chunk->instanceCount;
         cPush.vertexCount = 9;
+        cPush.fadeEnd = fadeEnd;
+        cPush._padding = 0.0f;
 
         const auto& planes = m_renderer->GetFrustumPlanes();
         for (int i = 0; i < 6; ++i) cPush.frustumPlanes[i] = glm::vec4(planes[i].normal, planes[i].distance);
@@ -296,7 +299,8 @@ void GrassRenderer::Draw(VkCommandBuffer commandBuffer, VkDescriptorSet sharedDe
     static auto startTime = std::chrono::high_resolution_clock::now();
     float time = std::chrono::duration<float>(std::chrono::high_resolution_clock::now() - startTime).count();
 
-    const float maxGrassDist = 5000;
+    const float fadeStart = g_Settings.GetGrassFadeStart();
+    const float fadeEnd = g_Settings.GetGrassFadeEnd();
     const glm::vec3& camPos = m_renderer->GetCameraPosition();
 
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
@@ -304,8 +308,7 @@ void GrassRenderer::Draw(VkCommandBuffer commandBuffer, VkDescriptorSet sharedDe
 
     for (const auto* chunk : m_visibleChunksThisFrame) {
         float dist = glm::length(chunk->center - camPos);
-        float lodStart = maxGrassDist * 0.75f;
-        float lodFactor = std::clamp((dist - lodStart) / (maxGrassDist - lodStart), 0.0f, 1.0f);
+        float lodFactor = std::clamp((dist - fadeStart) / (fadeEnd - fadeStart), 0.0f, 1.0f);
 
         GrassPushConstants push{};
         push.time = time;
