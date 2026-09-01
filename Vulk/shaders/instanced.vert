@@ -9,16 +9,21 @@ layout(push_constant) uniform Constants {
     float lodBlend; 
 } push;
 
+// BASE VERTEX INPUTS (Binding 0)
 layout(location = 0) in vec3 inPosition;
 layout(location = 1) in vec3 inNormal;
 layout(location = 2) in vec2 inTexCoord;
 layout(location = 3) in vec4 inTangent;
+layout(location = 4) in vec3 inColor;        // Added to silence validation
+layout(location = 5) in vec3 inCoarsePos;    // Added to silence validation
+layout(location = 6) in vec3 inCoarseNormal; // Added to silence validation
 
 // INSTANCE BUFFER INPUTS (Binding 1)
 layout(location = 7) in vec4 instModelCol0;
 layout(location = 8) in vec4 instModelCol1;
 layout(location = 9) in vec4 instModelCol2;
 layout(location = 10) in vec4 instModelCol3;
+layout(location = 11) in vec4 instCustomData; // Added for tinting/wind phase!
 
 layout(location = 0) out vec3 fragNormal;
 layout(location = 1) out vec2 fragTexCoord;
@@ -45,4 +50,4 @@ void main() {
     fragTextureId = push.textureId; // Submesh textures still map via push constants!
     fragNormalTextureId = push.normalTextureId;
     fragWorldPos = worldPos.xyz;
-}
+}   

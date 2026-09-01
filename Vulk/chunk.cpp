@@ -155,40 +155,35 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
                 scene.RemoveChunk(resultKey);
             }
 
-            for (const auto& treeData : result.trees) {
-                Entity treeEntity = scene.GetRegistry().CreateEntity();
-
-                uint32_t coordHash = Hash2D(static_cast<int>(treeData.position.x), static_cast<int>(treeData.position.z), s_globalSeed);
+            for (const auto& propData : result.props) {
+                Entity propEntity = scene.GetRegistry().CreateEntity();
 
                 TransformComponent tComp;
-                tComp.position = treeData.position;
-                tComp.rotation = treeData.rotation;
-                tComp.scale = treeData.scale;
-
+                tComp.position = propData.position;
+                tComp.rotation = propData.rotation;
+                tComp.scale = propData.scale;
                 tComp.isDirty = true;
 
                 RenderComponent rComp;
-                if (result.lod == 0) {
-                    rComp.meshName = "assets/models/tree/tree.obj"; // Full 1k vert mesh
-                }
-                else if (result.lod <= 2) { // FIX: Keep the 3D mesh alive through LOD 2!
-                    rComp.meshName = "assets/models/tree/tree_lod1.obj"; // Decimated mesh (~300 verts)
+
+                if (!propData.lodMeshes.empty()) {
+                    int targetLodIndex = std::min(result.lod, static_cast<int>(propData.lodMeshes.size()) - 1);
+                    rComp.meshName = propData.lodMeshes[targetLodIndex];
                 }
                 else {
-                    rComp.meshName = "assets/models/tree/tree_billboard.obj"; // 2-triangle cross plane
-                    tComp.scale = treeData.scale + glm::vec3(10.0f);
+                    rComp.meshName = ""; // Fallback
                 }
 
                 rComp.type = MeshType::Static;
                 rComp.isInstanced = true;
                 rComp.isVisible = true;
 
-                scene.GetRegistry().AddComponent<TransformComponent>(treeEntity, tComp);
-                scene.GetRegistry().AddComponent<RenderComponent>(treeEntity, rComp);
+                scene.GetRegistry().AddComponent<TransformComponent>(propEntity, tComp);
+                scene.GetRegistry().AddComponent<RenderComponent>(propEntity, rComp);
 
                 ChunkPropComponent cComp;
                 cComp.chunkKey = resultKey;
-                scene.GetRegistry().AddComponent<ChunkPropComponent>(treeEntity, cComp);
+                scene.GetRegistry().AddComponent<ChunkPropComponent>(propEntity, cComp);
             }
 
             scene.MarkDirty();
@@ -196,8 +191,8 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
             renderer.AddTerrainChunk(resultKey, result.coord.cx, result.coord.cz, result.lod, result.vertices, result.indices);
             renderer.AddGrass(resultKey, result.grassInstances);
 
-            if (!result.butterflies.empty()) {
-                renderer.AddBoid(resultKey, result.butterflies, 4);
+            if (!result.boids.empty()) {
+                renderer.AddBoid(resultKey, result.boids, 4);
             }
 
             loadedChunks[resultKey] = result.lod;
@@ -362,7 +357,6 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
     for (auto it = loadedChunks.begin(); it != loadedChunks.end(); ) {
         if (m_desiredKeysLookup.find(it->first) == m_desiredKeysLookup.end()) {
             renderer.RemoveTerrainChunk(it->first);
-            renderer.RemoveWaterBody(it->first);
 
             renderer.RemoveBoid(it->first);
 
@@ -728,7 +722,7 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
     outResult.vertices.clear();
     outResult.indices.clear();
     outResult.grassInstances.clear();
-    outResult.trees.clear();
+    outResult.props.clear();
 
     outResult.vertices.reserve(resolution * resolution + (resolution - 1) * 8);
     outResult.indices.reserve(((resolution - 1) * (resolution - 1) * 6) + ((resolution - 1) * 4 * 6));
@@ -899,7 +893,7 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
         };
     uint32_t rngState = static_cast<uint32_t>(chunkX * 73856 + chunkZ * 19349 + 1);
 
-    GenerateChunkTrees(chunkX, chunkZ, outResult.lod, outResult);
+    GenerateChunkProps(chunkX, chunkZ, outResult.lod, outResult);
 
     GenerateChunkSwarms(chunkX, chunkZ, outResult.lod, outResult);
 
@@ -975,51 +969,78 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
         }
     }
 }
-void Chunk::GenerateChunkTrees(int chunkX, int chunkZ, int lod, ChunkJobResult& outResult) {
-    // CPU CULL: Stop generating trees if the chunk is LOD 4 or higher (past treeFadeEnd)
-    if (lod >= 4) {
-        return;
-    }
+void Chunk::GenerateChunkProps(int chunkX, int chunkZ, int lod, ChunkJobResult& outResult) {
+    if (lod >= 4) return; // CPU Cull: Past tree fade end
 
-    // FIXED STEP SIZE: Every LOD evaluates exact same grid coordinates
     const float stepSize = 16.0f;
-
     const float startX = chunkX * m_chunkSize;
     const float startZ = chunkZ * m_chunkSize;
 
     static thread_local FastNoiseLite treeNoise;
-    static thread_local bool treeNoiseInit = false;
-    if (!treeNoiseInit) {
+    static thread_local FastNoiseLite stoneNoise;
+    static thread_local bool noiseInit = false;
+
+    if (!noiseInit) {
         treeNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
         treeNoise.SetFrequency(0.003f);
-        treeNoiseInit = true;
+
+        stoneNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+        stoneNoise.SetFrequency(0.08f);
+        noiseInit = true;
     }
+
     treeNoise.SetSeed(s_globalSeed + 420);
+    stoneNoise.SetSeed(s_globalSeed + 840);
 
     for (float x = startX; x < startX + m_chunkSize; x += stepSize) {
         for (float z = startZ; z < startZ + m_chunkSize; z += stepSize) {
 
+            uint32_t coordHash = Hash2D(static_cast<int>(x), static_cast<int>(z), s_globalSeed);
+            auto [groundY, biomeColor] = CalculateHeightAndColor(x, z);
+
+            if (groundY <= 2.0f || groundY >= 85.0f) continue;
+
             float forestMask = treeNoise.GetNoise(x, z);
+            float stoneMask = stoneNoise.GetNoise(x, z);
+            float spawnChance = (coordHash % 1000) / 1000.0f;
 
-            if (forestMask > 0.1f) {
-                uint32_t coordHash = Hash2D(static_cast<int>(x), static_cast<int>(z), s_globalSeed);
-                float spawnChance = (coordHash % 1000) / 1000.0f;
+            // 1. Generate Trees
+            if (forestMask > 0.1f && spawnChance < 0.15f && biomeColor.y >= 0.7f) {
+                PropInstance tree{};
+                tree.position = glm::vec3(x, groundY, z);
+                tree.rotation = glm::vec3(0.0f, static_cast<float>(coordHash % 360), 0.0f);
+                tree.scale = glm::vec3(0.08f + (static_cast<float>((coordHash >> 8) % 70) / 1000.0f));
+                tree.customPayload = static_cast<float>(coordHash % 100) / 100.0f;
 
-                if (spawnChance < 0.15f) {
-                    auto [groundY, biomeColor] = CalculateHeightAndColor(x, z);
+                // Define the LOD chain for trees
+                tree.lodMeshes = {
+                    "assets/models/tree/tree.obj",           // LOD 0
+                    "assets/models/tree/tree_lod1.obj",      // LOD 1
+                    "assets/models/tree/tree_lod1.obj",      // LOD 2
+                    "assets/models/tree/tree_billboard.obj"  // LOD 3
+                };
 
-                    if (groundY > 2.0f && groundY < 85.0f && biomeColor.y >= 0.7f) {
-                        TreeInstance tree{};
-                        tree.position = glm::vec3(x, groundY, z);
-                        tree.rotation = glm::vec3(0.0f, static_cast<float>(coordHash % 360), 0.0f);
-
-                        float randomScale = 0.08f + (static_cast<float>((coordHash >> 8) % 70) / 1000.0f);
-                        tree.scale = glm::vec3(randomScale);
-
-                        outResult.trees.push_back(tree);
-                    }
-                }
+                outResult.props.push_back(tree);
             }
+            //// 2. Generate Stones
+            //else if (stoneMask > 0.4f && spawnChance < 0.4f) {
+            //    PropInstance stone{};
+            //    stone.position = glm::vec3(x, groundY - 0.15f, z);
+            //    stone.rotation = glm::vec3(
+            //        static_cast<float>(coordHash % 360),
+            //        static_cast<float>((coordHash >> 4) % 360),
+            //        static_cast<float>((coordHash >> 8) % 360)
+            //    );
+            //    stone.scale = glm::vec3(0.02f + (static_cast<float>(coordHash % 40) / 1000.0f));
+            //    stone.customPayload = 0.0f;
+
+            //    // Define a single LOD for stones
+            //    stone.lodMeshes = {
+            //        "assets/models/rock/stone.obj"
+            //    };
+
+            //    outResult.props.push_back(stone);
+            //}
         }
     }
 }
@@ -1035,7 +1056,7 @@ void Chunk::GenerateChunkSwarms(int chunkX, int chunkZ, int lod, ChunkJobResult&
 
     // Spawn in lowlands/foothills with a 40% chance per chunk
     if (groundY < 80.0f && (coordHash % 100) < 40) {
-        outResult.butterflies.reserve(46);
+        outResult.boids.reserve(46);
         for (int i = 0; i < 46; i++) {
             BoidInstance b{};
             float jitterX = ((coordHash * (i + 1) % 100) / 100.0f) * 30.0f - 15.0f;
@@ -1049,7 +1070,7 @@ void Chunk::GenerateChunkSwarms(int chunkX, int chunkZ, int lod, ChunkJobResult&
             float randomTimeOffset = static_cast<float>((coordHash * i) % 1000);
             b.velocity = glm::vec4(1.0f, 0.0f, 0.0f, randomTimeOffset);
 
-            outResult.butterflies.push_back(b);
+            outResult.boids.push_back(b);
         }
     }
 }

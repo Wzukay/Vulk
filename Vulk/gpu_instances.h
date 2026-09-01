@@ -4,6 +4,8 @@
 
 #include <GLFW/glfw3.h>
 #include <glm/gtc/matrix_transform.hpp>
+#include <unordered_set>
+#include <optional>
 
 struct UniformBufferObject {
     alignas(16) glm::mat4 view;              // 64 bytes
@@ -35,20 +37,6 @@ struct UniformBufferObject {
     alignas(16) glm::mat4 inverseProj;
     alignas(16) glm::mat4 inverseView;
 };
-
-struct SSAOPushConstants {
-    glm::vec2 screenSize;
-    float radius;
-    float bias;
-};
-
-struct SSAOBlurPushConstants {
-    glm::vec2 screenSize;
-    glm::vec2 blurDirection;
-    float colorSigma;
-    float spatialSigma;
-};
-
 struct SSAOUBO {
     glm::mat4 projection;
     glm::mat4 inverseProjection;
@@ -56,7 +44,17 @@ struct SSAOUBO {
     glm::vec4 noise[16];
 };
 
-// Add to your FSRConstants struct so the UI can toggle it:
+struct SSAOPushConstants {
+    glm::vec2 screenSize;
+    float radius;
+    float bias;
+};
+struct SSAOBlurPushConstants {
+    glm::vec2 screenSize;
+    glm::vec2 blurDirection;
+    float colorSigma;
+    float spatialSigma;
+};
 struct FSRConstants {
     glm::vec4 const0;
     glm::vec4 const1;
@@ -67,34 +65,46 @@ struct FSRConstants {
     float _pad[2];
 };
 
-struct Light {
-    alignas(16) glm::vec4 positionOrDir; // w: 0 = directional, 1 = point
-    alignas(16) glm::vec4 color;         // rgb = color, a = intensity
-    alignas(16) glm::vec4 params;        // x = range (point lights)
+struct RenderTarget {
+    VkImage image = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkImageView view = VK_NULL_HANDLE;
+    VkSampler sampler = VK_NULL_HANDLE; // leave VK_NULL_HANDLE if this target has no dedicated sampler
 
-    static Light Directional(const glm::vec3& direction, const glm::vec3& color, float intensity = 1.0f) {
-        Light l{};
-        l.positionOrDir = glm::vec4(glm::normalize(direction), 0.0f);
-        l.color = glm::vec4(color, intensity);
-        l.params = glm::vec4(0.0f);
-        return l;
-    }
-
-    static Light Point(const glm::vec3& position, const glm::vec3& color, float intensity = 1.0f, float range = 10.0f) {
-        Light l{};
-        l.positionOrDir = glm::vec4(position, 1.0f);
-        l.color = glm::vec4(color, intensity);
-        l.params = glm::vec4(range, 0.0f, 0.0f, 0.0f);
-        return l;
+    void Destroy(VkDevice device) {
+        if (device == VK_NULL_HANDLE) return;
+        if (sampler != VK_NULL_HANDLE) { vkDestroySampler(device, sampler, nullptr); sampler = VK_NULL_HANDLE; }
+        if (view != VK_NULL_HANDLE) { vkDestroyImageView(device, view, nullptr);  view = VK_NULL_HANDLE; }
+        if (image != VK_NULL_HANDLE) { vkDestroyImage(device, image, nullptr);     image = VK_NULL_HANDLE; }
+        if (memory != VK_NULL_HANDLE) { vkFreeMemory(device, memory, nullptr);      memory = VK_NULL_HANDLE; }
     }
 };
-
 struct DrawEntry {
     uint32_t objectIndex;
     uint32_t subMeshIndex; // index into globalSubMeshes
     float distSq;
     int64_t chunkKey = -1;
     float cachedMaxScale = 1.0f;
+};
+struct IndirectCommand {
+    uint32_t vertexCount;
+    uint32_t instanceCount;
+    uint32_t firstVertex;
+    uint32_t firstInstance;
+};
+
+struct QueueFamilyIndices {
+    std::optional<uint32_t> graphicsFamily;
+    std::optional<uint32_t> presentFamily;
+
+    const bool isComplete() {
+        return graphicsFamily.has_value() && presentFamily.has_value();
+    }
+};
+struct SwapChainSupportDetails {
+    VkSurfaceCapabilitiesKHR capabilities = {};
+    std::vector<VkSurfaceFormatKHR> formats;
+    std::vector<VkPresentModeKHR> presentModes;
 };
 
 struct FrustumPlane {
@@ -110,9 +120,43 @@ struct GrassChunkMetadata {
     uint32_t pad[2]; // align to 16 bytes
 };
 
-struct IndirectCommand {
-    uint32_t vertexCount;
-    uint32_t instanceCount;
-    uint32_t firstVertex;
-    uint32_t firstInstance;
+struct PropInstance {
+    glm::vec3 position;
+    glm::vec3 rotation;
+    glm::vec3 scale;
+    float customPayload;
+
+    std::vector<std::string> lodMeshes;
+};
+struct InstanceData {
+    alignas(16) glm::mat4 modelMatrix;
+    alignas(16) glm::vec4 customData; // x = windPhase, y = albedo tint, z = metallic override, w = reserved
+
+    static VkVertexInputBindingDescription getBindingDescription() {
+        VkVertexInputBindingDescription bindingDescription{};
+        bindingDescription.binding = 1; // Binding 0 is usually vertices
+        bindingDescription.stride = sizeof(InstanceData);
+        bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+        return bindingDescription;
+    }
+
+    static std::array<VkVertexInputAttributeDescription, 5> getAttributeDescriptions() {
+        std::array<VkVertexInputAttributeDescription, 5> attributeDescriptions{};
+
+        // Matrix requires 4 vec4 slots. Since ModelVertex uses locations 0-6, this starts at 7.
+        for (int i = 0; i < 4; i++) {
+            attributeDescriptions[i].binding = 1;
+            attributeDescriptions[i].location = 7 + i; // FIX: Shifted to start at 7
+            attributeDescriptions[i].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+            attributeDescriptions[i].offset = offsetof(InstanceData, modelMatrix) + sizeof(glm::vec4) * i;
+        }
+
+        // Custom Data Payload
+        attributeDescriptions[4].binding = 1;
+        attributeDescriptions[4].location = 11; // FIX: Shifted to 11
+        attributeDescriptions[4].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+        attributeDescriptions[4].offset = offsetof(InstanceData, customData);
+
+        return attributeDescriptions;
+    }
 };

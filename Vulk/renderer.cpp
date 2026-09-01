@@ -369,8 +369,6 @@ void VulkanRenderer::InitVulkan() {
 	m_skybox.LoadTexture();
 	m_skybox.UpdateDescriptor(logicalDevice, descriptorSet);
 
-	m_waterRenderer.Init(logicalDevice, swapChainImageFormat, depthFormat, descriptorSetLayout, m_currentMsaaSamples, this);
-
 	m_terrainRenderer.Init(logicalDevice, this, &m_uploader, 5'000'000, 10'000'000);
 	m_terrainRenderer.UpdateHZBDescriptor(hzbTarget.view, hzbTarget.sampler);
 
@@ -2151,7 +2149,6 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 			m_terrainRenderer.Draw(commandBuffer, pipelineLayout, static_cast<uint32_t>(currentFrame), drawCallCount);
 		}
 
-		m_waterRenderer.Draw(commandBuffer, descriptorSet, drawCallCount);
 		m_grassRenderer.Draw(commandBuffer, descriptorSet, static_cast<uint32_t>(currentFrame), drawCallCount);
 
 		vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_boidRenderer.m_graphicsPipeline);
@@ -2352,19 +2349,6 @@ void VulkanRenderer::SetTerrainChunkSize(float size) {
 }
 void VulkanRenderer::ClearHeightCache() {
 	m_terrainRenderer.ClearHeightCache();
-}
-
-void VulkanRenderer::AddWaterBodyForChunk(int64_t chunkKey, const WaterMesh& mesh,
-	const std::string& normalMapPath,
-	float tiling, float waveStrength) {
-	m_waterRenderer.AddWaterBodyForChunk(chunkKey, mesh, normalMapPath, tiling, waveStrength);
-}
-void VulkanRenderer::AddWaterBody(const WaterMesh& mesh, const std::string& normalMapPath,
-	float tiling, float waveStrength) {
-	m_waterRenderer.AddWaterBody(mesh, normalMapPath, tiling, waveStrength);
-}
-void VulkanRenderer::RemoveWaterBody(int64_t chunkKey) {
-	m_waterRenderer.RemoveWaterBody(chunkKey);
 }
 
 void VulkanRenderer::AddGrass(int64_t key, const std::vector<GrassInstance>& grassInstances) {
@@ -2690,7 +2674,6 @@ void VulkanRenderer::Cleanup() {
 	m_terrainRenderer.Cleanup();
 	m_grassRenderer.Cleanup();
 	m_staticMeshRenderer.Cleanup();
-	m_waterRenderer.Cleanup(logicalDevice);
 	m_skybox.Cleanup(logicalDevice);
 	m_boidRenderer.Cleanup();
 

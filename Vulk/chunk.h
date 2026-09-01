@@ -87,11 +87,6 @@ inline BiomeType DetermineBiome(float temperature, float moisture) {
     return BiomeType::TallPlains;
 }
 
-// A chunk's grid coordinate. Replaces the (cx, cz, key) triple that used to
-// be stored separately — and could drift out of sync — in ChunkJobResult,
-// ChunkSortItem, and the ad-hoc Key()/Unkey() free functions in chunk.cpp.
-// key is always derivable from (cx, cz), so there's only one source of
-// truth now.
 struct ChunkCoord {
     int cx = 0;
     int cz = 0;
@@ -113,17 +108,6 @@ struct TerrainSample
     glm::vec3 biomeWeights;
 };
 
-struct RiverSegment {
-    std::vector<glm::vec3> path;   // centerline points
-    float width;
-};
-
-struct TreeInstance {
-    glm::vec3 position;
-    glm::vec3 rotation;
-    glm::vec3 scale;
-};
-
 struct ChunkJobResult {
     ChunkCoord coord;
     std::vector<ModelVertex> vertices;
@@ -131,14 +115,8 @@ struct ChunkJobResult {
     int lod;
 
     std::vector<GrassInstance> grassInstances;
-    std::vector<TreeInstance> trees;
-    std::vector<BoidInstance> butterflies;
-
-    // Present only if this chunk actually generated water/rivers — replaces
-    // the old hasWater/waterMesh and hasRiver/rivers bool+data pairs, so
-    // there's no separate flag that can fall out of sync with the data.
-    //std::optional<WaterMesh> waterMesh;
-    //std::optional<std::vector<RiverSegment>> rivers;
+    std::vector<PropInstance> props;
+    std::vector<BoidInstance> boids;
 };
 struct ChunkSortItem {
     ChunkCoord coord;
@@ -254,6 +232,6 @@ private:
     void GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSize,
         ChunkJobResult& outResult,
         std::shared_ptr<std::atomic<bool>> cancelToken = nullptr);
-    void GenerateChunkTrees(int chunkX, int chunkZ, int lod, ChunkJobResult& outResult);
+    void GenerateChunkProps(int chunkX, int chunkZ, int lod, ChunkJobResult& outResult);
     void GenerateChunkSwarms(int chunkX, int chunkZ, int lod, ChunkJobResult& outResult);
 };

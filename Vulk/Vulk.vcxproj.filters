@@ -72,9 +72,6 @@
     <ClCompile Include="renderer_terrain.cpp">
       <Filter>Source Files\Rendering</Filter>
     </ClCompile>
-    <ClCompile Include="renderer_water.cpp">
-      <Filter>Source Files\Rendering</Filter>
-    </ClCompile>
     <ClCompile Include="ring_buffer_uploader.cpp">
       <Filter>Source Files\Rendering</Filter>
     </ClCompile>
@@ -150,9 +147,6 @@
       <Filter>Header Files\Rendering</Filter>
     </ClInclude>
     <ClInclude Include="renderer_terrain.h">
-      <Filter>Header Files\Rendering</Filter>
-    </ClInclude>
-    <ClInclude Include="renderer_water.h">
       <Filter>Header Files\Rendering</Filter>
     </ClInclude>
     <ClInclude Include="gpu_async.h">
@@ -250,17 +244,11 @@
     <None Include="shaders\static.frag">
       <Filter>Shaders\Fragment</Filter>
     </None>
-    <None Include="shaders\water.frag">
-      <Filter>Shaders\Fragment</Filter>
-    </None>
     <None Include="shaders\boid.comp">
       <Filter>Shaders\Compute</Filter>
     </None>
     <None Include="shaders\fsr.frag">
       <Filter>Shaders\Fragment</Filter>
-    </None>
-    <None Include="shaders\water.vert">
-      <Filter>Shaders\Vertex</Filter>
     </None>
     <None Include="shaders\static.vert">
       <Filter>Shaders\Vertex</Filter>

@@ -5,7 +5,6 @@
 #include <GLFW/glfw3.h>
 #include <vector>
 #include <string>
-#include <optional>
 #include <chrono>
 #include <unordered_set>
 #include <mutex>
@@ -26,7 +25,6 @@
 #include "asset_manager.h"
 
 #include "renderer_skybox.h"
-#include "renderer_water.h"
 #include "renderer_grass.h"
 #include "renderer_terrain.h"
 #include "renderer_static.h"
@@ -41,32 +39,25 @@
 struct CameraData;
 class Scene;
 
-struct QueueFamilyIndices {
-    std::optional<uint32_t> graphicsFamily;
-    std::optional<uint32_t> presentFamily;
+struct Light {
+    alignas(16) glm::vec4 positionOrDir; // w: 0 = directional, 1 = point
+    alignas(16) glm::vec4 color;         // rgb = color, a = intensity
+    alignas(16) glm::vec4 params;        // x = range (point lights)
 
-    const bool isComplete() {
-        return graphicsFamily.has_value() && presentFamily.has_value();
+    static Light Directional(const glm::vec3& direction, const glm::vec3& color, float intensity = 1.0f) {
+        Light l{};
+        l.positionOrDir = glm::vec4(glm::normalize(direction), 0.0f);
+        l.color = glm::vec4(color, intensity);
+        l.params = glm::vec4(0.0f);
+        return l;
     }
-};
-struct SwapChainSupportDetails {
-    VkSurfaceCapabilitiesKHR capabilities = {};
-    std::vector<VkSurfaceFormatKHR> formats;
-    std::vector<VkPresentModeKHR> presentModes;
-};
 
-struct RenderTarget {
-    VkImage image = VK_NULL_HANDLE;
-    VkDeviceMemory memory = VK_NULL_HANDLE;
-    VkImageView view = VK_NULL_HANDLE;
-    VkSampler sampler = VK_NULL_HANDLE; // leave VK_NULL_HANDLE if this target has no dedicated sampler
-
-    void Destroy(VkDevice device) {
-        if (device == VK_NULL_HANDLE) return;
-        if (sampler != VK_NULL_HANDLE) { vkDestroySampler(device, sampler, nullptr); sampler = VK_NULL_HANDLE; }
-        if (view != VK_NULL_HANDLE) { vkDestroyImageView(device, view, nullptr);  view = VK_NULL_HANDLE; }
-        if (image != VK_NULL_HANDLE) { vkDestroyImage(device, image, nullptr);     image = VK_NULL_HANDLE; }
-        if (memory != VK_NULL_HANDLE) { vkFreeMemory(device, memory, nullptr);      memory = VK_NULL_HANDLE; }
+    static Light Point(const glm::vec3& position, const glm::vec3& color, float intensity = 1.0f, float range = 10.0f) {
+        Light l{};
+        l.positionOrDir = glm::vec4(position, 1.0f);
+        l.color = glm::vec4(color, intensity);
+        l.params = glm::vec4(range, 0.0f, 0.0f, 0.0f);
+        return l;
     }
 };
 
@@ -351,17 +342,7 @@ public:
     void SetFogParams(float start, float end);
 
 private:
-    WaterRenderer m_waterRenderer;
-public:
-    void AddWaterBodyForChunk(int64_t chunkKey, const WaterMesh& mesh,
-        const std::string& normalMapPath,
-        float tiling = 8.0f, float waveStrength = 0.15f);
-    void RemoveWaterBody(int64_t chunkKey);
-    void AddWaterBody(const WaterMesh& mesh, const std::string& normalMapTexturePath, float tiling = 8.0f, float waveStrength = 0.15f);
-
-private:
     GrassRenderer m_grassRenderer;
-
 public:
     void AddGrass(int64_t key, const std::vector<GrassInstance>& grassInstances);
 
@@ -395,7 +376,6 @@ private:
 
 private:
     BoidRenderer m_boidRenderer;
-
 public:
     void AddBoid(int64_t chunkKey, const std::vector<BoidInstance>& initialBoids, uint32_t textureId);
     void RemoveBoid(int64_t chunkKey);

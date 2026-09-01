@@ -76,30 +76,6 @@ struct ModelVertex {
     }
 };
 
-struct InstanceData {
-    glm::mat4 modelMatrix;
-
-    static VkVertexInputBindingDescription getBindingDescription() {
-        VkVertexInputBindingDescription desc{};
-        desc.binding = 1; // Binding 1 is reserved for per-instance data
-        desc.stride = sizeof(InstanceData);
-        desc.inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
-        return desc;
-    }
-
-    static std::vector<VkVertexInputAttributeDescription> getAttributeDescriptions() {
-        std::vector<VkVertexInputAttributeDescription> descs(4);
-        // A mat4 takes up 4 attribute locations (vec4s) in the shader
-        for (int i = 0; i < 4; i++) {
-            descs[i].binding = 1;
-            descs[i].location = 7 + i;
-            descs[i].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-            descs[i].offset = sizeof(glm::vec4) * i;
-        }
-        return descs;
-    }
-};
-
 struct RenderMesh {
     VkBuffer vertexBuffer = VK_NULL_HANDLE;
     VkDeviceMemory vertexBufferMemory = VK_NULL_HANDLE;
@@ -125,39 +101,3 @@ namespace std {
         }
     };
 }
-
-// ---------------
-
-struct WaterVertex {
-    glm::vec3 pos;
-    glm::vec2 uv;
-};
-
-struct WaterMesh {
-    std::vector<WaterVertex> vertices;
-    std::vector<uint32_t> indices;
-    float waterHeight = 0.0f;
-};
-
-class WaterMeshGen {
-public:
-    static WaterMesh GenerateLake(const std::vector<glm::vec2>& footprintXZ, float waterHeight, float gridSpacing);
-    static WaterMesh GenerateRiver(const std::vector<glm::vec3>& centerline, float width, int segmentsPerPoint = 1);
-
-    // Builds a lake mesh directly from a boolean "is this cell part of the
-    // lake" mask on a regular grid, instead of approximating the basin's
-    // footprint with a convex hull. A hull inflates concave/irregular basin
-    // shapes into a convex blob, which makes the water spill out over
-    // higher ground at the edges instead of hugging the actual depression.
-    // `cellMask` is width*height, row-major, true where that grid cell
-    // belongs to the lake. `originX/originZ` is the world position of
-    // mask cell (0,0), and `cellSize` is the spacing between mask cells.
-    static WaterMesh GenerateLakeFromMask(
-        const std::vector<bool>& cellMask,
-        int width, int height,
-        float originX, float originZ, float cellSize,
-        float waterHeight);
-
-private:
-    static bool PointInPolygon(const glm::vec2& p, const std::vector<glm::vec2>& poly);
-};
