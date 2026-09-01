@@ -68,6 +68,9 @@ public:
     void SetRenderer(VulkanRenderer* renderer) { m_renderer = renderer; }
 
     void LoadMesh(const std::string& path);
+    void LoadOBJ(const std::string& path);
+    void LoadGLTF(const std::string& path);
+
     void RegisterMesh(
         const std::string& name,
         std::vector<ModelVertex>&& vertices,   
@@ -76,6 +79,7 @@ public:
         std::vector<std::string> materialTextures = {}
     );
     void UnregisterMesh(const std::string& name) { m_meshes.erase(name); }
+
     MeshAsset* GetMesh(const std::string& path);
     bool ParseObjFileByMaterial(const std::string& filepath,
         std::vector<std::vector<ModelVertex>>& verticesPerMaterial,

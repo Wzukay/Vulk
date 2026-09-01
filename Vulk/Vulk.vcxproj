@@ -190,6 +190,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="asset_manager.h" />
+    <ClInclude Include="cgltf.h" />
     <ClInclude Include="chunk.h" />
     <ClInclude Include="day_night.h" />
     <ClInclude Include="ecs.h" />

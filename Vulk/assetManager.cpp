@@ -1,3 +1,5 @@
+#define _CRT_SECURE_NO_WARNINGS
+
 #include "asset_manager.h"
 #include "renderer.h"
 
@@ -11,6 +13,9 @@
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
+
+#define CGLTF_IMPLEMENTATION
+#include "cgltf.h"
 
 AssetManager g_AssetManager;
 
@@ -887,6 +892,25 @@ bool AssetManager::ParseObjFileByMaterial(const std::string& filepath,
 }
 
 void AssetManager::LoadMesh(const std::string& path) {
+    // 1. Prevent duplicate loading
+    if (m_meshes.find(path) != m_meshes.end()) return;
+
+    // 2. Route by extension
+    if (path.length() > 4) {
+        std::string ext = path.substr(path.length() - 4);
+        // Convert to lowercase to handle .GLB or .GLTF safely
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+
+        if (ext == ".glb" || ext == "gltf") {
+            LoadGLTF(path);
+            return;
+        }
+    }
+
+    // 3. Fallback to OBJ
+    LoadOBJ(path);
+}
+void AssetManager::LoadOBJ(const std::string& path) {
     if (m_meshes.find(path) != m_meshes.end()) return;
 
     std::vector<std::vector<ModelVertex>> verticesPerMaterial;
@@ -975,6 +999,191 @@ void AssetManager::LoadMesh(const std::string& path) {
     m_meshes[path] = std::move(mesh);
     std::cout << "[Asset Manager] Loaded mesh: " << path << " with " << m_meshes[path].subMeshes.size() << " submeshes\n";
 }
+void AssetManager::LoadGLTF(const std::string& path) {
+    if (m_meshes.find(path) != m_meshes.end()) return;
+
+    cgltf_options options = {};
+    cgltf_data* data = nullptr;
+    cgltf_result result = cgltf_parse_file(&options, path.c_str(), &data);
+
+    if (result != cgltf_result_success) {
+        std::cerr << "[AssetManager] FAILED TO LOAD GLTF: " << path << "\n";
+        m_meshes[path] = MeshAsset{}; // Register empty to prevent infinite reload loops
+        return;
+    }
+
+    cgltf_load_buffers(&options, data, path.c_str());
+
+    std::string baseDir = "";
+    size_t lastSlash = path.find_last_of("/\\");
+    if (lastSlash != std::string::npos) {
+        baseDir = path.substr(0, lastSlash + 1);
+    }
+
+    MeshAsset mesh;
+    uint32_t globalVertexOffset = 0;
+    uint32_t globalIndexOffset = 0;
+
+    // Helper to extract node transforms (glTF allows meshes to be translated/scaled inside the file)
+    auto GetNodeTransform = [](cgltf_node* node) -> glm::mat4 {
+        glm::mat4 transform(1.0f);
+        if (node->has_matrix) {
+            memcpy(&transform[0][0], node->matrix, sizeof(float) * 16);
+        }
+        else {
+            glm::vec3 t(0.0f), s(1.0f);
+            glm::quat r(1.0f, 0.0f, 0.0f, 0.0f); // w, x, y, z
+            if (node->has_translation) t = glm::vec3(node->translation[0], node->translation[1], node->translation[2]);
+            if (node->has_rotation) r = glm::quat(node->rotation[3], node->rotation[0], node->rotation[1], node->rotation[2]);
+            if (node->has_scale) s = glm::vec3(node->scale[0], node->scale[1], node->scale[2]);
+
+            transform = glm::translate(glm::mat4(1.0f), t) * glm::mat4_cast(r) * glm::scale(glm::mat4(1.0f), s);
+        }
+        return transform;
+        };
+
+    // Parse all nodes
+    for (cgltf_size i = 0; i < data->nodes_count; ++i) {
+        cgltf_node* node = &data->nodes[i];
+        if (!node->mesh) continue;
+
+        glm::mat4 nodeTransform = GetNodeTransform(node);
+        glm::mat3 normalMatrix = glm::transpose(glm::inverse(glm::mat3(nodeTransform)));
+
+        for (cgltf_size p = 0; p < node->mesh->primitives_count; ++p) {
+            cgltf_primitive* primitive = &node->mesh->primitives[p];
+
+            // Only support triangles
+            if (primitive->type != cgltf_primitive_type_triangles) continue;
+
+            SubMesh sub;
+            sub.vertexOffset = globalVertexOffset;
+            sub.firstIndex = globalIndexOffset;
+
+            std::vector<ModelVertex> localVerts;
+            std::vector<uint32_t> localIndices;
+
+            // 1. EXTRACT INDICES
+            if (primitive->indices) {
+                cgltf_accessor* accessor = primitive->indices;
+                localIndices.resize(accessor->count);
+                for (cgltf_size idx = 0; idx < accessor->count; ++idx) {
+                    localIndices[idx] = static_cast<uint32_t>(cgltf_accessor_read_index(accessor, idx));
+                }
+
+                for (size_t i = 0; i + 2 < localIndices.size(); i += 3) {
+                    std::swap(localIndices[i + 1], localIndices[i + 2]);
+                }
+            }
+
+            // 2. FIND VERTEX COUNT
+            cgltf_size vertexCount = 0;
+            for (cgltf_size a = 0; a < primitive->attributes_count; ++a) {
+                if (primitive->attributes[a].type == cgltf_attribute_type_position) {
+                    vertexCount = primitive->attributes[a].data->count;
+                    break;
+                }
+            }
+            localVerts.resize(vertexCount);
+
+            // 3. EXTRACT ATTRIBUTES
+            for (cgltf_size a = 0; a < primitive->attributes_count; ++a) {
+                cgltf_attribute* attrib = &primitive->attributes[a];
+                cgltf_accessor* accessor = attrib->data;
+
+                for (cgltf_size v = 0; v < vertexCount; ++v) {
+                    float values[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+                    cgltf_accessor_read_float(accessor, v, values, 4);
+
+                    if (attrib->type == cgltf_attribute_type_position) {
+                        glm::vec4 worldPos = nodeTransform * glm::vec4(values[0], values[1], values[2], 1.0f);
+                        localVerts[v].pos = glm::vec3(worldPos);
+
+                        // Populate coarse data for fallback logic
+                        localVerts[v].coarsePos = localVerts[v].pos;
+                    }
+                    else if (attrib->type == cgltf_attribute_type_normal) {
+                        glm::vec3 worldNorm = normalMatrix * glm::vec3(values[0], values[1], values[2]);
+                        localVerts[v].normal = glm::normalize(worldNorm);
+                        localVerts[v].coarseNormal = localVerts[v].normal;
+                    }
+                    else if (attrib->type == cgltf_attribute_type_texcoord) {
+                        localVerts[v].texCoord = glm::vec2(values[0], values[1]);
+                    }
+                    else if (attrib->type == cgltf_attribute_type_tangent) {
+                        glm::vec3 worldTan = normalMatrix * glm::vec3(values[0], values[1], values[2]);
+                        localVerts[v].tangent = glm::vec4(glm::normalize(worldTan), values[3]); // w is handedness
+                    }
+                }
+            }
+
+            // If the GLB didn't provide tangents, we compute them using your existing helper
+            if (localVerts.size() > 0 && localVerts[0].tangent == glm::vec4(0.0f)) {
+                ComputeTangents(localVerts, localIndices);
+            }
+
+            // 4. CALCULATE BOUNDS
+            glm::vec3 minB(FLT_MAX), maxB(-FLT_MAX);
+            for (const auto& v : localVerts) {
+                minB = glm::min(minB, v.pos);
+                maxB = glm::max(maxB, v.pos);
+            }
+            sub.boundingCenterLocal = (minB + maxB) * 0.5f;
+            sub.boundingRadiusLocal = glm::length(maxB - sub.boundingCenterLocal);
+            sub.indexCount = static_cast<uint32_t>(localIndices.size());
+
+            // 5. EXTRACT MATERIALS
+            std::string albedoPath = "";
+            std::string normalPath = "";
+
+            if (primitive->material) {
+                if (primitive->material->has_pbr_metallic_roughness) {
+                    cgltf_texture_view* baseColorView = &primitive->material->pbr_metallic_roughness.base_color_texture;
+                    if (baseColorView->texture && baseColorView->texture->image) {
+                        albedoPath = baseColorView->texture->image->uri ? baseDir + baseColorView->texture->image->uri : "";
+                    }
+                }
+
+                cgltf_texture_view* normalView = &primitive->material->normal_texture;
+                if (normalView->texture && normalView->texture->image) {
+                    normalPath = normalView->texture->image->uri ? baseDir + normalView->texture->image->uri : "";
+                }
+
+                if (albedoPath.empty() && primitive->material->name) {
+                    std::string matName = primitive->material->name;
+                    albedoPath = "assets/models/" + matName + "/textures/" + matName + "_albedo.dds";
+                    normalPath = "assets/models/" + matName + "/textures/" + matName + "_normal.dds";
+                }
+            }
+
+            // Ensure DDS extension enforcement (matching your OBJ pipeline)
+            auto enforceDDS = [](std::string& filepath) {
+                if (filepath.empty()) return;
+                size_t extPos = filepath.find_last_of('.');
+                if (extPos != std::string::npos) {
+                    filepath.replace(extPos, filepath.length() - extPos, ".dds");
+                }
+                };
+            enforceDDS(albedoPath);
+            enforceDDS(normalPath);
+
+            // 6. PUSH TO MESH
+            mesh.vertices.insert(mesh.vertices.end(), localVerts.begin(), localVerts.end());
+            mesh.indices.insert(mesh.indices.end(), localIndices.begin(), localIndices.end());
+            mesh.subMeshes.push_back(sub);
+            mesh.materialTextures.push_back(albedoPath);
+            mesh.normalMapTextures.push_back(normalPath);
+
+            globalVertexOffset += static_cast<uint32_t>(localVerts.size());
+            globalIndexOffset += static_cast<uint32_t>(localIndices.size());
+        }
+    }
+
+    cgltf_free(data);
+
+    m_meshes[path] = std::move(mesh);
+    std::cout << "[Asset Manager] Loaded GLTF: " << path << " with " << m_meshes[path].subMeshes.size() << " submeshes\n";
+}
 
 void AssetManager::RegisterMesh(
     const std::string& name,
@@ -1036,7 +1245,9 @@ void AssetManager::RegisterMesh(
 MeshAsset* AssetManager::GetMesh(const std::string& path) {
     auto it = m_meshes.find(path);
     if (it != m_meshes.end()) return &it->second;
-    LoadMesh(path);  // load on dem and
+
+    // LoadMesh now automatically routes to the right parser
+    LoadMesh(path);
     return &m_meshes[path];
 }
 

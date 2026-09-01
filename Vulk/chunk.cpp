@@ -1022,25 +1022,26 @@ void Chunk::GenerateChunkProps(int chunkX, int chunkZ, int lod, ChunkJobResult& 
 
                 outResult.props.push_back(tree);
             }
-            //// 2. Generate Stones
-            //else if (stoneMask > 0.4f && spawnChance < 0.4f) {
-            //    PropInstance stone{};
-            //    stone.position = glm::vec3(x, groundY - 0.15f, z);
-            //    stone.rotation = glm::vec3(
-            //        static_cast<float>(coordHash % 360),
-            //        static_cast<float>((coordHash >> 4) % 360),
-            //        static_cast<float>((coordHash >> 8) % 360)
-            //    );
-            //    stone.scale = glm::vec3(0.02f + (static_cast<float>(coordHash % 40) / 1000.0f));
-            //    stone.customPayload = 0.0f;
+            // 2. Generate Stones
+            else if (lod <= 1 && stoneMask > 0.6f && spawnChance < 0.05f) {
+                PropInstance stone{};
+                stone.position = glm::vec3(x, groundY - 0.15f, z);
+                stone.rotation = glm::vec3(
+                    static_cast<float>(coordHash % 360),
+                    static_cast<float>((coordHash >> 4) % 360),
+                    static_cast<float>((coordHash >> 8) % 360)
+                );
+                // Make them slightly larger so the few that do spawn are visible
+                stone.scale = glm::vec3(1.0f + (static_cast<float>(coordHash % 40) / 500.0f));
+                stone.customPayload = 0.0f;
 
-            //    // Define a single LOD for stones
-            //    stone.lodMeshes = {
-            //        "assets/models/rock/stone.obj"
-            //    };
+                // Define a single LOD for stones
+                stone.lodMeshes = {
+                    "assets/models/rock/rock.glb"
+                };
 
-            //    outResult.props.push_back(stone);
-            //}
+                outResult.props.push_back(stone);
+            }
         }
     }
 }

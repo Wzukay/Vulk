@@ -30,6 +30,8 @@ void Game::Init()
     g_AssetManager.LoadMesh("assets/models/tree/tree_lod1.obj");
     g_AssetManager.LoadMesh("assets/models/tree/tree_billboard.obj");
 
+    g_AssetManager.LoadMesh("assets/models/rock/rock.glb");
+
     glfwSetWindowUserPointer(window, &input);
     glfwSetCursorPosCallback(window, [](GLFWwindow* window, double xpos, double ypos) {
         Input* inputPtr = reinterpret_cast<Input*>(glfwGetWindowUserPointer(window));
