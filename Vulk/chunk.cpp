@@ -897,11 +897,40 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
 
     GenerateChunkSwarms(chunkX, chunkZ, outResult.lod, outResult);
 
-    if (outResult.lod <= 1) {
+    auto GetFastLocalHeight = [&](float wX, float wZ) -> float {
+        float localX = wX - originX;
+        float localZ = wZ - originZ;
 
-        const float GRASS_STEP = 6.0f; // Fixed world-space grid step
-        int bladesPerCell = 18;        // High density per cell
-        const float JITTER_RADIUS = 3.5f;
+        // If jitter pushes it into a neighboring chunk, fallback to raw math (rare)
+        if (localX < 0.0f || localX >= m_chunkSize || localZ < 0.0f || localZ >= m_chunkSize) {
+            return CalculateHeightAndColor(wX, wZ).first;
+        }
+
+        float gridX = (localX / m_chunkSize) * (resolution - 1);
+        float gridZ = (localZ / m_chunkSize) * (resolution - 1);
+
+        int x0 = std::clamp(static_cast<int>(gridX), 0, resolution - 2);
+        int z0 = std::clamp(static_cast<int>(gridZ), 0, resolution - 2);
+        int x1 = x0 + 1;
+        int z1 = z0 + 1;
+
+        float h00 = heightGrid[(z0 + 1) * gridSize + (x0 + 1)];
+        float h10 = heightGrid[(z0 + 1) * gridSize + (x1 + 1)];
+        float h01 = heightGrid[(z1 + 1) * gridSize + (x0 + 1)];
+        float h11 = heightGrid[(z1 + 1) * gridSize + (x1 + 1)];
+
+        float tx = gridX - x0;
+        float tz = gridZ - z0;
+
+        float h0 = std::lerp(h00, h10, tx);
+        float h1 = std::lerp(h01, h11, tx);
+        return std::lerp(h0, h1, tz);
+        };
+
+    if (outResult.lod <= 1) {
+        const float GRASS_STEP = 8.0f; // Fixed world-space grid step
+        int bladesPerCell = 15;        // High density per cell
+        const float JITTER_RADIUS = 4.0f;
 
         int gridCells = (int)(m_chunkSize / GRASS_STEP);
         outResult.grassInstances.reserve(gridCells * gridCells * bladesPerCell);
@@ -919,18 +948,15 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
                 if (baseY <= -5.0f || baseColor.y < 0.2f) continue;
 
                 // Coarse slope check to avoid spawning grass on cliffs
-                float hR = CalculateHeightAndColor(baseX + 2.0f, baseZ).first;
-                float hU = CalculateHeightAndColor(baseX, baseZ + 2.0f).first;
+                float hR = GetFastLocalHeight(baseX + 2.0f, baseZ);
+                float hU = GetFastLocalHeight(baseX, baseZ + 2.0f);
                 glm::vec3 normal = glm::normalize(glm::vec3(baseY - hR, 2.0f, baseY - hU));
                 if (normal.y < 0.75f) continue;
 
                 float densityMask = glm::smoothstep(0.35f, 0.85f, baseColor.y);
-
-                // Create a deterministic hash seed locked to the exact world coordinate
                 uint32_t cellHash = Hash2D(static_cast<int>(baseX * 10), static_cast<int>(baseZ * 10), s_globalSeed);
 
                 for (int n = 0; n < bladesPerCell; n++) {
-                    // Unique, stable seed for every individual blade
                     uint32_t bladeSeed = cellHash + n;
 
                     auto fastRand = [](uint32_t& state) -> float {
@@ -940,17 +966,11 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
 
                     if (fastRand(bladeSeed) > densityMask) continue;
 
-                    // Jitter the blade inside the cell
                     float r = sqrt(fastRand(bladeSeed)) * JITTER_RADIUS;
                     float theta = fastRand(bladeSeed) * 2.0f * 3.14159f;
                     float bladeX = baseX + r * cos(theta);
                     float bladeZ = baseZ + r * sin(theta);
-
-                    // Exact height and color for the final blade position
-                    auto [bladeY, bladeActualColor] = CalculateHeightAndColor(bladeX, bladeZ);
-
-                    // Strict cull if jitter pushed it into a dirt patch
-                    if (bladeActualColor.y < 0.35f) continue;
+                    float bladeY = GetFastLocalHeight(bladeX, bladeZ);
 
                     GrassInstance inst{};
                     inst.position = glm::vec3(bladeX, bladeY, bladeZ);
@@ -972,7 +992,7 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
 void Chunk::GenerateChunkProps(int chunkX, int chunkZ, int lod, ChunkJobResult& outResult) {
     if (lod >= 4) return; // CPU Cull: Past tree fade end
 
-    const float stepSize = 16.0f;
+    const float stepSize = 20.0f;
     const float startX = chunkX * m_chunkSize;
     const float startZ = chunkZ * m_chunkSize;
 
@@ -1014,10 +1034,10 @@ void Chunk::GenerateChunkProps(int chunkX, int chunkZ, int lod, ChunkJobResult& 
 
                 // Define the LOD chain for trees
                 tree.lodMeshes = {
-                    "assets/models/tree/tree.obj",           // LOD 0
-                    "assets/models/tree/tree_lod1.obj",      // LOD 1
-                    "assets/models/tree/tree_lod1.obj",      // LOD 2
-                    "assets/models/tree/tree_billboard.obj"  // LOD 3
+                    "assets/models/tree/tree_lod0.glb",           // LOD 0
+                    "assets/models/tree/tree_lod1.glb",      // LOD 1
+                    "assets/models/tree/tree_lod2.glb",      // LOD 2
+                    "assets/models/tree/tree_lod3.glb"  // LOD 3
                 };
 
                 outResult.props.push_back(tree);

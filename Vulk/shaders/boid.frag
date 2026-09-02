@@ -16,6 +16,7 @@ void main() {
     
     if (texColor.a < 0.5) {
         discard;
+
     }
     
     // Apply the random tint to the butterfly's texture

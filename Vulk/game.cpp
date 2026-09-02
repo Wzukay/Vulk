@@ -16,20 +16,18 @@ void Game::Init()
     chunk.Init(renderer);
 
     g_AssetManager.LoadTextureFromFile("assets/textures/dirt_albedo.dds");       // ID 0
-    g_AssetManager.LoadTextureFromFile("assets/textures/grass2_albedo.dds");      // ID 1
+    g_AssetManager.LoadTextureFromFile("assets/textures/grass_albedo.dds");      // ID 1
     g_AssetManager.LoadTextureFromFile("assets/textures/rock_albedo.dds");       // ID 2
-    g_AssetManager.LoadTextureFromFile("assets/textures/grass_billboard.dds");    // ID 3
     g_AssetManager.LoadTextureFromFile("assets/textures/butterfly_albedo.dds");   // ID 4
 
-    g_AssetManager.LoadNormalTextureFromFile("assets/textures/dirt_normal.dds");       // ID 0
-    g_AssetManager.LoadNormalTextureFromFile("assets/textures/grass2_normal.dds");      // ID 1
-    g_AssetManager.LoadNormalTextureFromFile("assets/textures/rock_normal.dds");       // ID 2
-    g_AssetManager.LoadNormalTextureFromFile("assets/textures/grass_billboard_normal.dds");    // ID 3
+    //g_AssetManager.LoadNormalTextureFromFile("assets/textures/dirt_normal.dds");       // ID 0
+    //g_AssetManager.LoadNormalTextureFromFile("assets/textures/grass_normal.dds");      // ID 1
+    //g_AssetManager.LoadNormalTextureFromFile("assets/textures/rock_normal.dds");       // ID 2
 
-    g_AssetManager.LoadMesh("assets/models/tree/tree.obj");
-    g_AssetManager.LoadMesh("assets/models/tree/tree_lod1.obj");
-    g_AssetManager.LoadMesh("assets/models/tree/tree_billboard.obj");
-
+    g_AssetManager.LoadMesh("assets/models/tree/tree_lod0.glb");
+    g_AssetManager.LoadMesh("assets/models/tree/tree_lod1.glb");
+    g_AssetManager.LoadMesh("assets/models/tree/tree_lod2.glb");
+    g_AssetManager.LoadMesh("assets/models/tree/tree_lod3.glb");
     g_AssetManager.LoadMesh("assets/models/rock/rock.glb");
 
     glfwSetWindowUserPointer(window, &input);

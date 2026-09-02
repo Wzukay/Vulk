@@ -7,6 +7,7 @@ layout(push_constant) uniform Constants {
     uint normalTextureId;
     uint objectId;
     float lodBlend; 
+    uint ormTextureId; // <-- NEW
 } push;
 
 layout(location = 0) in vec3 inPosition;
@@ -24,13 +25,12 @@ layout(location = 3) out vec3 fragWorldPos;
 layout(location = 4) out vec3 fragTangent;
 layout(location = 5) out float fragTangentHandedness;
 layout(location = 6) flat out uint fragNormalTextureId;
+layout(location = 7) flat out uint fragOrmTextureId;
 
 void main() {
-    // Transform raw vertices into world space coordinates directly
     vec4 worldPos = push.modelMatrix * vec4(inPosition, 1.0);
     gl_Position = ubo.proj * ubo.view * worldPos;
 
-    // Normal matrix transformation to preserve vector angles across scaled objects
     mat3 normalMatrix = transpose(inverse(mat3(push.modelMatrix)));
     
     fragNormal = normalMatrix * inNormal;
@@ -41,4 +41,6 @@ void main() {
     fragTextureId = push.textureId;
     fragNormalTextureId = push.normalTextureId;
     fragWorldPos = worldPos.xyz;
+    
+    fragOrmTextureId = push.ormTextureId;
 }

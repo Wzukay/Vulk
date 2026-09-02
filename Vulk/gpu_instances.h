@@ -44,6 +44,15 @@ struct SSAOUBO {
     glm::vec4 noise[16];
 };
 
+struct PushConstants {
+    glm::mat4 modelMatrix;      // 64 bytes
+    uint32_t textureId;         // 4 bytes
+    uint32_t normalTextureId;   // 4 bytes
+    uint32_t objectId;          // 4 bytes
+    float lodBlend;
+    uint32_t ormTextureId;
+};
+
 struct SSAOPushConstants {
     glm::vec2 screenSize;
     float radius;
@@ -110,6 +119,38 @@ struct SwapChainSupportDetails {
 struct FrustumPlane {
     glm::vec3 normal;
     float distance;
+};
+
+struct FreeSpan { uint32_t offset; uint32_t count; };
+struct SpanReturn { FreeSpan vertexSpan; FreeSpan indexSpan; };
+struct TerrainChunkGPU {
+    int64_t key = 0;
+    glm::vec3 center{ 0.0f };
+    float radius = 0.0f;
+    int lod = 0;
+    bool ready = false;
+
+    uint32_t vertexOffset = 0;
+    uint32_t indexOffset = 0;
+    uint32_t vertexCount = 0;
+    uint32_t indexCount = 0;
+
+    bool cachedOccluded = false;
+};
+struct TerrainChunkGPUData {
+    glm::vec4 centerRadius; // xyz = world center, w = bounding radius
+    uint32_t indexCount;
+    uint32_t firstIndex;
+    uint32_t vertexOffset;
+    uint32_t lod;
+};
+
+struct ComputePush {
+    glm::mat4 viewProj;
+    glm::vec3 cameraPos;
+    uint32_t totalChunks;
+    glm::vec2 hzbSize;
+    float maxMip;
 };
 
 struct GrassChunkMetadata {

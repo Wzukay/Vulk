@@ -8,9 +8,6 @@
 #include <cfloat>
 #include <unordered_set>
 
-#define TINYOBJLOADER_IMPLEMENTATION
-#include "tiny_obj_loader.h"
-
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
@@ -255,12 +252,74 @@ void AssetManager::CreateDefaultNormalTexture() {
 
     vkUpdateDescriptorSets(GetDevice(), 1, &descriptorWrite, 0, nullptr);
 }
+void AssetManager::CreateDefaultOrmTexture() {
+    // Default ORM: Red=255 (No occlusion), Green=204 (Roughness 0.8), Blue=0 (Non-metal)
+    uint8_t defaultOrmPixel[4] = { 255, 204, 0, 255 };
+    VkDeviceSize imageSize = 4;
 
-uint32_t AssetManager::LoadTextureFromMemory(const std::string& virtualName, const uint8_t* buffer, size_t bufferSize, bool isNormal) {
-    auto& map = isNormal ? m_normalTextureToId : m_textureToId;
-    auto& registry = isNormal ? m_normalTextureRegistry : m_textureRegistry;
+    VkBuffer stagingBuffer;
+    VkDeviceMemory stagingBufferMemory;
+    CreateBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        stagingBuffer, stagingBufferMemory);
 
-    // Check if we already decoded this exact embedded texture
+    void* data;
+    vkMapMemory(GetDevice(), stagingBufferMemory, 0, imageSize, 0, &data);
+    memcpy(data, defaultOrmPixel, static_cast<size_t>(imageSize));
+    vkUnmapMemory(GetDevice(), stagingBufferMemory);
+
+    VkImageCreateInfo imageInfo{};
+    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.extent = { 1, 1, 1 };
+    imageInfo.mipLevels = 1;
+    imageInfo.arrayLayers = 1;
+    imageInfo.format = VK_FORMAT_R8G8B8A8_UNORM; // ORM data is strictly linear
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    vkCreateImage(GetDevice(), &imageInfo, nullptr, &m_defaultOrmTexture.image);
+
+    VkMemoryRequirements memReq;
+    vkGetImageMemoryRequirements(GetDevice(), m_defaultOrmTexture.image, &memReq);
+
+    VkMemoryAllocateInfo allocInfo{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, nullptr, memReq.size, FindMemoryType(memReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) };
+    vkAllocateMemory(GetDevice(), &allocInfo, nullptr, &m_defaultOrmTexture.imageMemory);
+    vkBindImageMemory(GetDevice(), m_defaultOrmTexture.image, m_defaultOrmTexture.imageMemory, 0);
+
+    TransitionImageLayout(m_defaultOrmTexture.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+    VkCommandBuffer cmd = BeginSingleTimeCommands();
+    VkBufferImageCopy region{};
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.layerCount = 1;
+    region.imageExtent = { 1, 1, 1 };
+    vkCmdCopyBufferToImage(cmd, stagingBuffer, m_defaultOrmTexture.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    EndSingleTimeCommands(cmd);
+
+    TransitionImageLayout(m_defaultOrmTexture.image, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    vkDestroyBuffer(GetDevice(), stagingBuffer, nullptr);
+    vkFreeMemory(GetDevice(), stagingBufferMemory, nullptr);
+
+    VkImageViewCreateInfo viewInfo{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, nullptr, 0, m_defaultOrmTexture.image, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_R8G8B8A8_UNORM, {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY}, {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1} };
+    vkCreateImageView(GetDevice(), &viewInfo, nullptr, &m_defaultOrmTexture.imageView);
+
+    VkSamplerCreateInfo samplerInfo{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, nullptr, 0, VK_FILTER_LINEAR, VK_FILTER_LINEAR, VK_SAMPLER_MIPMAP_MODE_LINEAR, VK_SAMPLER_ADDRESS_MODE_REPEAT, VK_SAMPLER_ADDRESS_MODE_REPEAT, VK_SAMPLER_ADDRESS_MODE_REPEAT, 0.0f, VK_FALSE, 1.0f, VK_FALSE, VK_COMPARE_OP_ALWAYS, 0.0f, 1.0f, VK_BORDER_COLOR_INT_OPAQUE_BLACK, VK_FALSE };
+    vkCreateSampler(GetDevice(), &samplerInfo, nullptr, &m_defaultOrmTexture.sampler);
+
+    VkDescriptorImageInfo descInfo{ m_defaultOrmTexture.sampler, m_defaultOrmTexture.imageView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    VkWriteDescriptorSet write{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_descriptorSet, 5, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &descInfo, nullptr, nullptr }; // BOUND TO 5
+    vkUpdateDescriptorSets(GetDevice(), 1, &write, 0, nullptr);
+}
+
+uint32_t AssetManager::LoadTextureFromMemory(const std::string& virtualName, const uint8_t* buffer, size_t bufferSize, int texType) {
+    auto& map = (texType == 0) ? m_textureToId : ((texType == 1) ? m_normalTextureToId : m_ormTextureToId);
+    auto& registry = (texType == 0) ? m_textureRegistry : ((texType == 1) ? m_normalTextureRegistry : m_ormTextureRegistry);
+
     if (map.find(virtualName) != map.end()) {
         return map[virtualName];
     }
@@ -293,7 +352,7 @@ uint32_t AssetManager::LoadTextureFromMemory(const std::string& virtualName, con
     // 3. Create Vulkan Image
     Texture tex{};
     tex.mipLevels = 1; // Simplified: 1 mip level for runtime decodes
-    VkFormat format = isNormal ? VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_R8G8B8A8_SRGB;
+    VkFormat format = (texType == 0) ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
 
     VkImageCreateInfo imageInfo{};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -411,6 +470,7 @@ void AssetManager::LoadTexture(const std::string& path) {
     // Load and add to registry automatically via LoadTextureFromFile
     LoadTextureFromFile(path);
 }
+
 Texture* AssetManager::GetTexture(const std::string& path) {
     if (path.empty() || path == "default") {
         return &m_defaultTexture;
@@ -498,133 +558,44 @@ uint32_t AssetManager::GetNormalTextureId(const std::string& path) {
     return m_normalTextureToId[path];
 }
 
-Texture AssetManager::LoadCubemapFromFaces(
-    const std::string& right,
-    const std::string& left,
-    const std::string& top,
-    const std::string& bottom,
-    const std::string& front,
-    const std::string& back) {
+uint32_t AssetManager::LoadOrmTextureFromFile(const std::string& filePath) {
+    auto it = m_ormTextureToId.find(filePath);
+    if (it != m_ormTextureToId.end()) return it->second;
 
-    std::vector<std::string> paths = { right, left, top, bottom, front, back };
-    std::vector<unsigned char*> faceData(6);
-    int width, height, channels;
-    for (int i = 0; i < 6; ++i) {
-        faceData[i] = stbi_load(paths[i].c_str(), &width, &height, &channels, 4);
-        if (!faceData[i]) {
-            throw std::runtime_error("Failed to load face: " + paths[i]);
-        }
+    std::ifstream checkFile(filePath, std::ios::binary);
+    if (!checkFile.is_open()) {
+        m_ormTextureToId[filePath] = 0;
+        return 0;
     }
-
-    VkDeviceSize faceSize = width * height * 4;
-    VkDeviceSize totalSize = faceSize * 6;
-
-    // Create staging buffer
-    VkBuffer stagingBuffer;
-    VkDeviceMemory stagingMemory;
-    CreateBuffer(totalSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        stagingBuffer, stagingMemory);
-
-    void* mapped;
-    vkMapMemory(GetDevice(), stagingMemory, 0, totalSize, 0, &mapped);
-    for (int i = 0; i < 6; ++i) {
-        memcpy(static_cast<char*>(mapped) + i * faceSize, faceData[i], faceSize);
-        stbi_image_free(faceData[i]);
-    }
-    vkUnmapMemory(GetDevice(), stagingMemory);
-
-    // Create cubemap image
-    VkImageCreateInfo imageInfo{};
-    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    imageInfo.imageType = VK_IMAGE_TYPE_2D;
-    imageInfo.extent = { (uint32_t)width, (uint32_t)height, 1 };
-    imageInfo.mipLevels = 1;
-    imageInfo.arrayLayers = 6;
-    imageInfo.format = VK_FORMAT_R8G8B8A8_SRGB;
-    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    imageInfo.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+    checkFile.close();
 
     Texture tex{};
-    if (vkCreateImage(GetDevice(), &imageInfo, nullptr, &tex.image) != VK_SUCCESS)
-        throw std::runtime_error("Failed to create cubemap image");
+    CreateTextureImage(filePath, tex, VK_FORMAT_BC7_UNORM_BLOCK);
 
-    VkMemoryRequirements memReq;
-    vkGetImageMemoryRequirements(GetDevice(), tex.image, &memReq);
-    VkMemoryAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocInfo.allocationSize = memReq.size;
-    allocInfo.memoryTypeIndex = FindMemoryType(memReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (vkAllocateMemory(GetDevice(), &allocInfo, nullptr, &tex.imageMemory) != VK_SUCCESS)
-        throw std::runtime_error("Failed to allocate cubemap memory");
-    vkBindImageMemory(GetDevice(), tex.image, tex.imageMemory, 0);
+    uint32_t newId = static_cast<uint32_t>(m_ormTextureRegistry.size());
+    m_ormTextureRegistry.push_back(std::move(tex));
+    m_ormTextureToId[filePath] = newId;
 
-    TransitionImageLayout(tex.image, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1);
-
-    VkCommandBuffer cmd = BeginSingleTimeCommands();
-    for (int face = 0; face < 6; ++face) {
-        VkBufferImageCopy region{};
-        region.bufferOffset = face * faceSize;
-        region.bufferRowLength = 0;
-        region.bufferImageHeight = 0;
-        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        region.imageSubresource.mipLevel = 0;
-        region.imageSubresource.baseArrayLayer = face;
-        region.imageSubresource.layerCount = 1;
-        region.imageOffset = { 0, 0, 0 };
-        region.imageExtent = { (uint32_t)width, (uint32_t)height, 1 };
-        vkCmdCopyBufferToImage(cmd, stagingBuffer, tex.image,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-    }
-    EndSingleTimeCommands(cmd);
-
-    TransitionImageLayout(tex.image, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 1);
-
-    vkDestroyBuffer(GetDevice(), stagingBuffer, nullptr);
-    vkFreeMemory(GetDevice(), stagingMemory, nullptr);
-
-    // Create image view
-    VkImageViewCreateInfo viewInfo{};
-    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    viewInfo.image = tex.image;
-    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_CUBE;
-    viewInfo.format = VK_FORMAT_R8G8B8A8_SRGB;
-    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    viewInfo.subresourceRange.baseMipLevel = 0;
-    viewInfo.subresourceRange.levelCount = 1;
-    viewInfo.subresourceRange.baseArrayLayer = 0;
-    viewInfo.subresourceRange.layerCount = 6;
-    if (vkCreateImageView(GetDevice(), &viewInfo, nullptr, &tex.imageView) != VK_SUCCESS)
-        throw std::runtime_error("Failed to create cubemap view");
-
-    // Create sampler
-    VkPhysicalDeviceProperties props{};
-    vkGetPhysicalDeviceProperties(GetPhysicalDevice(), &props);
-    VkSamplerCreateInfo samplerInfo{};
-    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    samplerInfo.magFilter = VK_FILTER_LINEAR;
-    samplerInfo.minFilter = VK_FILTER_LINEAR;
-    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    samplerInfo.anisotropyEnable = VK_FALSE;
-    samplerInfo.maxAnisotropy = 1.0f;
-    samplerInfo.compareEnable = VK_FALSE;
-    samplerInfo.minLod = 0.0f;
-    samplerInfo.maxLod = 0.0f;
-    samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
-    if (vkCreateSampler(GetDevice(), &samplerInfo, nullptr, &tex.sampler) != VK_SUCCESS)
-        throw std::runtime_error("Failed to create sampler");
-
-    tex.mipLevels = 1;
-    return tex;
+    m_textureDirty = true;
+    return newId;
+}
+void AssetManager::LoadOrmTexture(const std::string& path) {
+    if (path.empty()) return;
+    if (m_ormTextureToId.find(path) != m_ormTextureToId.end()) return;
+    LoadOrmTextureFromFile(path);
+}
+Texture* AssetManager::GetOrmTexture(const std::string& path) {
+    if (path.empty() || path == "default") return &m_defaultOrmTexture;
+    auto it = m_ormTextureToId.find(path);
+    if (it != m_ormTextureToId.end() && it->second < m_ormTextureRegistry.size()) return &m_ormTextureRegistry[it->second];
+    return &m_defaultOrmTexture;
+}
+uint32_t AssetManager::GetOrmTextureId(const std::string& path) {
+    if (path.empty()) return 0;
+    auto it = m_ormTextureToId.find(path);
+    if (it != m_ormTextureToId.end()) return it->second;
+    LoadOrmTexture(path);
+    return m_ormTextureToId[path];
 }
 
 void AssetManager::CreateTextureImage(const std::string& path, Texture& texture, VkFormat format) {
@@ -892,120 +863,6 @@ static void ComputeTangents(std::vector<ModelVertex>& verts, const std::vector<u
         verts[i].tangent = glm::vec4(t, handedness);
     }
 }
-static std::string GuessNormalMapPath(const std::string& diffusePath) {
-    if (diffusePath.empty()) return "";
-
-    std::string candidate = diffusePath;
-    size_t pos = candidate.rfind("_diff");
-    if (pos != std::string::npos) {
-        candidate.replace(pos, 5, "_ddn"); // "_diff.tga" -> "_ddn.tga"
-        std::ifstream test(candidate);
-        if (test.good()) return candidate;
-    }
-    return "";
-}
-bool AssetManager::ParseObjFileByMaterial(const std::string& filepath,
-    std::vector<std::vector<ModelVertex>>& verticesPerMaterial,
-    std::vector<std::vector<uint32_t>>& indicesPerMaterial,
-    std::vector<std::string>& textureFilenames,
-    std::vector<std::string>& normalMapFilenames) {
-
-    tinyobj::attrib_t attrib;
-    std::vector<tinyobj::shape_t> shapes;
-    std::vector<tinyobj::material_t> materials;
-    std::string err;
-
-    std::string baseDir = "";
-    size_t lastSlash = filepath.find_last_of("/\\");
-    if (lastSlash != std::string::npos) {
-        baseDir = filepath.substr(0, lastSlash + 1);
-    }
-
-    bool result = tinyobj::LoadObj(&attrib, &shapes, &materials, &err,
-        filepath.c_str(), baseDir.empty() ? nullptr : baseDir.c_str(), true);
-
-    // CRITICAL FIX: Intercept parsing errors and return false instead of throwing a fatal exception!
-    if (!result) {
-        std::cerr << "\n------------------------------------------------------------------------\n"
-            << "[Asset Pipeline Error] FAILED TO LOAD MESH FILE:\n"
-            << " -> Target Path: " << filepath << "\n"
-            << " -> TinyObjLoader Error: " << err
-            << "[Asset Pipeline Warning] Returning empty geometry to prevent crash.\n"
-            << "------------------------------------------------------------------------\n\n";
-        return false;
-    }
-
-    size_t materialCount = materials.size();
-    size_t noMaterialIndex = materialCount;
-
-    verticesPerMaterial.resize(materialCount + 1);
-    indicesPerMaterial.resize(materialCount + 1);
-    textureFilenames.resize(materialCount + 1, "");
-    normalMapFilenames.resize(materialCount + 1, "");
-
-    for (size_t m = 0; m < materialCount; m++) {
-        textureFilenames[m] = materials[m].diffuse_texname.empty()
-            ? ""
-            : baseDir + materials[m].diffuse_texname;
-
-        normalMapFilenames[m] = materials[m].bump_texname.empty()
-            ? "" : baseDir + materials[m].bump_texname;
-
-        if (normalMapFilenames[m].empty()) {
-            normalMapFilenames[m] = GuessNormalMapPath(textureFilenames[m]);
-        }
-    }
-
-    std::vector<std::unordered_map<ModelVertex, uint32_t>> uniqueVerticesPerMaterial(materialCount + 1);
-
-    for (const auto& shape : shapes) {
-        for (size_t f = 0; f < shape.mesh.indices.size() / 3; f++) {
-            int rawMaterialId = shape.mesh.material_ids[f];
-            size_t materialId = (rawMaterialId >= 0) ? static_cast<size_t>(rawMaterialId) : noMaterialIndex;
-
-            for (size_t v = 0; v < 3; v++) {
-                tinyobj::index_t index = shape.mesh.indices[3 * f + v];
-
-                ModelVertex vertex{};
-                vertex.pos = {
-                    attrib.vertices[3 * index.vertex_index + 0],
-                    attrib.vertices[3 * index.vertex_index + 1],
-                    attrib.vertices[3 * index.vertex_index + 2]
-                };
-
-                if (index.normal_index >= 0) {
-                    vertex.normal = {
-                        attrib.normals[3 * index.normal_index + 0],
-                        attrib.normals[3 * index.normal_index + 1],
-                        attrib.normals[3 * index.normal_index + 2]
-                    };
-                }
-
-                if (index.texcoord_index >= 0) {
-                    vertex.texCoord = {
-                        attrib.texcoords[2 * index.texcoord_index + 0],
-                        1.0f - attrib.texcoords[2 * index.texcoord_index + 1]
-                    };
-                }
-
-                auto& uniqueVertices = uniqueVerticesPerMaterial[materialId];
-                auto& verts = verticesPerMaterial[materialId];
-                auto& idxs = indicesPerMaterial[materialId];
-
-                if (uniqueVertices.count(vertex) == 0) {
-                    uniqueVertices[vertex] = static_cast<uint32_t>(verts.size());
-                    verts.push_back(vertex);
-                }
-                idxs.push_back(uniqueVertices[vertex]);
-            }
-        }
-    }
-
-    std::cout << "[Asset Manager] '" << filepath << "' split into " << materials.size()
-        << " materials (+ possible untextured group)\n";
-
-    return true; // Report success back to LoadMesh
-}
 
 void AssetManager::LoadMesh(const std::string& path) {
     // 1. Prevent duplicate loading
@@ -1023,97 +880,12 @@ void AssetManager::LoadMesh(const std::string& path) {
         }
     }
 
-    // 3. Fallback to OBJ
-    LoadOBJ(path);
-}
-void AssetManager::LoadOBJ(const std::string& path) {
-    if (m_meshes.find(path) != m_meshes.end()) return;
+    // 3. Hard failure for non-glTF files
+    std::cerr << "\n[AssetManager Error] Unsupported model format!\n"
+        << " -> Rejected file: " << path << "\n\n";
 
-    std::vector<std::vector<ModelVertex>> verticesPerMaterial;
-    std::vector<std::vector<uint32_t>> indicesPerMaterial;
-    std::vector<std::string> textureFilenames;
-    std::vector<std::string> normalMapFilenames;
-
-    // CRITICAL FIX: Only process the mesh if the file was successfully read
-    bool parseSuccess = ParseObjFileByMaterial(path, verticesPerMaterial, indicesPerMaterial, textureFilenames, normalMapFilenames);
-
-    if (!parseSuccess) {
-        // Register an empty mesh at this path so the engine doesn't keep trying to load a broken file every frame
-        m_meshes[path] = MeshAsset{};
-        return;
-    }
-
-    // Dynamic Extension Swap (Supports lowercase and uppercase extensions)
-    for (auto& filename : textureFilenames) {
-        if (filename.empty()) continue;
-        size_t extPos = filename.rfind(".tga");
-        if (extPos == std::string::npos) extPos = filename.rfind(".TGA");
-
-        if (extPos != std::string::npos) {
-            filename.replace(extPos, 4, ".dds");
-        }
-    }
-    for (auto& filename : normalMapFilenames) {
-        if (filename.empty()) continue;
-        size_t extPos = filename.rfind(".tga");
-        if (extPos == std::string::npos) extPos = filename.rfind(".TGA");
-
-        if (extPos != std::string::npos) {
-            filename.replace(extPos, 4, ".dds");
-        }
-    }
-
-    // Flip winding to match Vulkan's clockwise front face
-    for (auto& idxs : indicesPerMaterial) {
-        for (size_t i = 0; i + 2 < idxs.size(); i += 3) {
-            std::swap(idxs[i + 1], idxs[i + 2]);
-        }
-    }
-
-    for (size_t m = 0; m < verticesPerMaterial.size(); ++m) {
-        if (indicesPerMaterial[m].empty()) continue;
-        ComputeTangents(verticesPerMaterial[m], indicesPerMaterial[m]);
-    }
-
-    MeshAsset mesh;
-    uint32_t vertexOffset = 0;
-    uint32_t indexOffset = 0;
-
-    for (size_t m = 0; m < verticesPerMaterial.size(); ++m) {
-        const auto& verts = verticesPerMaterial[m];
-        const auto& idxs = indicesPerMaterial[m];
-        if (idxs.empty()) continue;
-
-        // Compute bounding sphere
-        glm::vec3 minBound(FLT_MAX), maxBound(-FLT_MAX);
-        for (const auto& v : verts) {
-            minBound = glm::min(minBound, v.pos);
-            maxBound = glm::max(maxBound, v.pos);
-        }
-        glm::vec3 center = (minBound + maxBound) * 0.5f;
-        float radius = glm::length(maxBound - center);
-
-        SubMesh sub;
-        sub.indexCount = static_cast<uint32_t>(idxs.size());
-        sub.firstIndex = indexOffset;
-        sub.vertexOffset = static_cast<int32_t>(vertexOffset);
-        sub.boundingCenterLocal = center;
-        sub.boundingRadiusLocal = radius;
-        sub.textureId = 0;
-
-        mesh.vertices.insert(mesh.vertices.end(), verts.begin(), verts.end());
-        mesh.indices.insert(mesh.indices.end(), idxs.begin(), idxs.end());
-        mesh.subMeshes.push_back(sub);
-
-        mesh.materialTextures.push_back(textureFilenames[m]);
-        mesh.normalMapTextures.push_back(normalMapFilenames[m]);
-
-        vertexOffset += static_cast<uint32_t>(verts.size());
-        indexOffset += static_cast<uint32_t>(idxs.size());
-    }
-
-    m_meshes[path] = std::move(mesh);
-    std::cout << "[Asset Manager] Loaded mesh: " << path << " with " << m_meshes[path].subMeshes.size() << " submeshes\n";
+    // Register empty dummy mesh to prevent crash and stop infinite reload loops
+    m_meshes[path] = MeshAsset{};
 }
 void AssetManager::LoadGLTF(const std::string& path) {
     if (m_meshes.find(path) != m_meshes.end()) return;
@@ -1251,31 +1023,25 @@ void AssetManager::LoadGLTF(const std::string& path) {
             // 5. EXTRACT MATERIALS
             std::string albedoPath = "";
             std::string normalPath = "";
+            std::string ormPath = "";
 
             if (primitive->material) {
                 std::string matName = primitive->material->name ? primitive->material->name : "unnamed_mat";
 
-                // Helper lambda to safely extract texture (embedded or external)
-                auto extractTexture = [&](cgltf_texture_view* view, bool isNormal) -> std::string {
+                auto extractTexture = [&](cgltf_texture_view* view, int texType) -> std::string {
                     if (!view->texture || !view->texture->image) return "";
-
                     cgltf_image* image = view->texture->image;
 
-                    // Priority 1: Embedded binary buffer payload
                     if (image->buffer_view) {
-                        std::string virtualName = path + "_" + matName + (isNormal ? "_normal" : "_albedo");
+                        std::string virtualName = path + "_" + matName + (texType == 0 ? "_albedo" : (texType == 1 ? "_normal" : "_orm"));
                         uint8_t* bufferData = (uint8_t*)image->buffer_view->buffer->data + image->buffer_view->offset;
-                        LoadTextureFromMemory(virtualName, bufferData, image->buffer_view->size, isNormal);
+                        LoadTextureFromMemory(virtualName, bufferData, image->buffer_view->size, texType);
                         return virtualName;
                     }
-                    // Priority 2: External URI reference
                     else if (image->uri) {
                         std::string externalPath = baseDir + image->uri;
                         size_t extPos = externalPath.find_last_of('.');
-                        if (extPos != std::string::npos) {
-                            externalPath.replace(extPos, externalPath.length() - extPos, ".dds");
-                        }
-                        // Only return if the file actually exists on disk, otherwise skip to avoid errors
+                        if (extPos != std::string::npos) externalPath.replace(extPos, externalPath.length() - extPos, ".dds");
                         std::ifstream test(externalPath);
                         if (test.good()) return externalPath;
                     }
@@ -1283,9 +1049,10 @@ void AssetManager::LoadGLTF(const std::string& path) {
                     };
 
                 if (primitive->material->has_pbr_metallic_roughness) {
-                    albedoPath = extractTexture(&primitive->material->pbr_metallic_roughness.base_color_texture, false);
+                    albedoPath = extractTexture(&primitive->material->pbr_metallic_roughness.base_color_texture, 0);
+                    ormPath = extractTexture(&primitive->material->pbr_metallic_roughness.metallic_roughness_texture, 2);
                 }
-                normalPath = extractTexture(&primitive->material->normal_texture, true);
+                normalPath = extractTexture(&primitive->material->normal_texture, 1);
             }
 
             // 6. PUSH TO MESH
@@ -1294,6 +1061,7 @@ void AssetManager::LoadGLTF(const std::string& path) {
             mesh.subMeshes.push_back(sub);
             mesh.materialTextures.push_back(albedoPath);
             mesh.normalMapTextures.push_back(normalPath);
+            mesh.ormTextures.push_back(ormPath);
 
             globalVertexOffset += static_cast<uint32_t>(localVerts.size());
             globalIndexOffset += static_cast<uint32_t>(localIndices.size());
@@ -1450,6 +1218,7 @@ void AssetManager::Cleanup(VkDevice device) {
 
     m_defaultTexture.CleanUp(device);
     m_defaultNormalTexture.CleanUp(device);
+    m_defaultOrmTexture.CleanUp(device);
 
     // 1. Destroy diffuse/albedo textures exactly once via the registry
     for (auto& tex : m_textureRegistry) {
@@ -1464,6 +1233,12 @@ void AssetManager::Cleanup(VkDevice device) {
     }
     m_normalTextureRegistry.clear();
     m_normalTextureToId.clear();
+
+    for (auto& tex : m_ormTextureRegistry) {
+        tex.CleanUp(device);
+    }
+    m_ormTextureRegistry.clear();
+    m_ormTextureToId.clear();
 
     m_meshes.clear();
 }

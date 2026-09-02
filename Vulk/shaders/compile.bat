@@ -1,19 +1,4 @@
 @echo off
-setlocal enabledelayedexpansion
-echo Compiling all shaders...
-
-:: Loop through all .vert, .frag, and .comp files
-for %%f in (*.vert *.frag *.comp) do (
-    :: Grab the full filename (e.g., grass.vert)
-    set "filename=%%f"
-    
-    :: Replace the dot with an underscore and append .spv (e.g., grass_vert.spv)
-    set "outfile=!filename:.=_!.spv"
-    
-    echo Compiling %%f -^> !outfile!
-    glslc "%%f" -o "!outfile!"
-)
-
-echo.
-echo All shaders compiled successfully!
+echo Checking shader timestamps...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$jobs = @(); foreach ($s in Get-ChildItem *.vert, *.frag, *.comp -ErrorAction SilentlyContinue) { $out = $s.Name.Replace('.', '_') + '.spv'; $outPath = Join-Path $s.Directory $out; if (!(Test-Path $outPath) -or $s.LastWriteTime -gt (Get-Item $outPath).LastWriteTime) { Write-Host ('[Modified] ' + $s.Name) -ForegroundColor Yellow; $jobs += Start-Process 'glslc' -ArgumentList \"`\"$($s.FullName)`\" -o `\"$outPath`\"\" -PassThru -NoNewWindow } }; if ($jobs.Count -gt 0) { Wait-Process -InputObject $jobs -ErrorAction SilentlyContinue; Write-Host 'All modified shaders compiled successfully!' -ForegroundColor Green } else { Write-Host 'All shaders are already up to date! (0.0s)' -ForegroundColor Cyan }"
 pause

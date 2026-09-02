@@ -221,6 +221,8 @@ void StaticMeshRenderer::Draw(VkCommandBuffer commandBuffer, VkPipelineLayout pi
             constants.modelMatrix = obj.modelMatrix;
             constants.textureId = sub.textureId;
             constants.normalTextureId = sub.normalTextureId;
+            constants.ormTextureId = sub.ormTextureId;
+
             vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &constants);
             vkCmdDrawIndexed(commandBuffer, sub.indexCount, 1, sub.firstIndex, sub.vertexOffset, 0);
             outDrawCalls++; outVertexCount += sub.indexCount; outIndexCount += sub.indexCount;

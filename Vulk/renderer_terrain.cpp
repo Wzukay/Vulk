@@ -337,7 +337,6 @@ void TerrainRenderer::UploadTerrainChunkAsync(TerrainChunkGPU& chunk,
 }
 
 float TerrainRenderer::GetCachedHeight(float worldX, float worldZ) {
-    std::lock_guard<std::mutex> lock(m_heightCacheMutex);
     return GetCachedHeightInternal(worldX, worldZ);
 }
 
@@ -353,17 +352,27 @@ bool TerrainRenderer::IsChunkOccluded(const glm::vec3& chunkCenter, float chunkR
 
 float TerrainRenderer::GetCachedHeightInternal(float worldX, float worldZ) {
     const float GRID = 10.0f;
-    int gx = (int)std::floor(worldX / GRID + 0.5f);
-    int gz = (int)std::floor(worldZ / GRID + 0.5f);
+    int gx = static_cast<int>(std::floor(worldX / GRID + 0.5f));
+    int gz = static_cast<int>(std::floor(worldZ / GRID + 0.5f));
     int64_t key = (static_cast<int64_t>(gx) << 32) | (static_cast<uint32_t>(gz));
 
-    auto it = m_heightCache.find(key);
-    if (it != m_heightCache.end() && it->second.valid) {
-        return it->second.height;
+    // Fast check under lock
+    {
+        std::lock_guard<std::mutex> lock(m_heightCacheMutex);
+        auto it = m_heightCache.find(key);
+        if (it != m_heightCache.end() && it->second.valid) {
+            return it->second.height;
+        }
     }
 
     float h = Chunk::GetHeight(worldX, worldZ);
-    m_heightCache[key] = { h, true };
+
+    // Re-acquire lock briefly to populate the cache entry
+    {
+        std::lock_guard<std::mutex> lock(m_heightCacheMutex);
+        m_heightCache[key] = { h, true };
+    }
+
     return h;
 }
 

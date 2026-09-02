@@ -6,7 +6,6 @@ layout(push_constant) uniform Constants {
     uint textureId;
     uint normalTextureId;
     uint objectId;
-    // We no longer need lodBlend from push constants, but we leave the struct size alone
     float _padBlend; 
 } push;
 

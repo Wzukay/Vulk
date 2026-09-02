@@ -26,6 +26,8 @@ layout(location = 7) in vec3 fragColor; // Splat weights (r=sand, g=grass, b=roc
 
 layout(location = 0) out vec4 outColor;
 
+const float PI = 3.14159265359;
+
 vec4 TriplanarSample(uint textureId, vec3 pos, vec3 weights) {
     vec4 result = vec4(0.0);
     // Dynamic branching skips memory reads if the axis weight is visually zero
@@ -52,14 +54,43 @@ vec3 TriplanarSampleNormal(uint textureId, vec3 pos, vec3 weights) {
     if (weights.z > 0.001) result += UnpackNormal(texture(normalTextures[textureId], pos.xy)) * weights.z;
     return result;
 }
-vec3 CalcBlinnPhong(vec3 N, vec3 V, vec3 L, vec3 lightColor, vec3 albedo, float specPower) {
-    vec3 H = normalize(L + V);
-    float diff = max(dot(N, L), 0.0);
-    float spec = pow(max(dot(N, H), 0.0), specPower);
-    return diff * lightColor * albedo + spec * lightColor * 0.1;
+
+vec3 FresnelSchlick(float cosTheta, vec3 F0) { return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0); }
+
+float DistributionGGX(vec3 N, vec3 H, float roughness) {
+    float a = roughness * roughness;
+    float a2 = a * a;
+    float NdotH = max(dot(N, H), 0.0);
+    float denom = (NdotH * NdotH * (a2 - 1.0) + 1.0);
+    return a2 / max(PI * denom * denom, 0.0000001);
+}
+
+float GeometrySchlickGGX(float NdotV, float roughness) {
+    float r = (roughness + 1.0);
+    float k = (r * r) / 8.0;
+    return NdotV / (NdotV * (1.0 - k) + k);
+}
+
+float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
+    return GeometrySchlickGGX(max(dot(N, L), 0.0), roughness) * GeometrySchlickGGX(max(dot(N, V), 0.0), roughness);
+}
+
+vec3 CalcPBR(vec3 N, vec3 V, vec3 L, vec3 lightColor, vec3 albedo, float roughness, float metallic) {
+    vec3 H = normalize(V + L);
+    vec3 F0 = mix(vec3(0.04), albedo, metallic);
+
+    vec3 F = FresnelSchlick(max(dot(H, V), 0.0), F0);       
+    vec3 specular = (DistributionGGX(N, H, roughness) * GeometrySmith(N, V, L, roughness) * F) / (4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001);
+    
+    vec3 kD = (vec3(1.0) - F) * (1.0 - metallic); 
+    return (kD * albedo / PI + specular) * lightColor * max(dot(N, L), 0.0);
 }
 
 void main() {
+    float ao = 1.0;
+    float roughness = 0.8;
+    float metallic = 0.0;
+
     // 1. Calculate Triplanar Weights (steepness/normal direction)
     vec3 blendWeights = abs(fragNormal);
     blendWeights /= (blendWeights.x + blendWeights.y + blendWeights.z);
@@ -102,7 +133,7 @@ void main() {
         vec3 lightVec = normalize(L.positionOrDir.xyz - (L.positionOrDir.w > 0.5 ? fragWorldPos : vec3(0.0)));
         float atten = (L.positionOrDir.w > 0.5) ? (1.0 / length(L.positionOrDir.xyz - fragWorldPos)) : 1.0;
         
-        result += CalcBlinnPhong(N, V, lightVec, L.color.rgb * L.color.a * atten, albedo.xyz, ubo.specularPower);
+        result += CalcPBR(N, V, lightVec, L.color.rgb * L.color.a * atten, albedo.xyz, roughness, metallic);
     }
 
     float dist = length(ubo.cameraPos - fragWorldPos);

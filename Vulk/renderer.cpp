@@ -356,6 +356,7 @@ void VulkanRenderer::InitVulkan() {
 	g_AssetManager.SetDescriptorSet(descriptorSet);
 	g_AssetManager.CreateDefaultTexture();
 	g_AssetManager.CreateDefaultNormalTexture();
+	g_AssetManager.CreateDefaultOrmTexture();
 
 	CreateGraphicsPipeline();
 	CreateCompositionPipeline();
@@ -801,24 +802,26 @@ void VulkanRenderer::CreateDescriptorSetLayout() {
 	cubemapBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 	cubemapBinding.pImmutableSamplers = nullptr;
 
-	std::array<VkDescriptorSetLayoutBinding, 5> bindings = {
-		uboLayoutBinding, lightLayoutBinding, samplerLayoutBinding, normalSamplerBinding, cubemapBinding
+	VkDescriptorSetLayoutBinding ormSamplerBinding{};
+	ormSamplerBinding.binding = 5;
+	ormSamplerBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	ormSamplerBinding.descriptorCount = 500;
+	ormSamplerBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+	ormSamplerBinding.pImmutableSamplers = nullptr;
+
+	std::array<VkDescriptorSetLayoutBinding, 6> bindings = {
+		uboLayoutBinding, lightLayoutBinding, samplerLayoutBinding, normalSamplerBinding, cubemapBinding, ormSamplerBinding
 	};
 
-	// index 0 -> binding 0 (UBO): no flags
-	// index 1 -> binding 1 (light SSBO): no flags (fixed-size, not variable/update-after-bind)
-	// index 2 -> binding 2 (sampler array): variable count + update-after-bind, since it's LAST
-	VkDescriptorBindingFlags bindingFlags[5] = {
-	0,
-	0,
-	VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,
-	VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,
-	0
+	VkDescriptorBindingFlags bindingFlags[6] = { 0, 0,
+		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,
+		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT, 0,
+		VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT
 	};
 
 	VkDescriptorSetLayoutBindingFlagsCreateInfo layoutBindingFlags{};
 	layoutBindingFlags.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-	layoutBindingFlags.bindingCount = 5;
+	layoutBindingFlags.bindingCount = 6;
 	layoutBindingFlags.pBindingFlags = bindingFlags;
 
 	VkDescriptorSetLayoutCreateInfo layoutInfo{};
@@ -1563,7 +1566,7 @@ void VulkanRenderer::CreateGraphicsPipeline() {
 	rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
 	rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
 	rasterizer.lineWidth = 1.0f;
-	rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+	rasterizer.cullMode = VK_CULL_MODE_NONE;
 	rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
 
 	VkPipelineMultisampleStateCreateInfo multisampling{};
@@ -2002,56 +2005,29 @@ void VulkanRenderer::CreateHZBPipeline() {
 }
 
 void VulkanRenderer::UpdateTextureDescriptors(const Scene& scene) {
-	if (descriptorSet == VK_NULL_HANDLE) {
-		std::cerr << "[Renderer] descriptorSet is null in UpdateTextureDescriptors!\n";
-		return;
-	}
-
-	// Collect all unique texture paths used by the scene's instances
-	std::unordered_set<std::string> uniquePaths;
-	const auto& instances = scene.GetInstances();
-	for (const auto& inst : instances) {
-		const MeshAsset* mesh = g_AssetManager.GetMesh(inst.meshName);
-		if (!mesh) continue;
-		for (const auto& texPath : mesh->materialTextures) {
-			if (!texPath.empty()) uniquePaths.insert(texPath);
-		}
-	}
-
-	// Ensure all textures are loaded
-	for (const auto& path : uniquePaths) {
-		g_AssetManager.GetTexture(path);
-	}
-
-	// Write descriptor sets for all textures in the asset manager's registry
-	const auto& textureMap = g_AssetManager.GetTextureMap();
+	if (descriptorSet == VK_NULL_HANDLE) return;
 
 	std::vector<VkWriteDescriptorSet> writes;
-	std::deque<VkDescriptorImageInfo> imageInfos;
+	std::deque<VkDescriptorImageInfo> imageInfos; // Deque ensures pointers remain stable during reallocation
 
-	for (const auto& pair : textureMap) {
-		const std::string& path = pair.first;
-		if (path == "default") continue;
-		uint32_t id = pair.second;
-		const Texture* tex = g_AssetManager.GetTexture(pair.first);
-		if (!tex) continue;
+	// Helper lambda to bind registries securely
+	auto bindRegistry = [&](const std::unordered_map<std::string, uint32_t>& map, const std::vector<Texture>& registry, uint32_t binding) {
+		for (const auto& pair : map) {
+			if (pair.first == "default" || pair.second >= registry.size()) continue;
+			const Texture* tex = &registry[pair.second];
+			if (!tex || tex->imageView == VK_NULL_HANDLE) continue;
 
-		VkDescriptorImageInfo info{};
-		info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		info.imageView = tex->imageView;
-		info.sampler = tex->sampler;
-		imageInfos.push_back(info);
+			VkDescriptorImageInfo info{ tex->sampler, tex->imageView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+			imageInfos.push_back(info);
 
-		VkWriteDescriptorSet write{};
-		write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		write.dstSet = descriptorSet;
-		write.dstBinding = 2; // texture array binding
-		write.dstArrayElement = id;
-		write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		write.descriptorCount = 1;
-		write.pImageInfo = &imageInfos.back();
-		writes.push_back(write);
-	}
+			VkWriteDescriptorSet write{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, descriptorSet, binding, pair.second, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &imageInfos.back(), nullptr, nullptr };
+			writes.push_back(write);
+		}
+		};
+
+	bindRegistry(g_AssetManager.GetTextureMap(), g_AssetManager.GetTextureRegistry(), 2);
+	bindRegistry(g_AssetManager.GetNormalTextureMap(), g_AssetManager.GetNormalTextureRegistry(), 3);
+	bindRegistry(g_AssetManager.GetOrmTextureMap(), g_AssetManager.GetOrmTextureRegistry(), 5);
 
 	if (!writes.empty()) {
 		vkUpdateDescriptorSets(logicalDevice, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
