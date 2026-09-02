@@ -256,6 +256,122 @@ void AssetManager::CreateDefaultNormalTexture() {
     vkUpdateDescriptorSets(GetDevice(), 1, &descriptorWrite, 0, nullptr);
 }
 
+uint32_t AssetManager::LoadTextureFromMemory(const std::string& virtualName, const uint8_t* buffer, size_t bufferSize, bool isNormal) {
+    auto& map = isNormal ? m_normalTextureToId : m_textureToId;
+    auto& registry = isNormal ? m_normalTextureRegistry : m_textureRegistry;
+
+    // Check if we already decoded this exact embedded texture
+    if (map.find(virtualName) != map.end()) {
+        return map[virtualName];
+    }
+
+    // 1. Decode the embedded PNG/JPG using STB
+    int texWidth, texHeight, texChannels;
+    stbi_uc* pixels = stbi_load_from_memory(buffer, static_cast<int>(bufferSize), &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+
+    if (!pixels) {
+        std::cerr << "[AssetManager] Failed to decode embedded texture: " << virtualName << "\n";
+        return 0; // Fallback to default
+    }
+
+    VkDeviceSize imageSize = texWidth * texHeight * 4; // 4 bytes per pixel (RGBA)
+
+    // 2. Upload to Staging Buffer
+    VkBuffer stagingBuffer;
+    VkDeviceMemory stagingBufferMemory;
+    CreateBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        stagingBuffer, stagingBufferMemory);
+
+    void* data;
+    vkMapMemory(GetDevice(), stagingBufferMemory, 0, imageSize, 0, &data);
+    memcpy(data, pixels, static_cast<size_t>(imageSize));
+    vkUnmapMemory(GetDevice(), stagingBufferMemory);
+
+    stbi_image_free(pixels); // Free CPU RAM
+
+    // 3. Create Vulkan Image
+    Texture tex{};
+    tex.mipLevels = 1; // Simplified: 1 mip level for runtime decodes
+    VkFormat format = isNormal ? VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_R8G8B8A8_SRGB;
+
+    VkImageCreateInfo imageInfo{};
+    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.extent.width = texWidth;
+    imageInfo.extent.height = texHeight;
+    imageInfo.extent.depth = 1;
+    imageInfo.mipLevels = tex.mipLevels;
+    imageInfo.arrayLayers = 1;
+    imageInfo.format = format;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    if (vkCreateImage(GetDevice(), &imageInfo, nullptr, &tex.image) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create embedded texture image.");
+
+    VkMemoryRequirements memReqs;
+    vkGetImageMemoryRequirements(GetDevice(), tex.image, &memReqs);
+    VkMemoryAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memReqs.size;
+    allocInfo.memoryTypeIndex = FindMemoryType(memReqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+    vkAllocateMemory(GetDevice(), &allocInfo, nullptr, &tex.imageMemory);
+    vkBindImageMemory(GetDevice(), tex.image, tex.imageMemory, 0);
+
+    // 4. Transfer and Layout Transitions
+    TransitionImageLayout(tex.image, format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, tex.mipLevels);
+
+    VkCommandBuffer cmd = BeginSingleTimeCommands();
+    VkBufferImageCopy region{};
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.layerCount = 1;
+    region.imageExtent = { (uint32_t)texWidth, (uint32_t)texHeight, 1 };
+    vkCmdCopyBufferToImage(cmd, stagingBuffer, tex.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    EndSingleTimeCommands(cmd);
+
+    TransitionImageLayout(tex.image, format, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, tex.mipLevels);
+
+    vkDestroyBuffer(GetDevice(), stagingBuffer, nullptr);
+    vkFreeMemory(GetDevice(), stagingBufferMemory, nullptr);
+
+    // 5. Create View & Sampler
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image = tex.image;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = format;
+    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewInfo.subresourceRange.levelCount = tex.mipLevels;
+    viewInfo.subresourceRange.layerCount = 1;
+    vkCreateImageView(GetDevice(), &viewInfo, nullptr, &tex.imageView);
+
+    VkSamplerCreateInfo samplerInfo{};
+    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    samplerInfo.magFilter = VK_FILTER_LINEAR;
+    samplerInfo.minFilter = VK_FILTER_LINEAR;
+    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.anisotropyEnable = VK_TRUE;
+    samplerInfo.maxAnisotropy = g_Settings.maxAnisotropy;
+    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    samplerInfo.maxLod = static_cast<float>(tex.mipLevels);
+    vkCreateSampler(GetDevice(), &samplerInfo, nullptr, &tex.sampler);
+
+    // 6. Register in engine
+    uint32_t newId = static_cast<uint32_t>(registry.size());
+    registry.push_back(std::move(tex));
+    map[virtualName] = newId;
+    m_textureDirty = true;
+
+    std::cout << "[AssetManager] Decoded Embedded GLB Texture: " << virtualName << " -> ID " << newId << "\n";
+    return newId;
+}
 uint32_t AssetManager::LoadTextureFromFile(const std::string& filePath) {
     auto it = m_textureToId.find(filePath);
     if (it != m_textureToId.end()) {
@@ -1137,35 +1253,40 @@ void AssetManager::LoadGLTF(const std::string& path) {
             std::string normalPath = "";
 
             if (primitive->material) {
-                if (primitive->material->has_pbr_metallic_roughness) {
-                    cgltf_texture_view* baseColorView = &primitive->material->pbr_metallic_roughness.base_color_texture;
-                    if (baseColorView->texture && baseColorView->texture->image) {
-                        albedoPath = baseColorView->texture->image->uri ? baseDir + baseColorView->texture->image->uri : "";
+                std::string matName = primitive->material->name ? primitive->material->name : "unnamed_mat";
+
+                // Helper lambda to safely extract texture (embedded or external)
+                auto extractTexture = [&](cgltf_texture_view* view, bool isNormal) -> std::string {
+                    if (!view->texture || !view->texture->image) return "";
+
+                    cgltf_image* image = view->texture->image;
+
+                    // Priority 1: Embedded binary buffer payload
+                    if (image->buffer_view) {
+                        std::string virtualName = path + "_" + matName + (isNormal ? "_normal" : "_albedo");
+                        uint8_t* bufferData = (uint8_t*)image->buffer_view->buffer->data + image->buffer_view->offset;
+                        LoadTextureFromMemory(virtualName, bufferData, image->buffer_view->size, isNormal);
+                        return virtualName;
                     }
-                }
+                    // Priority 2: External URI reference
+                    else if (image->uri) {
+                        std::string externalPath = baseDir + image->uri;
+                        size_t extPos = externalPath.find_last_of('.');
+                        if (extPos != std::string::npos) {
+                            externalPath.replace(extPos, externalPath.length() - extPos, ".dds");
+                        }
+                        // Only return if the file actually exists on disk, otherwise skip to avoid errors
+                        std::ifstream test(externalPath);
+                        if (test.good()) return externalPath;
+                    }
+                    return "";
+                    };
 
-                cgltf_texture_view* normalView = &primitive->material->normal_texture;
-                if (normalView->texture && normalView->texture->image) {
-                    normalPath = normalView->texture->image->uri ? baseDir + normalView->texture->image->uri : "";
+                if (primitive->material->has_pbr_metallic_roughness) {
+                    albedoPath = extractTexture(&primitive->material->pbr_metallic_roughness.base_color_texture, false);
                 }
-
-                if (albedoPath.empty() && primitive->material->name) {
-                    std::string matName = primitive->material->name;
-                    albedoPath = "assets/models/" + matName + "/textures/" + matName + "_albedo.dds";
-                    normalPath = "assets/models/" + matName + "/textures/" + matName + "_normal.dds";
-                }
+                normalPath = extractTexture(&primitive->material->normal_texture, true);
             }
-
-            // Ensure DDS extension enforcement (matching your OBJ pipeline)
-            auto enforceDDS = [](std::string& filepath) {
-                if (filepath.empty()) return;
-                size_t extPos = filepath.find_last_of('.');
-                if (extPos != std::string::npos) {
-                    filepath.replace(extPos, filepath.length() - extPos, ".dds");
-                }
-                };
-            enforceDDS(albedoPath);
-            enforceDDS(normalPath);
 
             // 6. PUSH TO MESH
             mesh.vertices.insert(mesh.vertices.end(), localVerts.begin(), localVerts.end());
@@ -1176,6 +1297,8 @@ void AssetManager::LoadGLTF(const std::string& path) {
 
             globalVertexOffset += static_cast<uint32_t>(localVerts.size());
             globalIndexOffset += static_cast<uint32_t>(localIndices.size());
+
+            std::cout << "[GLTF Debug] Submesh " << p << " -> Albedo: " << (albedoPath.empty() ? "EMPTY (Defaults to Dirt)" : albedoPath) << "\n";
         }
     }
 

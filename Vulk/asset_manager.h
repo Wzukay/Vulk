@@ -90,6 +90,7 @@ public:
 
 public:
     uint32_t LoadTextureFromFile(const std::string& filePath);
+    uint32_t LoadTextureFromMemory(const std::string& virtualName, const uint8_t* buffer, size_t bufferSize, bool isNormal);
     uint32_t LoadNormalTextureFromFile(const std::string& filePath);
     void CreateTextureImage(const std::string& path, Texture& tex, VkFormat format = VK_FORMAT_R8G8B8A8_SRGB);
     void CreateTextureImageView(Texture& tex, VkFormat format);
