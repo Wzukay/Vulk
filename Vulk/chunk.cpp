@@ -392,243 +392,82 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
 }
 
 TerrainData Chunk::CalculateHeightAndColor(float worldX, float worldZ) {
-    static thread_local FastNoiseLite continentNoise;
-    static thread_local FastNoiseLite hillNoise;
-    static thread_local FastNoiseLite mountainNoise;
+    static thread_local FastNoiseLite baseNoise;
     static thread_local FastNoiseLite ridgeNoise;
-    static thread_local FastNoiseLite valleyNoise;
-    static thread_local FastNoiseLite peakNoise;
     static thread_local FastNoiseLite detailNoise;
-    static thread_local FastNoiseLite plateauNoise;
     static thread_local FastNoiseLite tempNoise;
     static thread_local FastNoiseLite moistNoise;
-    static thread_local FastNoiseLite dirtNoise; // --- NEW: Dirt patch noise ---
     static thread_local bool initialized = false;
 
     if (!initialized) {
-        // Huge continental layout.
-        continentNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-        continentNoise.SetFractalType(FastNoiseLite::FractalType_FBm);
-        continentNoise.SetFractalOctaves(4);
-        continentNoise.SetFractalLacunarity(2.0f);
-        continentNoise.SetFractalGain(0.50f);
-        continentNoise.SetFrequency(0.00055f);
+        // 1. Macro Elevation (Continents, Rolling Hills)
+        baseNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+        baseNoise.SetFractalType(FastNoiseLite::FractalType_FBm);
+        baseNoise.SetFractalOctaves(4);
+        baseNoise.SetFrequency(0.0008f);
 
-        // Broad rolling terrain.
-        hillNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-        hillNoise.SetFractalType(FastNoiseLite::FractalType_FBm);
-        hillNoise.SetFractalOctaves(4);
-        hillNoise.SetFractalLacunarity(2.0f);
-        hillNoise.SetFractalGain(0.48f);
-        hillNoise.SetFrequency(0.0022f);
-
-        // Mountain belt frequency: a range should span many chunks.
-        mountainNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-        mountainNoise.SetFractalType(FastNoiseLite::FractalType_FBm);
-        mountainNoise.SetFractalOctaves(3);
-        mountainNoise.SetFractalLacunarity(2.0f);
-        mountainNoise.SetFractalGain(0.52f);
-        mountainNoise.SetFrequency(0.00075f);
-
-        // Ridges are secondary detail, not the mountain silhouette.
+        // 2. Mountains & Valleys (Using Ridged Multifractal for sharp peaks)
         ridgeNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-        ridgeNoise.SetFractalType(FastNoiseLite::FractalType_FBm);
+        ridgeNoise.SetFractalType(FastNoiseLite::FractalType_Ridged);
         ridgeNoise.SetFractalOctaves(4);
-        ridgeNoise.SetFractalLacunarity(2.0f);
-        ridgeNoise.SetFractalGain(0.50f);
-        ridgeNoise.SetFrequency(0.0025f);
+        ridgeNoise.SetFrequency(0.0015f);
 
-        // Broad internal valleys.
-        valleyNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-        valleyNoise.SetFractalType(FastNoiseLite::FractalType_FBm);
-        valleyNoise.SetFractalOctaves(3);
-        valleyNoise.SetFractalLacunarity(2.0f);
-        valleyNoise.SetFractalGain(0.50f);
-        valleyNoise.SetFrequency(0.0011f);
-
-        // Sparse landmark peaks.
-        peakNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-        peakNoise.SetFrequency(0.00075f);
-
-        // Very small breakup.
+        // 3. Micro Detail & Dirt Masking (Reusing one noise for two jobs!)
         detailNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
         detailNoise.SetFractalType(FastNoiseLite::FractalType_FBm);
         detailNoise.SetFractalOctaves(3);
-        detailNoise.SetFractalLacunarity(2.0f);
-        detailNoise.SetFractalGain(0.5f);
-        detailNoise.SetFrequency(0.012f);
+        detailNoise.SetFrequency(0.015f);
 
-        // Broad, low-frequency terrain variation used mainly outside mountains.
-        plateauNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-        plateauNoise.SetFractalType(FastNoiseLite::FractalType_FBm);
-        plateauNoise.SetFractalOctaves(3);
-        plateauNoise.SetFractalLacunarity(2.0f);
-        plateauNoise.SetFractalGain(0.52f);
-        plateauNoise.SetFrequency(0.0016f);
-
+        // 4. Biome Climate
         tempNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
         tempNoise.SetFrequency(0.00028f);
 
         moistNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
         moistNoise.SetFrequency(0.00036f);
 
-        // --- NEW: Dirt Patch Generator ---
-        dirtNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-        dirtNoise.SetFractalType(FastNoiseLite::FractalType_FBm);
-        dirtNoise.SetFractalOctaves(3);
-        dirtNoise.SetFrequency(0.015f); // Frequency dictates patch size (0.015 = ~60 units wide)
-
         initialized = true;
     }
 
     const int seed = s_globalSeed;
-    continentNoise.SetSeed(seed + 11);
-    hillNoise.SetSeed(seed + 23);
-    mountainNoise.SetSeed(seed + 37);
-    ridgeNoise.SetSeed(seed + 47);
-    valleyNoise.SetSeed(seed + 61);
-    peakNoise.SetSeed(seed + 73);
+    baseNoise.SetSeed(seed + 11);
+    ridgeNoise.SetSeed(seed + 37);
     detailNoise.SetSeed(seed + 89);
-    plateauNoise.SetSeed(seed + 97);
     tempNoise.SetSeed(seed + 101);
     moistNoise.SetSeed(seed + 202);
-    dirtNoise.SetSeed(seed + 303);
 
-    auto clamp01 = [](float v) {
-        return std::clamp(v, 0.0f, 1.0f);
-        };
+    auto clamp01 = [](float v) { return std::clamp(v, 0.0f, 1.0f); };
+    auto n01 = [](float n) { return (n + 1.0f) * 0.5f; };
 
-    auto smooth = [](float edge0, float edge1, float x) {
-        float t = std::clamp((x - edge0) / (edge1 - edge0), 0.0f, 1.0f);
-        return t * t * (3.0f - 2.0f * t);
-        };
+    // --- 1. SHAPE GENERATION (3 NOISES) ---
 
-    auto n01 = [](float n) {
-        return (n + 1.0f) * 0.5f;
-        };
+    // Base elevation (-1 to 1 mapped to 0 to 1)
+    float base = n01(baseNoise.GetNoise(worldX, worldZ));
 
-    // ------------------------------------------------------------------------
-    // 1. CONTINENTS / LOWLANDS
-    // ------------------------------------------------------------------------
-    float continent = n01(continentNoise.GetNoise(worldX, worldZ));
-    float landMask = smooth(0.34f, 0.58f, continent);
-    float basinMask = 1.0f - smooth(0.22f, 0.43f, continent);
+    // FIX: Map the Ridged fractal to 0..1 so it never digs negative holes!
+    float ridge = n01(ridgeNoise.GetNoise(worldX, worldZ));
 
-    float broadHills = n01(hillNoise.GetNoise(worldX, worldZ));
-    broadHills = (broadHills - 0.5f) * 2.0f;
-
-    float plainUndulation = n01(hillNoise.GetNoise(worldX * 0.48f + 173.0f,
-        worldZ * 0.48f - 91.0f));
-    plainUndulation = (plainUndulation - 0.5f) * 2.0f;
-
-    float height = 3.0f;
-    height += basinMask * broadHills * 4.5f;
-    height += landMask * (9.0f + broadHills * 11.0f);
-    height += landMask * (1.8f * plainUndulation) * (1.0f - basinMask * 0.45f);
-
-    // ------------------------------------------------------------------------
-    // 2. DIRECTIONAL MOUNTAIN BELTS
-    // ------------------------------------------------------------------------
-    constexpr float c1 = 0.70710678f;
-    constexpr float s1 = 0.70710678f;
-    constexpr float c2 = 0.86602540f;
-    constexpr float s2 = 0.50000000f;
-
-    float x1 = worldX * c1 + worldZ * s1;
-    float z1 = -worldX * s1 + worldZ * c1;
-
-    float x2 = worldX * c2 - worldZ * s2;
-    float z2 = worldX * s2 + worldZ * c2;
-
-    float rangeA = n01(mountainNoise.GetNoise(x1, z1 * 0.38f));
-    float rangeB = n01(mountainNoise.GetNoise(x2, z2 * 0.44f));
-
-    float beltA = smooth(0.50f, 0.68f, rangeA);
-    float beltB = smooth(0.56f, 0.74f, rangeB) * 0.72f;
-
-    float mountainMask = clamp01(std::max(beltA, beltB));
-    mountainMask *= landMask;
-
-    float foothillA = smooth(0.40f, 0.60f, rangeA);
-    float foothillB = smooth(0.46f, 0.64f, rangeB) * 0.70f;
-    float foothillMask = clamp01(std::max(foothillA, foothillB));
-    foothillMask = foothillMask * landMask * (1.0f - mountainMask * 0.88f);
-
-    // ------------------------------------------------------------------------
-    // 3. MASSIF — THE MAIN MOUNTAIN SHAPE
-    // ------------------------------------------------------------------------
-    float massif = n01(hillNoise.GetNoise(worldX * 0.60f, worldZ * 0.60f));
-    massif = smooth(0.30f, 0.76f, massif);
-
-    float mountainHeight = 46.0f + massif * 64.0f;
-
-    height += foothillMask * (14.0f + massif * 28.0f);
-    height += mountainMask * mountainHeight;
-
-    // ------------------------------------------------------------------------
-    // 4. BROAD VALLEYS THROUGH THE RANGE
-    // ------------------------------------------------------------------------
-    float valleyA = n01(valleyNoise.GetNoise(x1 * 0.90f, z1 * 0.72f));
-    float valleyB = n01(valleyNoise.GetNoise(x2 * 0.88f, z2 * 0.76f));
-
-    float valleyAAmount = smooth(0.18f, 0.42f, 1.0f - valleyA);
-    float valleyBAmount = smooth(0.20f, 0.44f, 1.0f - valleyB);
-    float valleyMask = std::max(valleyAAmount, valleyBAmount);
-
-    height -= mountainMask * valleyMask * (8.0f + massif * 14.0f);
-
-    // ------------------------------------------------------------------------
-    // 5. ROUNDED RIDGES
-    // ------------------------------------------------------------------------
-    float ridgeA = 1.0f - std::abs(ridgeNoise.GetNoise(x1, z1 * 0.70f));
-    float ridgeB = 1.0f - std::abs(ridgeNoise.GetNoise(x2, z2 * 0.78f));
-
-    ridgeA = std::pow(clamp01(ridgeA), 2.4f);
-    ridgeB = std::pow(clamp01(ridgeB), 2.4f);
-
-    float ridge = std::max(ridgeA, ridgeB);
-
-    ridge *= (1.0f - valleyMask * 0.65f);
-    ridge *= (0.55f + massif * 0.45f);
-
-    height += mountainMask * ridge * 20.0f;
-
-    // ------------------------------------------------------------------------
-    // 6. A FEW BIG PEAKS
-    // ------------------------------------------------------------------------
-    float peakSignal = n01(peakNoise.GetNoise(worldX, worldZ));
-    float peakMask = smooth(0.76f, 0.88f, peakSignal);
-    peakMask *= mountainMask;
-    peakMask *= (1.0f - valleyMask);
-
-    height += peakMask * peakMask * 26.0f;
-
-    // ------------------------------------------------------------------------
-    // 7. SMALL SURFACE DETAIL
-    // ------------------------------------------------------------------------
+    // Detail / Dirt noise
     float detail = n01(detailNoise.GetNoise(worldX, worldZ));
-    detail = (detail - 0.5f) * 2.0f;
 
-    float detailWeight = 0.45f;
-    detailWeight += foothillMask * 0.30f;
-    detailWeight += mountainMask * 0.85f;
-    detailWeight *= (1.0f - valleyMask * 0.30f);
-    height += detail * (1.25f * detailWeight);
+    // Start with a foundational height to keep things above the void
+    float height = 5.0f;
 
-    float plateauSignal = n01(plateauNoise.GetNoise(worldX, worldZ));
-    float plateauMask = smooth(0.67f, 0.82f, plateauSignal);
-    plateauMask *= landMask;
-    plateauMask *= (1.0f - mountainMask * 0.92f);
-    float plateauBase = std::floor(height / 12.0f + 0.5f) * 12.0f;
-    height = std::lerp(height, plateauBase + 1.5f, plateauMask * 0.18f);
+    // Lowlands: Gentle, sweeping hills
+    float plainsHeight = base * 25.0f;
 
-    float excess = std::max(0.0f, height - 190.0f);
-    height -= excess * 0.45f;
-    height = std::max(0.0f, height);
+    // Highlands: Steep ridges multiplied by a mountain mask (derived from the base noise)
+    float mountainMask = glm::smoothstep(0.4f, 0.7f, base);
 
-    // ------------------------------------------------------------------------
-    // 8. CLIMATE & TEXTURE WEIGHTS
-    // ------------------------------------------------------------------------
+    // Square the ridge so valleys are wide and peaks are sharp
+    float mountainHeight = std::pow(ridge, 2.0f) * 140.0f;
+
+    // Combine plains and mountains
+    height += std::lerp(plainsHeight, plainsHeight + mountainHeight, mountainMask);
+
+    // Add micro details to everything except the steepest mountain cliffs
+    height += (detail * 4.0f) * (1.0f - mountainMask * 0.5f);
+
+    // --- 2. BIOME EVALUATION (2 NOISES) ---
     float t = clamp01(n01(tempNoise.GetNoise(worldX, worldZ)));
     float m = clamp01(n01(moistNoise.GetNoise(worldX, worldZ)));
     const float BLEND_RANGE = 0.035f;
@@ -638,28 +477,16 @@ TerrainData Chunk::CalculateHeightAndColor(float worldX, float worldZ) {
     const BiomeDefinition& b2 = GetBiomeDefinition(DetermineBiome(clamp01(t - BLEND_RANGE), clamp01(m + BLEND_RANGE)));
     const BiomeDefinition& b3 = GetBiomeDefinition(DetermineBiome(clamp01(t + BLEND_RANGE), clamp01(m + BLEND_RANGE)));
 
-    glm::vec3 blendedWeights =
-        (b0.textureWeights + b1.textureWeights +
-            b2.textureWeights + b3.textureWeights) * 0.25f;
+    glm::vec3 blendedWeights = (b0.textureWeights + b1.textureWeights + b2.textureWeights + b3.textureWeights) * 0.25f;
+    glm::vec3 blendedColor = (b0.groundColor + b1.groundColor + b2.groundColor + b3.groundColor) * 0.25f;
 
-    glm::vec3 blendedColor =
-        (b0.groundColor + b1.groundColor +
-            b2.groundColor + b3.groundColor) * 0.25f;
+    // --- 3. DIRT MASKING (REUSING DETAIL NOISE) ---
+    if (blendedWeights.y > 0.4f && detail < 0.35f) {
+        float blend = glm::smoothstep(0.20f, 0.35f, detail);
+        float grassAmount = blendedWeights.y;
 
-    if (blendedWeights.y > 0.4f) {
-        float dNoise = n01(dirtNoise.GetNoise(worldX, worldZ)); // 0 to 1
-
-        // Convert 35% of grassy areas into dirt patches
-        if (dNoise < 0.35f) {
-            // Smoothly blend the edges of the dirt patch
-            float blend = smooth(0.20f, 0.35f, dNoise);
-
-            float grassAmount = blendedWeights.y;
-            blendedWeights.y = std::lerp(0.0f, grassAmount, blend);
-
-            // Transfer the removed grass weight into the sand/dirt channel (x)
-            blendedWeights.z += grassAmount * (1.0f - blend);
-        }
+        blendedWeights.y = std::lerp(0.0f, grassAmount, blend);
+        blendedWeights.z += grassAmount * (1.0f - blend); // Shift grass weight into dirt weight
     }
 
     return { height, blendedWeights, blendedColor };

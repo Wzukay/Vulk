@@ -23,219 +23,151 @@ const std::vector<std::string> ROCK_MESHES = {
     "assets/models/rock/rock.glb"
 };
 
-// --- Biome Data Tables ---
+// Texture Weights: X = Dirt/Sand, Y = Grass, Z = Rock/Snow
 static const BiomeDefinition G_BIOMES[] = {
 
-    // 0: Plains (Flat, dry, no trees, sparse rocks, lots of butterflies)
-    {
-        .type = BiomeType::Plains,
-        .heightScale = 20.0f,
-        .exponent = 1.0f,
-        .textureWeights = glm::vec3(0.0f, 1.0f, 0.0f),
-        .groundColor = glm::vec3(0.48f, 0.58f, 0.24f),
-        .props = {
-            PropSpawnRule{
-                .lodMeshes = ROCK_MESHES,
-                .spawnChance = 0.02f,
-                .noiseThreshold = 0.7f,
-                .noiseIndex = NOISE_INDEX_ROCKS,
-                .minHeight = 2.0f,
-                .maxHeight = 180.0f,
-                .minScale = 0.8f,
-                .maxScale = 1.2f,
-                .groundOffset = ROCK_SINK_DEPTH,
-                .maxLod = CULL_LOD_ROCKS,
-                .alignToNormal = true
-            }
-        },
-        .swarms = {
-            SwarmSpawnRule{
-                .boidCount = 46,
-                .spawnChance = 0.40f,
-                .spreadRadius = 15.0f,
-                .minHeight = 2.0f,
-                .maxHeight = 80.0f,
-                .minScale = 0.5f,
-                .maxScale = 1.0f,
-                .verticalOffset = 4.0f
-            }
-        }
-    },
+    // ==========================================
+    // HOT BIOMES (Temp > 0.66)
+    // ==========================================
 
-    // 1: TallPlains (Thick grass, occasional tree clumps, butterflies)
     {
-        .type = BiomeType::TallPlains,
-        .heightScale = 40.0f,
-        .exponent = 1.1f,
-        .textureWeights = glm::vec3(0.0f, 0.8f, 0.2f),
-        .groundColor = glm::vec3(0.35f, 0.49f, 0.18f),
+        .type = BiomeType::Desert,
+        .heightScale = 0.0f, .exponent = 0.0f,
+        .textureWeights = glm::vec3(1.0f, 0.0f, 0.0f), // 100% Sand
+        .groundColor = glm::vec3(0.76f, 0.69f, 0.50f), // Warm Tan
         .props = {
-            PropSpawnRule{
-                .lodMeshes = TREE_MESHES,
-                .spawnChance = 0.05f,
-                .noiseThreshold = 0.2f,
-                .noiseIndex = NOISE_INDEX_TREES,
-                .minHeight = 2.0f,
-                .maxHeight = 85.0f,
-                .minScale = 0.08f,
-                .maxScale = 0.15f,
-                .groundOffset = TREE_GROUND_OFFSET,
-                .maxLod = CULL_LOD_TREES,
-                .alignToNormal = false
-            },
-            PropSpawnRule{
-                .lodMeshes = ROCK_MESHES,
-                .spawnChance = 0.03f,
-                .noiseThreshold = 0.6f,
-                .noiseIndex = NOISE_INDEX_ROCKS,
-                .minHeight = 2.0f,
-                .maxHeight = 180.0f,
-                .minScale = 1.0f,
-                .maxScale = 1.4f,
-                .groundOffset = ROCK_SINK_DEPTH,
-                .maxLod = CULL_LOD_ROCKS,
-                .alignToNormal = true
-            }
-        },
-        .swarms = {
-            SwarmSpawnRule{
-                .boidCount = 46,
-                .spawnChance = 0.35f,
-                .spreadRadius = 15.0f,
-                .minHeight = 2.0f,
-                .maxHeight = 80.0f,
-                .minScale = 0.5f,
-                .maxScale = 1.0f,
-                .verticalOffset = 4.0f
-            }
-        }
-    },
-
-    // 2: Foothills (Heavy forests, medium rocks)
-    {
-        .type = BiomeType::Foothills,
-        .heightScale = 80.0f,
-        .exponent = 1.3f,
-        .textureWeights = glm::vec3(0.0f, 0.5f, 0.5f),
-        .groundColor = glm::vec3(0.28f, 0.42f, 0.18f),
-        .props = {
-            PropSpawnRule{
-                .lodMeshes = TREE_MESHES,
-                .spawnChance = 0.15f,
-                .noiseThreshold = 0.1f,
-                .noiseIndex = NOISE_INDEX_TREES,
-                .minHeight = 2.0f,
-                .maxHeight = 85.0f,
-                .minScale = 0.08f,
-                .maxScale = 0.15f,
-                .groundOffset = TREE_GROUND_OFFSET,
-                .maxLod = CULL_LOD_TREES,
-                .alignToNormal = false
-            },
-            PropSpawnRule{
-                .lodMeshes = ROCK_MESHES,
-                .spawnChance = 0.05f,
-                .noiseThreshold = 0.6f,
-                .noiseIndex = NOISE_INDEX_ROCKS,
-                .minHeight = 2.0f,
-                .maxHeight = 180.0f,
-                .minScale = 1.0f,
-                .maxScale = 1.8f,
-                .groundOffset = ROCK_SINK_DEPTH,
-                .maxLod = CULL_LOD_ROCKS,
-                .alignToNormal = true
-            }
-        },
-        .swarms = {} // Too wooded for swarms
-    },
-
-    // 3: LowMountain (Dense forests breaking into rock)
-    {
-        .type = BiomeType::LowMountain,
-        .heightScale = 100.0f,
-        .exponent = 1.6f,
-        .textureWeights = glm::vec3(0.4f, 0.0f, 0.6f),
-        .groundColor = glm::vec3(0.45f, 0.42f, 0.38f),
-        .props = {
-            PropSpawnRule{
-                .lodMeshes = TREE_MESHES,
-                .spawnChance = 0.15f,
-                .noiseThreshold = 0.1f,
-                .noiseIndex = NOISE_INDEX_TREES,
-                .minHeight = 2.0f,
-                .maxHeight = 85.0f,
-                .minScale = 0.08f,
-                .maxScale = 0.15f,
-                .groundOffset = TREE_GROUND_OFFSET,
-                .maxLod = CULL_LOD_TREES,
-                .alignToNormal = false
-            },
-            PropSpawnRule{
-                .lodMeshes = ROCK_MESHES,
-                .spawnChance = 0.05f,
-                .noiseThreshold = 0.5f,
-                .noiseIndex = NOISE_INDEX_ROCKS,
-                .minHeight = 2.0f,
-                .maxHeight = 180.0f,
-                .minScale = 1.0f,
-                .maxScale = 1.8f,
-                .groundOffset = ROCK_SINK_DEPTH,
-                .maxLod = CULL_LOD_ROCKS,
-                .alignToNormal = true
-            }
+            PropSpawnRule{ ROCK_MESHES, 0.01f, 0.8f, NOISE_INDEX_ROCKS, 2.0f, 150.0f, 0.5f, 1.2f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
         },
         .swarms = {}
     },
-
-    // 4: MediumMountain (Above the tree line, heavy rocks)
     {
-        .type = BiomeType::MediumMountain,
-        .heightScale = 150.0f,
-        .exponent = 2.0f,
-        .textureWeights = glm::vec3(0.2f, 0.0f, 0.8f),
-        .groundColor = glm::vec3(0.40f, 0.40f, 0.42f),
+        .type = BiomeType::Savanna,
+        .heightScale = 0.0f, .exponent = 0.0f,
+        .textureWeights = glm::vec3(0.4f, 0.6f, 0.0f),
+        .groundColor = glm::vec3(0.58f, 0.58f, 0.30f), // Dry Yellow-Green
         .props = {
-            PropSpawnRule{
-                .lodMeshes = ROCK_MESHES,
-                .spawnChance = 0.08f,
-                .noiseThreshold = 0.4f,
-                .noiseIndex = NOISE_INDEX_ROCKS,
-                .minHeight = 2.0f,
-                .maxHeight = 180.0f,
-                .minScale = 1.2f,
-                .maxScale = 2.0f,
-                .groundOffset = ROCK_SINK_DEPTH,
-                .maxLod = CULL_LOD_ROCKS,
-                .alignToNormal = true
-            }
+            PropSpawnRule{ TREE_MESHES, 0.02f, 0.4f, NOISE_INDEX_TREES, 2.0f, 60.0f, 0.08f, 0.12f, TREE_GROUND_OFFSET, CULL_LOD_TREES, false },
+            PropSpawnRule{ ROCK_MESHES, 0.02f, 0.6f, NOISE_INDEX_ROCKS, 2.0f, 180.0f, 0.8f, 1.5f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
         },
-        .swarms = {}
+        .swarms = { SwarmSpawnRule{ 25, 0.30f, 20.0f, 2.0f, 60.0f, 0.5f, 0.8f, 4.0f } }
     },
-
-    // 5: HighMountain (Alpine peaks, snow, giant boulders)
     {
-        .type = BiomeType::HighMountain,
-        .heightScale = 200.0f,
-        .exponent = 2.5f,
-        .textureWeights = glm::vec3(0.0f, 0.0f, 1.0f),
-        .groundColor = glm::vec3(0.85f, 0.88f, 0.92f),
+        .type = BiomeType::Jungle,
+        .heightScale = 0.0f, .exponent = 0.0f,
+        .textureWeights = glm::vec3(0.1f, 0.9f, 0.0f),
+        .groundColor = glm::vec3(0.15f, 0.35f, 0.12f), // Deep Vibrant Green
         .props = {
-            PropSpawnRule{
-                .lodMeshes = ROCK_MESHES,
-                .spawnChance = 0.10f,
-                .noiseThreshold = 0.3f,
-                .noiseIndex = NOISE_INDEX_ROCKS,
-                .minHeight = 2.0f,
-                .maxHeight = 180.0f,
-                .minScale = 1.5f,
-                .maxScale = 2.5f,
-                .groundOffset = ROCK_SINK_DEPTH,
-                .maxLod = CULL_LOD_ROCKS,
-                .alignToNormal = true
-            }
-        },
-        .swarms = {}
-    }
+        // High density, variable size trees to simulate canopy
+        PropSpawnRule{ TREE_MESHES, 0.30f, 0.0f, NOISE_INDEX_TREES, 2.0f, 90.0f, 0.06f, 0.25f, TREE_GROUND_OFFSET, CULL_LOD_TREES, false }
+    },
+    .swarms = { SwarmSpawnRule{ 60, 0.50f, 10.0f, 2.0f, 90.0f, 0.3f, 0.6f, 8.0f } }
+},
+{
+    .type = BiomeType::Swamp,
+    .heightScale = 0.0f, .exponent = 0.0f,
+    .textureWeights = glm::vec3(0.6f, 0.4f, 0.0f),
+    .groundColor = glm::vec3(0.25f, 0.28f, 0.18f), // Murky Mud Green
+    .props = {
+        PropSpawnRule{ TREE_MESHES, 0.10f, 0.3f, NOISE_INDEX_TREES, 2.0f, 30.0f, 0.08f, 0.15f, TREE_GROUND_OFFSET, CULL_LOD_TREES, false },
+        PropSpawnRule{ ROCK_MESHES, 0.05f, 0.4f, NOISE_INDEX_ROCKS, 2.0f, 40.0f, 1.0f, 2.0f, -0.5f, CULL_LOD_ROCKS, true } // Sunken rocks
+    },
+    .swarms = { SwarmSpawnRule{ 80, 0.80f, 8.0f, 2.0f, 30.0f, 0.2f, 0.4f, 2.0f } } // Tons of "flies/bugs"
+},
+
+// ==========================================
+// TEMPERATE BIOMES (0.33 < Temp <= 0.66)
+// ==========================================
+
+{
+    .type = BiomeType::Shrubland,
+    .heightScale = 0.0f, .exponent = 0.0f,
+    .textureWeights = glm::vec3(0.3f, 0.7f, 0.0f),
+    .groundColor = glm::vec3(0.48f, 0.58f, 0.24f),
+    .props = {
+        // Tiny trees acting as bushes
+        PropSpawnRule{ TREE_MESHES, 0.08f, 0.5f, NOISE_INDEX_TREES, 2.0f, 80.0f, 0.03f, 0.05f, -0.5f, CULL_LOD_TREES, true },
+        PropSpawnRule{ ROCK_MESHES, 0.05f, 0.6f, NOISE_INDEX_ROCKS, 2.0f, 150.0f, 0.5f, 1.0f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
+    },
+    .swarms = { SwarmSpawnRule{ 30, 0.30f, 15.0f, 2.0f, 80.0f, 0.5f, 1.0f, 4.0f } }
+},
+{
+    .type = BiomeType::Plains,
+    .heightScale = 0.0f, .exponent = 0.0f,
+    .textureWeights = glm::vec3(0.0f, 1.0f, 0.0f),
+    .groundColor = glm::vec3(0.35f, 0.49f, 0.18f), // Lush Green
+    .props = {
+        PropSpawnRule{ ROCK_MESHES, 0.01f, 0.8f, NOISE_INDEX_ROCKS, 2.0f, 180.0f, 0.8f, 1.2f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
+    },
+    .swarms = { SwarmSpawnRule{ 46, 0.40f, 15.0f, 2.0f, 80.0f, 0.5f, 1.0f, 4.0f } }
+},
+{
+    .type = BiomeType::Forest,
+    .heightScale = 0.0f, .exponent = 0.0f,
+    .textureWeights = glm::vec3(0.1f, 0.9f, 0.0f),
+    .groundColor = glm::vec3(0.28f, 0.42f, 0.18f),
+    .props = {
+        PropSpawnRule{ TREE_MESHES, 0.12f, 0.2f, NOISE_INDEX_TREES, 2.0f, 85.0f, 0.08f, 0.14f, TREE_GROUND_OFFSET, CULL_LOD_TREES, false },
+        PropSpawnRule{ ROCK_MESHES, 0.05f, 0.5f, NOISE_INDEX_ROCKS, 2.0f, 180.0f, 1.0f, 1.5f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
+    },
+    .swarms = {}
+},
+{
+    .type = BiomeType::DeepForest,
+    .heightScale = 0.0f, .exponent = 0.0f,
+    .textureWeights = glm::vec3(0.3f, 0.7f, 0.0f),
+    .groundColor = glm::vec3(0.20f, 0.30f, 0.14f), // Very dark green
+    .props = {
+        PropSpawnRule{ TREE_MESHES, 0.25f, 0.05f, NOISE_INDEX_TREES, 2.0f, 100.0f, 0.10f, 0.18f, TREE_GROUND_OFFSET, CULL_LOD_TREES, false }
+    },
+    .swarms = {}
+},
+
+// ==========================================
+// COLD BIOMES (Temp <= 0.33)
+// ==========================================
+
+{
+    .type = BiomeType::Tundra,
+    .heightScale = 0.0f, .exponent = 0.0f,
+    .textureWeights = glm::vec3(0.5f, 0.3f, 0.2f),
+    .groundColor = glm::vec3(0.45f, 0.42f, 0.38f), // Dead Brown/Grey
+    .props = {
+        PropSpawnRule{ ROCK_MESHES, 0.05f, 0.4f, NOISE_INDEX_ROCKS, 2.0f, 180.0f, 0.5f, 1.0f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
+    },
+    .swarms = {}
+},
+{
+    .type = BiomeType::Taiga,
+    .heightScale = 0.0f, .exponent = 0.0f,
+    .textureWeights = glm::vec3(0.2f, 0.6f, 0.2f),
+    .groundColor = glm::vec3(0.32f, 0.38f, 0.32f), // Cold desaturated green
+    .props = {
+        PropSpawnRule{ TREE_MESHES, 0.15f, 0.2f, NOISE_INDEX_TREES, 2.0f, 100.0f, 0.06f, 0.12f, TREE_GROUND_OFFSET, CULL_LOD_TREES, false },
+        PropSpawnRule{ ROCK_MESHES, 0.08f, 0.4f, NOISE_INDEX_ROCKS, 2.0f, 180.0f, 1.0f, 1.5f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
+    },
+    .swarms = {}
+},
+{
+    .type = BiomeType::SnowWastes,
+    .heightScale = 0.0f, .exponent = 0.0f,
+    .textureWeights = glm::vec3(0.0f, 0.0f, 1.0f), // 100% Snow/Rock texture
+    .groundColor = glm::vec3(0.85f, 0.88f, 0.92f), // Pure Snow
+    .props = {
+        PropSpawnRule{ ROCK_MESHES, 0.03f, 0.5f, NOISE_INDEX_ROCKS, 2.0f, 200.0f, 1.0f, 2.0f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
+    },
+    .swarms = {}
+},
+{
+    .type = BiomeType::Alpine,
+    .heightScale = 0.0f, .exponent = 0.0f,
+    .textureWeights = glm::vec3(0.1f, 0.0f, 0.9f),
+    .groundColor = glm::vec3(0.50f, 0.52f, 0.55f), // Grey rock base
+    .props = {
+        // Massive boulders bridging the landscape
+        PropSpawnRule{ ROCK_MESHES, 0.12f, 0.2f, NOISE_INDEX_ROCKS, 2.0f, 250.0f, 1.5f, 4.0f, -0.5f, CULL_LOD_ROCKS, true }
+    },
+    .swarms = {}
+}
 };
 
 const BiomeDefinition& GetBiomeDefinition(BiomeType type) {
@@ -243,20 +175,28 @@ const BiomeDefinition& GetBiomeDefinition(BiomeType type) {
 }
 
 BiomeType DetermineBiome(float temperature, float moisture) {
-    if (moisture >= 0.75f) {
-        if (temperature < 0.4f) return BiomeType::HighMountain;
-        if (temperature < 0.7f) return BiomeType::MediumMountain;
-        return BiomeType::LowMountain;
+    // Temperature: 0.0 = Freezing, 1.0 = Scorching
+    // Moisture:    0.0 = Bone Dry, 1.0 = Drenched
+
+    if (temperature > 0.66f) {
+        // --- HOT ---
+        if (moisture < 0.25f) return BiomeType::Desert;
+        if (moisture < 0.50f) return BiomeType::Savanna;
+        if (moisture < 0.80f) return BiomeType::Jungle;
+        return BiomeType::Swamp;
     }
-    if (moisture >= 0.52f) {
-        if (temperature < 0.5f) return BiomeType::MediumMountain;
-        if (temperature < 0.75f) return BiomeType::LowMountain;
-        return BiomeType::Foothills;
+    else if (temperature > 0.33f) {
+        // --- TEMPERATE ---
+        if (moisture < 0.25f) return BiomeType::Shrubland;
+        if (moisture < 0.50f) return BiomeType::Plains;
+        if (moisture < 0.80f) return BiomeType::Forest;
+        return BiomeType::DeepForest;
     }
-    if (moisture >= 0.32f) {
-        if (temperature < 0.6f) return BiomeType::Foothills;
-        return BiomeType::TallPlains;
+    else {
+        // --- COLD ---
+        if (moisture < 0.30f) return BiomeType::Tundra;
+        if (moisture < 0.60f) return BiomeType::Taiga;
+        if (moisture < 0.85f) return BiomeType::SnowWastes;
+        return BiomeType::Alpine;
     }
-    if (temperature > 0.65f) return BiomeType::Plains;
-    return BiomeType::TallPlains;
 }

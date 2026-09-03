@@ -5,12 +5,24 @@
 #include <glm/glm.hpp>
 
 enum class BiomeType {
+    // Hot
+    Desert,
+    Savanna,
+    Jungle,
+    Swamp,
+
+    // Temperate
+    Shrubland,
     Plains,
-    TallPlains,
-    Foothills,
-    LowMountain,
-    MediumMountain,
-    HighMountain,
+    Forest,
+    DeepForest,
+
+    // Cold
+    Tundra,
+    Taiga,
+    SnowWastes,
+    Alpine,
+
     Count
 };
 
