@@ -162,6 +162,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="assetManager.cpp" />
+    <ClCompile Include="biome.cpp" />
     <ClCompile Include="chunk.cpp" />
     <ClCompile Include="ecs.cpp" />
     <ClCompile Include="game.cpp" />
@@ -190,6 +191,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="asset_manager.h" />
+    <ClInclude Include="biome.h" />
     <ClInclude Include="cgltf.h" />
     <ClInclude Include="chunk.h" />
     <ClInclude Include="day_night.h" />

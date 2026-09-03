@@ -112,8 +112,13 @@ void main() {
     vec3 p1 = p0 + vec3(0.0, bladeHeight * 0.3, 0.0);
     vec3 naturalLean = forwardDir * 0.3 * bladeHeight;
     
-    float windWave = sin(pc.time * pc.windSpeed + inPos.x * 0.2 + inPos.z * 0.2 + inWindOff);
-    vec3 windDir = normalize(vec3(1.0, 0.0, 1.0));
+    // Define your exact desired wind direction (e.g., blowing towards positive X and Z)
+    vec3 windDir = normalize(vec3(0.8, 0.0, 0.6)); // Adjust these numbers to change the global direction
+
+    // Global world-space frequency makes the wind sweep across clumps uniformly
+    float spatialFrequency = 0.05; 
+    float windWave = sin(pc.time * pc.windSpeed + (inPos.x * windDir.x + inPos.z * windDir.z) * spatialFrequency + inWindOff);
+
     vec3 windPush = windDir * (windWave * pc.windStrength * bladeHeight * 0.5);
 
     vec3 p2 = p0 + vec3(0.0, bladeHeight * 0.7, 0.0) + naturalLean + windPush * 0.5;

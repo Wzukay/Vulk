@@ -184,19 +184,24 @@ void TerrainRenderer::Cull(VkCommandBuffer commandBuffer, const glm::vec3& camer
 
     uint32_t submittedVerts = 0;
     uint32_t submittedInds = 0;
+    uint32_t chunkIndex = 0;
 
     for (const auto& [key, chunk] : m_terrainChunks) {
         if (!chunk.ready) continue;
 
-        // --- FIX: CPU Frustum Culling & UI Stats ---
         if (!m_renderer->IsWorldSphereInFrustum(chunk.center, chunk.radius)) {
             outCulledCount++;
             continue;
         }
 
-        float distSq = glm::length2(chunk.center - cameraPos);
-        sortedChunks.push_back({ distSq, &chunk });
+        if (chunkIndex >= MAX_TERRAIN_CHUNKS) break;
 
+        chunkDataMapped[chunkIndex] = {
+            glm::vec4(chunk.center, chunk.radius),
+            chunk.indexCount, chunk.indexOffset, chunk.vertexOffset, static_cast<uint32_t>(chunk.lod)
+        };
+
+        chunkIndex++;
         submittedVerts += chunk.vertexCount;
         submittedInds += chunk.indexCount;
     }
@@ -204,23 +209,8 @@ void TerrainRenderer::Cull(VkCommandBuffer commandBuffer, const glm::vec3& camer
     // Push the active chunk geometry totals back to the main thread
     outVertexCount += submittedVerts;
     outIndexCount += submittedInds;
-
-    std::sort(sortedChunks.begin(), sortedChunks.end(),
-        [](const auto& a, const auto& b) { return a.first < b.first; });
-
-    uint32_t chunkIndex = 0;
-    for (const auto& pair : sortedChunks) {
-        if (chunkIndex >= MAX_TERRAIN_CHUNKS) break;
-        const TerrainChunkGPU* chunk = pair.second;
-
-        chunkDataMapped[chunkIndex] = {
-            glm::vec4(chunk->center, chunk->radius),
-            chunk->indexCount, chunk->indexOffset, chunk->vertexOffset, static_cast<uint32_t>(chunk->lod)
-        };
-        chunkIndex++;
-    }
-
     m_cullChunkCount = chunkIndex;
+
     if (chunkIndex == 0) return;
 
     uint32_t zero = 0;
@@ -595,7 +585,7 @@ void TerrainRenderer::CreateComputePipeline() {
     VkDescriptorSetLayoutCreateInfo layoutInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, static_cast<uint32_t>(bindings.size()), bindings.data() };
     vkCreateDescriptorSetLayout(m_device, &layoutInfo, nullptr, &m_computeDescriptorSetLayout);
 
-    VkPushConstantRange pushConstantRange{ VK_SHADER_STAGE_COMPUTE_BIT, 0, 96 };
+    VkPushConstantRange pushConstantRange{ VK_SHADER_STAGE_COMPUTE_BIT, 0, 128};
 
     VkPipelineLayoutCreateInfo pipelineLayoutInfo{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, nullptr, 0, 1, &m_computeDescriptorSetLayout, 1, &pushConstantRange };
     vkCreatePipelineLayout(m_device, &pipelineLayoutInfo, nullptr, &m_computePipelineLayout);

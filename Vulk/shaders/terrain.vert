@@ -27,7 +27,6 @@ layout(location = 6) flat out uint fragNormalTextureId;
 layout(location = 7) out vec3 fragColor;
 
 void main() {
-    // --- THE UNPACK: Uint-to-Float bitcast ---
     float dynamicLodBlend = uintBitsToFloat(gl_InstanceIndex);
 
     vec3 finalPos = mix(inPosition, inCoarsePos, dynamicLodBlend);
@@ -39,21 +38,29 @@ void main() {
     mat3 normalMatrix = transpose(inverse(mat3(push.modelMatrix)));
     vec3 worldNormal = normalize(normalMatrix * finalNormal);
 
+    // --- NEW: Biome Weights from Tangent ---
     float slopeFactor = max(dot(worldNormal, vec3(0.0, 1.0, 0.0)), 0.0);
     float cliffWeight = smoothstep(0.5, 0.8, slopeFactor);
 
-    vec3 blendedWeights = inColor;
+    // Extract the texture weights packed by the CPU
+    vec3 blendedWeights = inTangent.xyz;
+    
+    // Apply steep-slope cliff logic directly to the weights
     blendedWeights.r *= cliffWeight;
     blendedWeights.g *= cliffWeight;
     blendedWeights.b = max(blendedWeights.b, 1.0 - cliffWeight);
 
     float totalWeight = blendedWeights.r + blendedWeights.g + blendedWeights.b;
-    fragColor = blendedWeights / max(totalWeight, 0.0001);
+    
+    // Output the modified weights into fragTangent
+    fragTangent = blendedWeights / max(totalWeight, 0.0001);
+
+    // --- NEW: Ground Color ---
+    // The raw base ground color from the Biome tables passes straight through
+    fragColor = inColor;
 
     fragNormal = normalMatrix * finalNormal;
-    fragTangent = normalMatrix * inTangent.xyz;
     fragTangentHandedness = inTangent.w;
-
     fragTexCoord = inTexCoord;
     fragTextureId = push.textureId;
     fragNormalTextureId = push.normalTextureId;

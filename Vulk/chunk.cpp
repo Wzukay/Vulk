@@ -80,44 +80,6 @@ float Chunk::ChunkBoundsRadius() const {
     return std::sqrt(footprintRadius * footprintRadius + heightMargin * heightMargin);
 }
 
-std::vector<glm::vec2> Chunk::ConvexHull(std::vector<glm::vec2> points) {
-    if (points.size() <= 3) return points;
-    std::sort(points.begin(), points.end(),
-        [](const glm::vec2& a, const glm::vec2& b) {
-            return a.x < b.x || (a.x == b.x && a.y < b.y);
-        });
-
-    std::vector<glm::vec2> hull;
-    // Lower hull
-    for (const auto& p : points) {
-        while (hull.size() >= 2) {
-            const auto& a = hull[hull.size() - 2];
-            const auto& b = hull.back();
-            if ((b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x) <= 0.0f)
-                hull.pop_back();
-            else
-                break;
-        }
-        hull.push_back(p);
-    }
-    // Upper hull
-    size_t lower_size = hull.size();
-    for (int i = (int)points.size() - 2; i >= 0; --i) {
-        const auto& p = points[i];
-        while (hull.size() > lower_size) {
-            const auto& a = hull[hull.size() - 2];
-            const auto& b = hull.back();
-            if ((b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x) <= 0.0f)
-                hull.pop_back();
-            else
-                break;
-        }
-        hull.push_back(p);
-    }
-    hull.pop_back(); // remove duplicate last point
-    return hull;
-}
-
 bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& renderer) {
     if (m_shuttingDown) return false;
 
@@ -429,7 +391,7 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
     return false;
 }
 
-std::pair<float, glm::vec3> Chunk::CalculateHeightAndColor(float worldX, float worldZ) {
+TerrainData Chunk::CalculateHeightAndColor(float worldX, float worldZ) {
     static thread_local FastNoiseLite continentNoise;
     static thread_local FastNoiseLite hillNoise;
     static thread_local FastNoiseLite mountainNoise;
@@ -671,18 +633,19 @@ std::pair<float, glm::vec3> Chunk::CalculateHeightAndColor(float worldX, float w
     float m = clamp01(n01(moistNoise.GetNoise(worldX, worldZ)));
     const float BLEND_RANGE = 0.035f;
 
-    BiomeProperties properties[4] = {};
-    properties[0] = GetBiomeProperties(DetermineBiome(clamp01(t - BLEND_RANGE), clamp01(m - BLEND_RANGE)));
-    properties[1] = GetBiomeProperties(DetermineBiome(clamp01(t + BLEND_RANGE), clamp01(m - BLEND_RANGE)));
-    properties[2] = GetBiomeProperties(DetermineBiome(clamp01(t - BLEND_RANGE), clamp01(m + BLEND_RANGE)));
-    properties[3] = GetBiomeProperties(DetermineBiome(clamp01(t + BLEND_RANGE), clamp01(m + BLEND_RANGE)));
+    const BiomeDefinition& b0 = GetBiomeDefinition(DetermineBiome(clamp01(t - BLEND_RANGE), clamp01(m - BLEND_RANGE)));
+    const BiomeDefinition& b1 = GetBiomeDefinition(DetermineBiome(clamp01(t + BLEND_RANGE), clamp01(m - BLEND_RANGE)));
+    const BiomeDefinition& b2 = GetBiomeDefinition(DetermineBiome(clamp01(t - BLEND_RANGE), clamp01(m + BLEND_RANGE)));
+    const BiomeDefinition& b3 = GetBiomeDefinition(DetermineBiome(clamp01(t + BLEND_RANGE), clamp01(m + BLEND_RANGE)));
 
     glm::vec3 blendedWeights =
-        (properties[0].textureWeights + properties[1].textureWeights +
-            properties[2].textureWeights + properties[3].textureWeights) * 0.25f;
+        (b0.textureWeights + b1.textureWeights +
+            b2.textureWeights + b3.textureWeights) * 0.25f;
 
-    // --- NEW: CARVE DIRT PATCHES INTO GRASS BIOMES ---
-    // If this area is mostly grass (y channel is dominant)
+    glm::vec3 blendedColor =
+        (b0.groundColor + b1.groundColor +
+            b2.groundColor + b3.groundColor) * 0.25f;
+
     if (blendedWeights.y > 0.4f) {
         float dNoise = n01(dirtNoise.GetNoise(worldX, worldZ)); // 0 to 1
 
@@ -698,12 +661,11 @@ std::pair<float, glm::vec3> Chunk::CalculateHeightAndColor(float worldX, float w
             blendedWeights.z += grassAmount * (1.0f - blend);
         }
     }
-    // -------------------------------------------------
 
-    return { height, blendedWeights };
+    return { height, blendedWeights, blendedColor };
 }
 float Chunk::GetHeight(float worldX, float worldZ) {
-    return CalculateHeightAndColor(worldX, worldZ).first;
+    return CalculateHeightAndColor(worldX, worldZ).height;
 }
 float Chunk::GetCachedHeightFromGrid(float worldX, float worldZ) {
     const float chunkSize = m_chunkSize;
@@ -718,7 +680,7 @@ float Chunk::GetCachedHeightFromGrid(float worldX, float worldZ) {
         it->second.resolution < 2 ||
         it->second.heightData.empty()) {
         lock.unlock();
-        return CalculateHeightAndColor(worldX, worldZ).first;
+        return CalculateHeightAndColor(worldX, worldZ).height;
     }
 
     const ChunkGridCache& grid = it->second;
@@ -757,7 +719,6 @@ void Chunk::RemoveGridCache(int64_t chunkKey) {
     s_activeChunkGrids.erase(chunkKey);
 }
 
-
 void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSize,
     ChunkJobResult& outResult,
     std::shared_ptr<std::atomic<bool>> cancelToken)
@@ -775,11 +736,11 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
         outResult.physicsGrid = {};
         };
 
-    // Clear outputs
     outResult.vertices.clear();
     outResult.indices.clear();
     outResult.grassInstances.clear();
     outResult.props.clear();
+    outResult.boids.clear();
 
     outResult.vertices.reserve(resolution * resolution + (resolution - 1) * 8);
     outResult.indices.reserve(((resolution - 1) * (resolution - 1) * 6) + ((resolution - 1) * 4 * 6));
@@ -793,12 +754,11 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
     float originX = chunkX * chunkSize;
     float originZ = chunkZ * chunkSize;
 
-    // --- 1. PRECOMPUTE EXPANDED GRID FOR NORMALS & COARSE TANGENTS ---
-    // Pad the grid by 2 on all sides to allow sampling coarse derivatives without edge artifacts
     int pad = 2;
     int gridSize = resolution + pad * 2;
     std::vector<float> heightGrid(gridSize * gridSize);
     std::vector<glm::vec3> colorGrid(gridSize * gridSize);
+    std::vector<glm::vec3> groundColorGrid(gridSize * gridSize);
 
     for (int gz = 0; gz < gridSize; ++gz) {
         if (isCancelled()) {
@@ -811,10 +771,11 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
 
         for (int gx = 0; gx < gridSize; ++gx) {
             const float worldX = originX + (gx - pad) * step;
-            auto [finalHeight, blendedWeights] = CalculateHeightAndColor(worldX, worldZ);
+            TerrainData data = CalculateHeightAndColor(worldX, worldZ);
 
-            heightGrid[rowOffset + gx] = finalHeight;
-            colorGrid[rowOffset + gx] = blendedWeights;
+            heightGrid[rowOffset + gx] = data.height;
+            colorGrid[rowOffset + gx] = data.biomeWeights;
+            groundColorGrid[rowOffset + gx] = data.groundColor;
         }
     }
 
@@ -827,7 +788,6 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
 
     outResult.physicsGrid = ChunkGridCache{ resolution, std::move(physicsGrid) };
 
-    // FIX: Add std::clamp to prevent LOD down-scaling from reading out of bounds
     auto GetCachedHeight = [&](int localX, int localZ) -> float {
         int cx = std::clamp(localX + pad, 0, gridSize - 1);
         int cz = std::clamp(localZ + pad, 0, gridSize - 1);
@@ -838,8 +798,12 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
         int cz = std::clamp(localZ + pad, 0, gridSize - 1);
         return colorGrid[cz * gridSize + cx];
         };
+    auto GetCachedGroundColor = [&](int localX, int localZ) -> glm::vec3 {
+        int cx = std::clamp(localX + pad, 0, gridSize - 1);
+        int cz = std::clamp(localZ + pad, 0, gridSize - 1);
+        return groundColorGrid[cz * gridSize + cx];
+        };
 
-    // --- 2. VERTEX ASSEMBLY ---
     for (int z = 0; z < resolution; z++) {
         if (isCancelled()) {
             discardCancelledResult();
@@ -859,16 +823,22 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
             ModelVertex v{};
             v.pos = glm::vec3(worldX, h, worldZ);
             v.texCoord = glm::vec2(worldX * 0.02f, worldZ * 0.02f);
-            v.color = GetCachedColor(x, z);
+
+            // Assign the base ground color
+            v.color = GetCachedGroundColor(x, z);
+
+            // Pack the biome weights (dirt, grass, rock) into the tangent for the fragment shader
+            glm::vec3 biomeWeights = GetCachedColor(x, z);
 
             glm::vec3 tangentX(2.0f * step, hR - hL, 0.0f);
             glm::vec3 tangentZ(0.0f, hU - hD, 2.0f * step);
             v.normal = glm::normalize(glm::cross(tangentZ, tangentX));
             glm::vec3 t = glm::normalize(tangentX);
             t = glm::normalize(t - v.normal * glm::dot(v.normal, t));
-            v.tangent = glm::vec4(t, 1.0f);
 
-            // Coarse derivatives for far LOD blending calculated directly from cache
+            // Note: v.tangent.w can store a 4th texture weight if needed in the future
+            v.tangent = glm::vec4(biomeWeights, 1.0f);
+
             int cx = ((x + 1) / 2) * 2;
             int cz = ((z + 1) / 2) * 2;
 
@@ -888,7 +858,6 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
         }
     }
 
-    // --- 3. INDICES ---
     for (int z = 0; z < resolution - 1; z++) {
         for (int x = 0; x < resolution - 1; x++) {
             uint32_t i0 = z * resolution + x;
@@ -899,7 +868,6 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
         }
     }
 
-    // --- 4. SKIRTS ---
     const float skirtDepth = 20.0f;
     auto AddSkirtSegment = [&](uint32_t indexA, uint32_t indexB) {
         uint32_t skirtA = (uint32_t)outResult.vertices.size();
@@ -929,7 +897,6 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
         return;
     }
 
-    // --- 5. MESH OPTIMIZER ---
     meshopt_optimizeVertexCache(
         outResult.indices.data(),
         outResult.indices.data(),
@@ -953,8 +920,7 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
         return;
     }
 
-    // --- 6. FAST LOCAL DATA DELEGATE ---
-    auto GetFastLocalData = [&](float wX, float wZ) -> std::pair<float, glm::vec3> {
+    auto GetFastLocalData = [&](float wX, float wZ) -> TerrainData {
         float localX = wX - originX;
         float localZ = wZ - originZ;
 
@@ -978,20 +944,29 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
         float h01 = GetCachedHeight(x0, z1);
         float h11 = GetCachedHeight(x1, z1);
 
-        glm::vec3 c00 = GetCachedColor(x0, z0);
-        glm::vec3 c10 = GetCachedColor(x1, z0);
-        glm::vec3 c01 = GetCachedColor(x0, z1);
-        glm::vec3 c11 = GetCachedColor(x1, z1);
+        glm::vec3 w00 = GetCachedColor(x0, z0);
+        glm::vec3 w10 = GetCachedColor(x1, z0);
+        glm::vec3 w01 = GetCachedColor(x0, z1);
+        glm::vec3 w11 = GetCachedColor(x1, z1);
+
+        glm::vec3 c00 = GetCachedGroundColor(x0, z0);
+        glm::vec3 c10 = GetCachedGroundColor(x1, z0);
+        glm::vec3 c01 = GetCachedGroundColor(x0, z1);
+        glm::vec3 c11 = GetCachedGroundColor(x1, z1);
 
         float h0 = std::lerp(h00, h10, tx);
         float h1 = std::lerp(h01, h11, tx);
         float finalH = std::lerp(h0, h1, tz);
 
+        glm::vec3 w0 = glm::mix(w00, w10, tx);
+        glm::vec3 w1 = glm::mix(w01, w11, tx);
+        glm::vec3 finalW = glm::mix(w0, w1, tz);
+
         glm::vec3 c0 = glm::mix(c00, c10, tx);
         glm::vec3 c1 = glm::mix(c01, c11, tx);
         glm::vec3 finalC = glm::mix(c0, c1, tz);
 
-        return { finalH, finalC };
+        return { finalH, finalW, finalC };
         };
 
     GenerateChunkProps(chunkX, chunkZ, outResult.lod, outResult, GetFastLocalData);
@@ -999,7 +974,7 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
 
     if (outResult.lod == 0) {
         const float GRASS_STEP = 8.0f;
-        int bladesPerCell = 15;
+        int bladesPerCell = 18;
         const float JITTER_RADIUS = 4.0f;
 
         int gridCells = static_cast<int>(chunkSize / GRASS_STEP);
@@ -1015,16 +990,16 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
                 float baseX = originX + localX;
                 float baseZ = originZ + localZ;
 
-                auto [baseY, baseColor] = GetFastLocalData(baseX, baseZ);
+                TerrainData data = GetFastLocalData(baseX, baseZ);
 
-                if (baseY <= -5.0f || baseColor.y < 0.2f) continue;
+                if (data.height <= -5.0f || data.biomeWeights.y < 0.2f) continue;
 
-                float hR = GetFastLocalData(baseX + 2.0f, baseZ).first;
-                float hU = GetFastLocalData(baseX, baseZ + 2.0f).first;
-                glm::vec3 normal = glm::normalize(glm::vec3(baseY - hR, 2.0f, baseY - hU));
+                float hR = GetFastLocalData(baseX + 2.0f, baseZ).height;
+                float hU = GetFastLocalData(baseX, baseZ + 2.0f).height;
+                glm::vec3 normal = glm::normalize(glm::vec3(data.height - hR, 2.0f, data.height - hU));
                 if (normal.y < 0.75f) continue;
 
-                float densityMask = glm::smoothstep(0.35f, 0.85f, baseColor.y);
+                float densityMask = glm::smoothstep(0.35f, 0.85f, data.biomeWeights.y);
                 uint32_t cellHash = Hash2D(static_cast<int>(baseX * 10), static_cast<int>(baseZ * 10), s_globalSeed);
 
                 auto fastRand = [](uint32_t& state) -> float {
@@ -1041,7 +1016,7 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
                     float bladeX = baseX + r * cos(theta);
                     float bladeZ = baseZ + r * sin(theta);
 
-                    float bladeY = GetFastLocalData(bladeX, bladeZ).first;
+                    float bladeY = GetFastLocalData(bladeX, bladeZ).height;
 
                     GrassInstance inst{};
                     inst.position = glm::vec3(bladeX, bladeY, bladeZ);
@@ -1060,14 +1035,12 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
         }
     }
 }
-void Chunk::GenerateChunkProps(int chunkX, int chunkZ, int lod, ChunkJobResult& outResult,
-    const std::function<std::pair<float, glm::vec3>(float, float)>& heightColorFunc) {
 
-    if (lod >= 4) return;
+void Chunk::GenerateChunkProps(int chunkX, int chunkZ, int lod, ChunkJobResult& outResult,
+    const std::function<TerrainData(float, float)>& heightColorFunc) {
 
     const float stepSize = 20.0f;
-    const float startX = chunkX * m_chunkSize;
-    const float startZ = chunkZ * m_chunkSize;
+    int steps = static_cast<int>(m_chunkSize / stepSize);
 
     static thread_local FastNoiseLite treeNoise;
     static thread_local FastNoiseLite stoneNoise;
@@ -1076,7 +1049,6 @@ void Chunk::GenerateChunkProps(int chunkX, int chunkZ, int lod, ChunkJobResult& 
     if (!noiseInit) {
         treeNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
         treeNoise.SetFrequency(0.003f);
-
         stoneNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
         stoneNoise.SetFrequency(0.08f);
         noiseInit = true;
@@ -1085,81 +1057,86 @@ void Chunk::GenerateChunkProps(int chunkX, int chunkZ, int lod, ChunkJobResult& 
     treeNoise.SetSeed(s_globalSeed + 420);
     stoneNoise.SetSeed(s_globalSeed + 840);
 
-    for (float x = startX; x < startX + m_chunkSize; x += stepSize) {
-        for (float z = startZ; z < startZ + m_chunkSize; z += stepSize) {
+    for (int ix = 0; ix < steps; ++ix) {
+        for (int iz = 0; iz < steps; ++iz) {
+            float worldX = chunkX * m_chunkSize + (ix * stepSize);
+            float worldZ = chunkZ * m_chunkSize + (iz * stepSize);
 
-            uint32_t coordHash = Hash2D(static_cast<int>(x), static_cast<int>(z), s_globalSeed);
-            auto [groundY, biomeColor] = heightColorFunc(x, z);
+            BiomeType biome = GetDominantBiome(worldX, worldZ);
+            const BiomeDefinition& def = GetBiomeDefinition(biome);
+            if (def.props.empty()) continue;
 
-            if (groundY <= 2.0f || groundY >= 85.0f) continue;
+            uint32_t coordHash = Hash2D(chunkX * 1000 + ix, chunkZ * 1000 + iz, s_globalSeed);
+            TerrainData data = heightColorFunc(worldX, worldZ);
 
-            float forestMask = treeNoise.GetNoise(x, z);
-            float stoneMask = stoneNoise.GetNoise(x, z);
+            float masks[2] = { treeNoise.GetNoise(worldX, worldZ), stoneNoise.GetNoise(worldX, worldZ) };
             float spawnChance = (coordHash % 1000) / 1000.0f;
 
-            if (forestMask > 0.1f && spawnChance < 0.15f && biomeColor.y >= 0.7f) {
-                PropInstance tree{};
-                tree.position = glm::vec3(x, groundY, z);
-                tree.rotation = glm::vec3(0.0f, static_cast<float>(coordHash % 360), 0.0f);
-                tree.scale = glm::vec3(0.08f + (static_cast<float>((coordHash >> 8) % 70) / 1000.0f));
-                tree.customPayload = static_cast<float>(coordHash % 100) / 100.0f;
+            for (const auto& rule : def.props) {
+                if (lod > rule.maxLod) continue;
+                if (data.height < rule.minHeight || data.height > rule.maxHeight) continue;
+                if (masks[rule.noiseIndex] < rule.noiseThreshold) continue;
 
-                tree.lodMeshes = {
-                    "assets/models/tree/tree_lod0.glb",
-                    "assets/models/tree/tree_lod1.glb",
-                    "assets/models/tree/tree_lod2.glb",
-                    "assets/models/tree/tree_lod3.glb"
-                };
+                if (spawnChance < rule.spawnChance) {
+                    PropInstance prop{};
+                    prop.position = glm::vec3(worldX, data.height + rule.groundOffset, worldZ);
 
-                outResult.props.push_back(tree);
-            }
-            else if (lod <= 1 && stoneMask > 0.6f && spawnChance < 0.05f) {
-                PropInstance stone{};
-                stone.position = glm::vec3(x, groundY - 0.15f, z);
-                stone.rotation = glm::vec3(
-                    static_cast<float>(coordHash % 360),
-                    static_cast<float>((coordHash >> 4) % 360),
-                    static_cast<float>((coordHash >> 8) % 360)
-                );
-                stone.scale = glm::vec3(1.0f + (static_cast<float>(coordHash % 40) / 500.0f));
-                stone.customPayload = 0.0f;
+                    prop.rotation = glm::vec3(
+                        rule.alignToNormal ? static_cast<float>(coordHash % 360) : 0.0f,
+                        static_cast<float>((coordHash >> 4) % 360),
+                        rule.alignToNormal ? static_cast<float>((coordHash >> 8) % 360) : 0.0f
+                    );
 
-                stone.lodMeshes = {
-                    "assets/models/rock/rock.glb"
-                };
+                    float scaleT = static_cast<float>((coordHash >> 8) % 100) / 100.0f;
+                    prop.scale = glm::vec3(std::lerp(rule.minScale, rule.maxScale, scaleT));
+                    prop.customPayload = static_cast<float>(coordHash % 100) / 100.0f;
+                    prop.lodMeshes = rule.lodMeshes;
 
-                outResult.props.push_back(stone);
+                    outResult.props.push_back(prop);
+                    break;
+                }
             }
         }
     }
 }
+
 void Chunk::GenerateChunkSwarms(int chunkX, int chunkZ, int lod, ChunkJobResult& outResult,
-    const std::function<std::pair<float, glm::vec3>(float, float)>& heightColorFunc) {
+    const std::function<TerrainData(float, float)>& heightColorFunc) {
 
     if (lod >= 2) return;
 
     float centerWorldX = chunkX * m_chunkSize + (m_chunkSize * 0.5f);
     float centerWorldZ = chunkZ * m_chunkSize + (m_chunkSize * 0.5f);
 
-    auto [groundY, biomeWeights] = heightColorFunc(centerWorldX, centerWorldZ);
+    BiomeType biome = GetDominantBiome(centerWorldX, centerWorldZ);
+    const BiomeDefinition& def = GetBiomeDefinition(biome);
+    if (def.swarms.empty()) return;
 
+    TerrainData data = heightColorFunc(centerWorldX, centerWorldZ);
     uint32_t coordHash = Hash2D(chunkX, chunkZ, s_globalSeed);
+    float spawnChance = (coordHash % 1000) / 1000.0f;
 
-    if (groundY < 80.0f && (coordHash % 100) < 40) {
-        outResult.boids.reserve(46);
-        for (int i = 0; i < 46; i++) {
-            BoidInstance b{};
-            float jitterX = ((coordHash * (i + 1) % 100) / 100.0f) * 30.0f - 15.0f;
-            float jitterZ = ((coordHash * (i + 3) % 100) / 100.0f) * 30.0f - 15.0f;
+    for (const auto& rule : def.swarms) {
+        if (data.height < rule.minHeight || data.height > rule.maxHeight) continue;
 
-            float randomScale = 0.5f + ((coordHash * (i + 7) % 100) / 100.0f) * 0.5f;
+        if (spawnChance < rule.spawnChance) {
+            outResult.boids.reserve(outResult.boids.size() + rule.boidCount);
+            for (int i = 0; i < rule.boidCount; i++) {
+                BoidInstance b{};
+                float jitterX = ((coordHash * (i + 1) % 100) / 100.0f) * (rule.spreadRadius * 2) - rule.spreadRadius;
+                float jitterZ = ((coordHash * (i + 3) % 100) / 100.0f) * (rule.spreadRadius * 2) - rule.spreadRadius;
 
-            b.position = glm::vec4(centerWorldX + jitterX, groundY + 4.0f + (i % 4), centerWorldZ + jitterZ, randomScale);
+                float scaleT = ((coordHash * (i + 7) % 100) / 100.0f);
+                float randomScale = std::lerp(rule.minScale, rule.maxScale, scaleT);
 
-            float randomTimeOffset = static_cast<float>((coordHash * i) % 1000);
-            b.velocity = glm::vec4(1.0f, 0.0f, 0.0f, randomTimeOffset);
+                b.position = glm::vec4(centerWorldX + jitterX, data.height + rule.verticalOffset + (i % 4), centerWorldZ + jitterZ, randomScale);
 
-            outResult.boids.push_back(b);
+                float randomTimeOffset = static_cast<float>((coordHash * i) % 1000);
+                b.velocity = glm::vec4(1.0f, 0.0f, 0.0f, randomTimeOffset);
+
+                outResult.boids.push_back(b);
+            }
+            break;
         }
     }
 }
@@ -1169,6 +1146,25 @@ void Chunk::UpdateFogParamsBasedOnData(VulkanRenderer& renderer) {
     float fogStart = 0.3125f * totalViewDistance;
     float fogEnd = 0.3320f * totalViewDistance;
     renderer.SetFogParams(fogStart, fogEnd);
+}
+BiomeType Chunk::GetDominantBiome(float worldX, float worldZ) {
+    static thread_local FastNoiseLite tempNoise;
+    static thread_local FastNoiseLite moistNoise;
+    static thread_local bool init = false;
+
+    if (!init) {
+        tempNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+        tempNoise.SetFrequency(0.00028f);
+        moistNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+        moistNoise.SetFrequency(0.00036f);
+        init = true;
+    }
+    tempNoise.SetSeed(s_globalSeed + 101);
+    moistNoise.SetSeed(s_globalSeed + 202);
+
+    float t = std::clamp((tempNoise.GetNoise(worldX, worldZ) + 1.0f) * 0.5f, 0.0f, 1.0f);
+    float m = std::clamp((moistNoise.GetNoise(worldX, worldZ) + 1.0f) * 0.5f, 0.0f, 1.0f);
+    return DetermineBiome(t, m);
 }
 
 void Chunk::Shutdown() {

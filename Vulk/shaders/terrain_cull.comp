@@ -21,8 +21,6 @@ struct VkDrawIndexedIndirectCommand {
 layout(std430, set = 0, binding = 0) readonly buffer TerrainChunks { TerrainChunkData chunks[]; };
 layout(std430, set = 0, binding = 1) writeonly buffer DrawCommands { VkDrawIndexedIndirectCommand commands[]; };
 layout(std430, set = 0, binding = 2) buffer DrawCount { uint visibleCount; };
-
-// --- NEW: The HZB Depth Pyramid ---
 layout(set = 0, binding = 3) uniform sampler2D hzb;
 
 layout(push_constant) uniform CullPushConstants {
@@ -41,7 +39,6 @@ void main() {
     vec3 center = chunk.centerRadius.xyz;
     float radius = chunk.centerRadius.w;
 
-    // 1. Calculate AABB corners for the chunk
     vec3 minB = center - vec3(radius);
     vec3 maxB = center + vec3(radius);
     vec3 corners[8] = {
@@ -56,10 +53,15 @@ void main() {
     float minZ = 1.0;
     
     bool allLeft = true, allRight = true, allTop = true, allBottom = true, allNear = true, allFar = true;
+    
+    // --- FIX 1: Track if the chunk crosses behind the camera ---
+    bool intersectsNearPlane = false;
 
-    // 2. Project corners to Screen Space & check Frustum
     for(int i = 0; i < 8; i++) {
         vec4 clip = push.viewProj * vec4(corners[i], 1.0);
+
+        // If any corner is behind the near plane, flag it
+        if (clip.w <= 0.0) intersectsNearPlane = true;
 
         float expand = clip.w * 0.5;
         if(clip.x >= -clip.w - expand) allLeft = false;
@@ -78,33 +80,32 @@ void main() {
         }
     }
 
-    // 3. Frustum Cull (GPU-driven!)
     if(allLeft || allRight || allTop || allBottom || allNear || allFar) {
         return;
     }
 
-    minXY = clamp(minXY, 0.0, 1.0);
-    maxXY = clamp(maxXY, 0.0, 1.0);
+    // --- FIX 2: Only check occlusion if we aren't standing inside the chunk ---
+    // If we are standing inside it, it's mathematically impossible to be fully occluded.
+    if (!intersectsNearPlane) {
+        minXY = clamp(minXY, 0.0, 1.0);
+        maxXY = clamp(maxXY, 0.0, 1.0);
 
-    // 4. HZB Occlusion Cull
-    vec2 size = (maxXY - minXY) * push.hzbSize;
-    float mip = clamp(floor(log2(max(size.x, size.y))), 0.0, push.maxMip);
+        vec2 size = (maxXY - minXY) * push.hzbSize;
+        float mip = clamp(floor(log2(max(size.x, size.y))), 0.0, push.maxMip);
 
-    // Sample the 4 corners of the AABB footprint on the calculated mip level
-    float d1 = textureLod(hzb, vec2(minXY.x, minXY.y), mip).r;
-    float d2 = textureLod(hzb, vec2(maxXY.x, minXY.y), mip).r;
-    float d3 = textureLod(hzb, vec2(minXY.x, maxXY.y), mip).r;
-    float d4 = textureLod(hzb, vec2(maxXY.x, maxXY.y), mip).r;
-    
-    // Get the farthest depth out of the 4 samples
-    float maxDepth = max(max(d1, d2), max(d3, d4));
+        float d1 = textureLod(hzb, vec2(minXY.x, minXY.y), mip).r;
+        float d2 = textureLod(hzb, vec2(maxXY.x, minXY.y), mip).r;
+        float d3 = textureLod(hzb, vec2(minXY.x, maxXY.y), mip).r;
+        float d4 = textureLod(hzb, vec2(maxXY.x, maxXY.y), mip).r;
+        
+        float maxDepth = max(max(d1, d2), max(d3, d4));
 
-    // If our closest point is further away than the HZB depth, we are behind a mountain!
-    if (minZ > maxDepth) {
-        return; 
+        // If the closest point of the chunk is further than the farthest occluder, it's hidden
+        if (minZ > maxDepth) {
+            return; 
+        }
     }
 
-    // 5. Build the Draw Command for visible chunks
     float dist = length(center - push.cameraPos);
     float blend = 0.0;
     if (chunk.lod == 0) {
@@ -113,6 +114,7 @@ void main() {
         blend = t * t * (3.0 - 2.0 * t);
     }
 
+    // --- FIX 3: Revert to 100% reliable standard atomics for AMD compatibility ---
     uint drawIdx = atomicAdd(visibleCount, 1);
     commands[drawIdx].indexCount = chunk.indexCount;
     commands[drawIdx].instanceCount = 1;

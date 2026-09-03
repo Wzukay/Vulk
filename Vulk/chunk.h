@@ -26,67 +26,7 @@
 #include "mesh.h"
 #include "FastNoiseLite.h"
 #include "meshoptimizer.h"
-
-enum class BiomeType {
-    Plains,
-    TallPlains,
-    Foothills,
-    LowMountain,
-    MediumMountain,
-    HighMountain,
-};
-
-struct BiomeProperties {
-    float heightScale;
-    float exponent;
-    glm::vec3 textureWeights;
-};
-
-inline BiomeProperties GetBiomeProperties(BiomeType type) {
-    // Indexed by BiomeType. The old switch had a silent fallback to a
-    // default BiomeProperties for any unhandled case — which meant adding a
-    // new BiomeType without a matching case would compile fine and just
-    // quietly return wrong values. The static_assert below turns that into
-    // a compile error instead.
-    static const BiomeProperties table[] = {
-        { 20.0f,  1.0f, glm::vec3(0.0f, 1.0f, 0.0f) }, // Plains: flat lowlands
-        { 40.0f,  1.1f, glm::vec3(0.0f, 0.8f, 0.2f) }, // TallPlains
-        { 80.0f,  1.3f, glm::vec3(0.0f, 0.5f, 0.5f) }, // Foothills
-        { 100.0f, 1.6f, glm::vec3(0.4f, 0.0f, 0.6f) }, // LowMountain
-        { 150.0f, 2.0f, glm::vec3(0.2f, 0.0f, 0.8f) }, // MediumMountain
-        { 200.0f, 2.5f, glm::vec3(0.0f, 0.0f, 1.0f) }, // HighMountain: alpine peaks
-    };
-    static_assert(sizeof(table) / sizeof(table[0]) == static_cast<size_t>(BiomeType::HighMountain) + 1,
-        "GetBiomeProperties table must have exactly one entry per BiomeType, in enum order");
-
-    return table[static_cast<size_t>(type)];
-}
-
-inline BiomeType DetermineBiome(float temperature, float moisture) {
-    // 1. Wet Regions (The Mountain Chains)
-    if (moisture >= 0.75f) {
-        if (temperature < 0.4f) return BiomeType::HighMountain;    // Cold & Wet = Grand peaks
-        if (temperature < 0.7f) return BiomeType::MediumMountain;  // Temperate & Wet
-        return BiomeType::LowMountain;                             // Warm & Wet = Low ridges
-    }
-
-    // 2. Intermediate Regions (The Highlands / Transition Zones)
-    if (moisture >= 0.52f) {
-        if (temperature < 0.5f) return BiomeType::MediumMountain;
-        if (temperature < 0.75f) return BiomeType::LowMountain;
-        return BiomeType::Foothills;
-    }
-
-    // 3. Mild Moisture Regions (The Rolling Lowlands)
-    if (moisture >= 0.32f) {
-        if (temperature < 0.6f) return BiomeType::Foothills;
-        return BiomeType::TallPlains;
-    }
-
-    // 4. Dry Regions (The Flat Basin Floors)
-    if (temperature > 0.65f) return BiomeType::Plains;
-    return BiomeType::TallPlains;
-}
+#include "biome.h"
 
 struct ChunkCoord {
     int cx = 0;
@@ -101,6 +41,12 @@ struct ChunkCoord {
     bool operator==(const ChunkCoord& other) const {
         return cx == other.cx && cz == other.cz;
     }
+};
+
+struct TerrainData {
+    float height;
+    glm::vec3 biomeWeights; // Used for texture splatting
+    glm::vec3 groundColor;  // Used for base ground tint
 };
 
 struct TerrainSample
@@ -224,23 +170,26 @@ private:
     static std::unordered_map<int64_t, ChunkGridCache> s_activeChunkGrids;
     static std::shared_mutex s_activeChunkGridsMutex;
 
+    static BiomeType GetDominantBiome(float worldX, float worldZ);
+
     void UpdateFogParamsBasedOnData(VulkanRenderer& renderer);
 
     glm::vec3 ChunkBoundsCenter(int cx, int cz) const;
     float ChunkBoundsRadius() const;
 
     static std::vector<glm::vec2> ConvexHull(std::vector<glm::vec2> points);
-    static std::pair<float, glm::vec3> CalculateHeightAndColor(float worldX, float worldZ);
+    static TerrainData CalculateHeightAndColor(float worldX, float worldZ);
     int DesiredLodForDistance(float distance) const;
     static void PrecomputeChunkOffsets(int viewDistance);
 
     static uint32_t Hash2D(int x, int z, int seed);
 
+
     void GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSize,
         ChunkJobResult& outResult, std::shared_ptr<std::atomic<bool>> cancelToken = nullptr);
 
     void GenerateChunkProps(int chunkX, int chunkZ, int lod, ChunkJobResult& outResult,
-        const std::function<std::pair<float, glm::vec3>(float, float)>& heightColorFunc);
+        const std::function<TerrainData(float, float)>& heightColorFunc);
     void GenerateChunkSwarms(int chunkX, int chunkZ, int lod, ChunkJobResult& outResult,
-        const std::function<std::pair<float, glm::vec3>(float, float)>& heightColorFunc);
+        const std::function<TerrainData(float, float)>& heightColorFunc);
 };

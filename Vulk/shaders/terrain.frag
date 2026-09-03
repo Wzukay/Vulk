@@ -23,93 +23,81 @@ float hash(vec2 p) {
     return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453123);
 }
 
-float valueNoise(vec2 x) {
+// --- OPTIMIZATION: Analytic Derivatives ---
+// Returns vec3(height, x_slope, z_slope) in a single pass!
+vec3 valueNoiseGrad(vec2 x) {
     vec2 i = floor(x);
     vec2 f = fract(x);
+
+    // Quintic interpolation curve for artifact-free smooth derivatives
+    vec2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    vec2 du = 30.0 * f * f * (f * (f - 2.0) + 1.0); 
+
     float a = hash(i);
     float b = hash(i + vec2(1.0, 0.0));
     float c = hash(i + vec2(0.0, 1.0));
     float d = hash(i + vec2(1.0, 1.0));
-    vec2 u = f * f * (3.0 - 2.0 * f);
-    return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
+
+    float k0 = a;
+    float k1 = b - a;
+    float k2 = c - a;
+    float k3 = a - b - c + d;
+
+    float h = k0 + k1 * u.x + k2 * u.y + k3 * u.x * u.y;
+    vec2 grad = du * vec2(k1 + k3 * u.y, k2 + k3 * u.x);
+
+    return vec3(h, grad.x, grad.y);
 }
 
 void main() {
     float distanceToCamera = length(ubo.cameraPos - fragWorldPos);
 
-    vec3 blendWeights = max(fragColor, vec3(0.0));
+    vec3 blendWeights = max(fragTangent, vec3(0.0));
     float weightSum = blendWeights.r + blendWeights.g + blendWeights.b;
     blendWeights /= max(weightSum, 0.0001);
 
     vec3 normal = normalize(fragNormal);
+    
+    // We only need the height (.x) for the macro color variation
+    float n = valueNoiseGrad(fragWorldPos.xz * 0.02).x;
 
-    // --- NEW: PROCEDURAL NORMAL PERTURBATION (Up-Close Only) ---
-    // We fade the bump mapping out completely past 150 units to save ALU
-    // and prevent nasty high-frequency pixel aliasing in the distance.
     float detailFade = clamp(1.0 - (distanceToCamera / 150.0), 0.0, 1.0);
     
     if (detailFade > 0.0) {
-        float bumpFreq = 2.5; // Controls the size of the pebbles/bumps
-        float eps = 0.05;
+        float bumpFreq = 2.5;
         vec2 p = fragWorldPos.xz * bumpFreq;
         
-        // Cheap finite difference to get the slope of the noise
-        float hL = valueNoise(p - vec2(eps, 0.0));
-        float hR = valueNoise(p + vec2(eps, 0.0));
-        float hD = valueNoise(p - vec2(0.0, eps));
-        float hU = valueNoise(p + vec2(0.0, eps));
+        // --- OPTIMIZATION: 1 lookup instead of 4! ---
+        vec3 noiseData = valueNoiseGrad(p);
+        vec2 gradient = noiseData.yz; // Extract the mathematical slope directly
         
-        vec2 gradient = vec2(hR - hL, hU - hD) / (2.0 * eps);
-        
-        // Dynamic bump strength: Rocks are jagged (high), Grass is bumpy (mid), Sand is smooth (low)
         float matBump = 0.05 * blendWeights.r + 0.3 * blendWeights.g + 0.9 * blendWeights.b;
         float finalBump = matBump * detailFade;
         
-        // Apply the gradient to the normal's X and Z axes
+        // Apply the exact gradient to the normal
         normal.x -= gradient.x * finalBump;
         normal.z -= gradient.y * finalBump;
         normal = normalize(normal);
     }
-    // -----------------------------------------------------------
 
-    // 1. HEIGHT & SLOPE CALCULATION
+    // 1. BASE COLOR GENERATION
     float slope = clamp(normal.y, 0.0, 1.0);
     float elevation = clamp(fragWorldPos.y / 150.0, 0.0, 1.0);
-
-    // 2. DYNAMIC ALU COLOR VARIATION
-    float n = valueNoise(fragWorldPos.xz * 0.02);
     float noisyElevation = clamp(elevation + (n * 0.3 - 0.15), 0.0, 1.0);
 
-    vec3 sandColor = mix(vec3(0.40, 0.28, 0.15), vec3(0.55, 0.40, 0.22), noisyElevation);
-    
-    vec3 lushGrass = vec3(0.10, 0.30, 0.06);
-    vec3 dryGrass  = vec3(0.25, 0.35, 0.10);
-    vec3 grassColor = mix(lushGrass, dryGrass, noisyElevation) * mix(0.6, 1.0, slope);
-
-    vec3 darkRock  = vec3(0.15, 0.16, 0.17);
-    vec3 lightRock = vec3(0.35, 0.36, 0.38);
-    vec3 rockColor = mix(darkRock, lightRock, noisyElevation);
-
-    float snowMask = smoothstep(0.7, 0.9, noisyElevation) * smoothstep(0.6, 0.9, slope);
-    rockColor = mix(rockColor, vec3(0.85, 0.88, 0.92), snowMask);
-    
-    blendWeights.b = max(blendWeights.b, snowMask); 
-    weightSum = blendWeights.r + blendWeights.g + blendWeights.b;
-    blendWeights /= max(weightSum, 0.0001);
-
-    // 3. FINAL BLEND
-    vec3 terrainColor =
-        sandColor * blendWeights.r +
-        grassColor * blendWeights.g +
-        rockColor * blendWeights.b;
+    vec3 terrainColor = fragColor;
 
     float colorBreakup = mix(0.85, 1.15, n);
-    terrainColor *= colorBreakup;
-
-    // 4. LIGHTING
-    vec3 sunDirection = normalize(ubo.sunDirection.xyz);
+    float cliffDarken = mix(1.0, 0.6, blendWeights.b);
     
-    // Lighting now uses the newly perturbed normal!
+    terrainColor *= colorBreakup * cliffDarken;
+
+    // 2. DYNAMIC WEATHER MASK
+    float snowMask = smoothstep(0.7, 0.9, noisyElevation) * smoothstep(0.6, 0.9, slope);
+    terrainColor = mix(terrainColor, vec3(0.85, 0.88, 0.92), snowMask);
+
+    // 3. LIGHTING
+    vec3 sunDirection = normalize(ubo.sunDirection.xyz);
     float diffuse = max(dot(normal, sunDirection), 0.0);
     float wrappedDiffuse = diffuse * 0.85 + 0.15;
 

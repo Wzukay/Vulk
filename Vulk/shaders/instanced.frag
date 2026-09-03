@@ -10,6 +10,11 @@ layout(location = 1) in vec2 fragTexCoord;
 layout(location = 2) flat in uint fragTextureId;
 layout(location = 3) in vec3 fragWorldPos;
 
+layout(location = 4) in vec3 fragTangent;
+layout(location = 5) in float fragTangentHandedness;
+layout(location = 6) flat in uint fragNormalTextureId;
+layout(location = 7) flat in uint fragOrmTextureId;
+
 layout(location = 0) out vec4 outColor;
 
 const float ALPHA_CUTOFF = 0.5;

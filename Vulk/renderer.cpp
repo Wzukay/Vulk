@@ -471,9 +471,9 @@ void VulkanRenderer::CreateLogicalDevice() {
 	deviceFeatures.drawIndirectFirstInstance = VK_TRUE;
 
 	VkPhysicalDeviceVulkan13Features features13{};
-	features13.sType =
-		VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
-	features13.dynamicRendering = VK_TRUE;
+	features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+	features13.dynamicRendering = VK_TRUE; 
+	features13.shaderDemoteToHelperInvocation = VK_TRUE;
 
 	VkPhysicalDeviceVulkan12Features features12{};
 	features12.sType =
@@ -1028,7 +1028,7 @@ void VulkanRenderer::UpdateUniformBuffer(const CameraData& cam) {
 	ubo.view = glm::lookAt(cam.pos, cam.pos + cam.front, cam.up);
 	ubo.proj = glm::perspective(glm::radians(45.0f),
 		swapChainExtent.width / (float)swapChainExtent.height,
-		0.1f,
+		2.0f,
 		g_Settings.renderDistance);
 	ubo.proj[1][1] *= -1;
 
@@ -1450,11 +1450,10 @@ void VulkanRenderer::CreateHZBResources() {
 		}
 	}
 
-	// Create a special sampler that uses MAX reduction (Core in Vulkan 1.2/1.3)
 	VkSamplerCreateInfo samplerInfo{};
 	samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-	samplerInfo.magFilter = VK_FILTER_NEAREST;
-	samplerInfo.minFilter = VK_FILTER_NEAREST;
+	samplerInfo.magFilter = VK_FILTER_LINEAR;
+	samplerInfo.minFilter = VK_FILTER_LINEAR;
 	samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
 	samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
 	samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
