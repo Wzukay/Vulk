@@ -9,6 +9,7 @@ int Chunk::s_globalSeed = 23645;
 float Chunk::m_chunkSize = 512.0f;
 std::unordered_map<int64_t, ChunkGridCache> Chunk::s_activeChunkGrids;
 std::shared_mutex Chunk::s_activeChunkGridsMutex;
+std::vector<std::pair<int, int>> Chunk::s_sortedChunkOffsets;
 
 Chunk::Chunk() : threadPool(std::max(1u, std::thread::hardware_concurrency() - 1)) {}
 
@@ -18,6 +19,8 @@ void Chunk::Init(VulkanRenderer& renderer) {
 
     renderer.SetTerrainChunkSize(chunkSize);
     UpdateFogParamsBasedOnData(renderer);
+
+    PrecomputeChunkOffsets(viewDistanceChunks);
 }
 uint32_t Chunk::Hash2D(int x, int z, int seed) {
     uint32_t h = static_cast<uint32_t>(seed);
@@ -50,6 +53,20 @@ int Chunk::DesiredLodForDistance(float distToCenter) const {
 
     // LOD 0: High Poly Everything
     return 0;
+}
+void Chunk::PrecomputeChunkOffsets(int viewDistance) {
+    if (!s_sortedChunkOffsets.empty()) return;
+
+    for (int dz = -viewDistance; dz <= viewDistance; ++dz) {
+        for (int dx = -viewDistance; dx <= viewDistance; ++dx) {
+            s_sortedChunkOffsets.push_back({ dx, dz });
+        }
+    }
+
+    // Sort once based on squared distance from center
+    std::sort(s_sortedChunkOffsets.begin(), s_sortedChunkOffsets.end(), [](const auto& a, const auto& b) {
+        return (a.first * a.first + a.second * a.second) < (b.first * b.first + b.second * b.second);
+        });
 }
 
 glm::vec3 Chunk::ChunkBoundsCenter(int cx, int cz) const {
@@ -240,36 +257,53 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
         m_desiredList.reserve(range * range);
         m_desiredKeysLookup.reserve(range * range);
 
-        for (int dz = -viewDistanceChunks; dz <= viewDistanceChunks; ++dz) {
-            for (int dx = -viewDistanceChunks; dx <= viewDistanceChunks; ++dx) {
-                ChunkCoord coord{ camChunkX + dx, camChunkZ + dz };
-                int64_t k = coord.Key();
-                m_desiredKeys.push_back(k);
-                m_desiredKeysLookup.insert(k);
-                m_desiredList.emplace_back(k, std::make_pair(coord.cx, coord.cz));
-            }
+        // FIX 1: O(1) grid generation using the precomputed spiral offset. 
+        // No std::sort required!
+        for (const auto& offset : s_sortedChunkOffsets) {
+            ChunkCoord coord{ camChunkX + offset.first, camChunkZ + offset.second };
+            int64_t k = coord.Key();
+            m_desiredKeys.push_back(k);
+            m_desiredKeysLookup.insert(k);
+            m_desiredList.emplace_back(k, std::make_pair(coord.cx, coord.cz));
         }
-
-        std::sort(
-            m_desiredList.begin(),
-            m_desiredList.end(),
-            [camChunkX, camChunkZ](
-                const auto& a,
-                const auto& b)
-            {
-                const int aDx = a.second.first - camChunkX;
-                const int aDz = a.second.second - camChunkZ;
-                const int bDx = b.second.first - camChunkX;
-                const int bDz = b.second.second - camChunkZ;
-
-                const int aDistanceSq = aDx * aDx + aDz * aDz;
-                const int bDistanceSq = bDx * bDx + bDz * bDz;
-
-                return aDistanceSq < bDistanceSq;
-            });
 
         m_currentAmortizeIndex = 0;
         m_needsGridRebuild = true;
+
+        // FIX 2: MOVED FROM BOTTOM OF FUNCTION
+        // Only run the heavy O(N) map deletion loops when the grid actually shifts!
+        for (auto it = loadedChunks.begin(); it != loadedChunks.end(); ) {
+            if (m_desiredKeysLookup.find(it->first) == m_desiredKeysLookup.end()) {
+                RemoveGridCache(it->first);
+                renderer.RemoveTerrainChunk(it->first);
+                renderer.RemoveGrass(it->first);
+                renderer.RemoveBoid(it->first);
+                scene.RemoveChunk(it->first);
+                it = loadedChunks.erase(it);
+            }
+            else {
+                ++it;
+            }
+        }
+
+        int preGenRadius = viewDistanceChunks + 2;
+        for (auto it = loadingChunks.begin(); it != loadingChunks.end(); ) {
+            ChunkCoord coord = ChunkCoord::FromKey(it->first);
+            int dx = std::abs(coord.cx - camChunkX);
+            int dz = std::abs(coord.cz - camChunkZ);
+            if (dx > preGenRadius || dz > preGenRadius) {
+                int64_t keyToCancel = it->first;
+                for (auto& job : asyncResults) {
+                    if (job.key == keyToCancel) {
+                        job.cancelToken->store(true, std::memory_order_relaxed);
+                    }
+                }
+                it = loadingChunks.erase(it);
+            }
+            else {
+                ++it;
+            }
+        }
     }
 
     if (m_needsGridRebuild && !m_desiredList.empty()) {
@@ -389,40 +423,6 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
                 m_needsGridRebuild = true;
                 m_currentAmortizeIndex = 0;
             }
-        }
-    }
-
-    // Remove chunks that are no longer desired
-    for (auto it = loadedChunks.begin(); it != loadedChunks.end(); ) {
-        if (m_desiredKeysLookup.find(it->first) == m_desiredKeysLookup.end()) {
-            RemoveGridCache(it->first);
-            renderer.RemoveTerrainChunk(it->first);
-            renderer.RemoveGrass(it->first);
-            renderer.RemoveBoid(it->first);
-            scene.RemoveChunk(it->first);
-            it = loadedChunks.erase(it);
-        }
-        else {
-            ++it;
-        }
-    }
-
-    int preGenRadius = viewDistanceChunks + 2;
-    for (auto it = loadingChunks.begin(); it != loadingChunks.end(); ) {
-        ChunkCoord coord = ChunkCoord::FromKey(it->first);
-        int dx = std::abs(coord.cx - camChunkX);
-        int dz = std::abs(coord.cz - camChunkZ);
-        if (dx > preGenRadius || dz > preGenRadius) {
-            int64_t keyToCancel = it->first;
-            for (auto& job : asyncResults) {
-                if (job.key == keyToCancel) {
-                    job.cancelToken->store(true, std::memory_order_relaxed);
-                }
-            }
-            it = loadingChunks.erase(it);
-        }
-        else {
-            ++it;
         }
     }
 

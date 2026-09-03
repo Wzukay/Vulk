@@ -420,7 +420,7 @@ void GrassRenderer::Cull(VkCommandBuffer commandBuffer, uint32_t currentFrameInd
 	vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT, 0, 1, &computeBarrier, 0, nullptr, 0, nullptr);
 }
 
-void GrassRenderer::Draw(VkCommandBuffer commandBuffer, VkDescriptorSet sharedDescriptorSet, uint32_t currentFrameIndex, uint32_t& outDrawCalls) const {
+void GrassRenderer::Draw(VkCommandBuffer commandBuffer, VkDescriptorSet sharedDescriptorSet, uint32_t currentFrameIndex, uint32_t& outDrawCalls, uint32_t& outVertexCount, uint32_t& outIndexCount) const {
 	if (m_visibleChunksThisFrame.empty() || m_pipeline == VK_NULL_HANDLE) return;
 
 	static auto startTime = std::chrono::high_resolution_clock::now();
@@ -461,6 +461,9 @@ void GrassRenderer::Draw(VkCommandBuffer commandBuffer, VkDescriptorSet sharedDe
 
 		vkCmdDrawIndirect(commandBuffer, m_indirectBuffers[currentFrameIndex], chunk->indirectOffset * sizeof(VkDrawIndirectCommand), 1, sizeof(VkDrawIndirectCommand));
 		outDrawCalls++;
+
+		outVertexCount += chunk->instanceCount * 15;
+		outIndexCount += chunk->instanceCount * 15;
 	}
 }
 

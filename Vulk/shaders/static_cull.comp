@@ -1,0 +1,43 @@
+#version 450
+
+layout(local_size_x = 128) in;
+
+struct CullInstance {
+    mat4 modelMatrix;
+    vec4 worldPositionRadius;
+    uvec4 drawData;
+};
+struct InstanceData { mat4 modelMatrix; vec4 customData; };
+struct VkDrawIndexedIndirectCommand {
+    uint indexCount; uint instanceCount; uint firstIndex; int vertexOffset; uint firstInstance;
+};
+layout(std430, binding = 0) readonly buffer InputInstances { CullInstance inputInstances[]; };
+layout(std430, binding = 1) writeonly buffer VisibleInstances { InstanceData visibleInstances[]; };
+layout(std430, binding = 2) buffer Commands { VkDrawIndexedIndirectCommand commands[]; };
+layout(push_constant) uniform CullPush {
+    vec3 cameraPos;
+    uint totalInstances;
+    vec4 frustumPlanes[6];
+    vec4 cullParams;
+} push;
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+
+    if (index >= push.totalInstances) return;
+
+    CullInstance instance = inputInstances[index];
+    vec3 position = instance.worldPositionRadius.xyz;
+    float radius = instance.worldPositionRadius.w;
+
+    for (uint plane = 0; plane < 6; ++plane) {
+        if (dot(push.frustumPlanes[plane].xyz, position) + push.frustumPlanes[plane].w < -radius) return;
+    }
+
+    if (distance(position, push.cameraPos) > push.cullParams.x) return;
+
+    uint commandIndex = instance.drawData.x;
+    uint outputIndex = atomicAdd(commands[commandIndex].instanceCount, 1);
+    visibleInstances[instance.drawData.y + outputIndex].modelMatrix = instance.modelMatrix;
+    visibleInstances[instance.drawData.y + outputIndex].customData = vec4(0.0);
+}

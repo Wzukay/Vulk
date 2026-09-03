@@ -239,6 +239,7 @@
     <None Include="shaders\ssao_blur.frag" />
     <None Include="shaders\static.frag" />
     <None Include="shaders\static.vert" />
+    <None Include="shaders\static_cull.comp" />
     <None Include="shaders\terrain.frag" />
     <None Include="shaders\terrain.vert" />
     <None Include="shaders\terrain_cull.comp" />

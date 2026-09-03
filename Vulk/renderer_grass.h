@@ -66,7 +66,7 @@ public:
     void Tick(uint64_t currentFrame);
 
     void Cull(VkCommandBuffer commandBuffer, uint32_t currentFrameIndex);
-    void Draw(VkCommandBuffer commandBuffer, VkDescriptorSet sharedDescriptorSet, uint32_t currentFrameIndex, uint32_t& outDrawCalls) const;
+    void Draw(VkCommandBuffer commandBuffer, VkDescriptorSet sharedDescriptorSet, uint32_t currentFrameIndex, uint32_t& outDrawCalls, uint32_t& outVertexCount, uint32_t& outIndexCount) const;
 
     bool HasChunk(int64_t key) const;
     void RemoveChunk(int64_t key);

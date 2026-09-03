@@ -286,5 +286,8 @@
     <None Include="shaders\hzb_reduce.comp">
       <Filter>Shaders\Compute</Filter>
     </None>
+    <None Include="shaders\static_cull.comp">
+      <Filter>Shaders\Compute</Filter>
+    </None>
   </ItemGroup>
 </Project>

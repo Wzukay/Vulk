@@ -1,19 +1,6 @@
 #version 450
-#extension GL_EXT_nonuniform_qualifier : require
+
 #include "common_structures.glsl"
-
-struct Light {
-    vec4 positionOrDir;
-    vec4 color;
-    vec4 params;
-};
-
-layout(std430, binding = 1) readonly buffer LightBuffer {
-    Light lights[];
-} lightBuffer;
-
-layout(binding = 2) uniform sampler2D globalTextures[];
-layout(binding = 3) uniform sampler2D normalTextures[];
 
 layout(location = 0) in vec3 fragNormal;
 layout(location = 1) in vec2 fragTexCoord;
@@ -22,126 +9,117 @@ layout(location = 3) in vec3 fragWorldPos;
 layout(location = 4) in vec3 fragTangent;
 layout(location = 5) in float fragTangentHandedness;
 layout(location = 6) flat in uint fragNormalTextureId;
-layout(location = 7) in vec3 fragColor; // Splat weights (r=sand, g=grass, b=rock)
+layout(location = 7) in vec3 fragColor;
 
 layout(location = 0) out vec4 outColor;
 
-const float PI = 3.14159265359;
-
-vec4 TriplanarSample(uint textureId, vec3 pos, vec3 weights) {
-    vec4 result = vec4(0.0);
-    // Dynamic branching skips memory reads if the axis weight is visually zero
-    if (weights.x > 0.001) result += texture(globalTextures[textureId], pos.yz) * weights.x;
-    if (weights.y > 0.001) result += texture(globalTextures[textureId], pos.xz) * weights.y;
-    if (weights.z > 0.001) result += texture(globalTextures[textureId], pos.xy) * weights.z;
-    return result;
+vec3 ApplyFog(vec3 color, float distanceToCamera) {
+    float fogRange = max(ubo.fogEnd - ubo.fogStart, 0.001);
+    float fogFactor = clamp((distanceToCamera - ubo.fogStart) / fogRange, 0.0, 1.0);
+    return mix(color, vec3(0.6, 0.7, 0.8), fogFactor);
 }
 
-// 1. UnpackNormal MUST be defined first
-vec3 UnpackNormal(vec4 sampledNormal) {
-    // Extract Red (X) and Green (Y) and transform from [0, 1] texture space to [-1, 1] simulation space
-    vec2 normalXY = sampledNormal.rg * 2.0 - 1.0;
-    // Mathematically derive Z component based on geometric unit vector length constraints
-    float normalZ = sqrt(max(0.0, 1.0 - dot(normalXY, normalXY)));
-    return vec3(normalXY, normalZ);
+float hash(vec2 p) {
+    return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453123);
 }
 
-// 2. Now TriplanarSampleNormal can safely call UnpackNormal
-vec3 TriplanarSampleNormal(uint textureId, vec3 pos, vec3 weights) {
-    vec3 result = vec3(0.0);
-    if (weights.x > 0.001) result += UnpackNormal(texture(normalTextures[textureId], pos.yz)) * weights.x;
-    if (weights.y > 0.001) result += UnpackNormal(texture(normalTextures[textureId], pos.xz)) * weights.y;
-    if (weights.z > 0.001) result += UnpackNormal(texture(normalTextures[textureId], pos.xy)) * weights.z;
-    return result;
-}
-
-vec3 FresnelSchlick(float cosTheta, vec3 F0) { return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0); }
-
-float DistributionGGX(vec3 N, vec3 H, float roughness) {
-    float a = roughness * roughness;
-    float a2 = a * a;
-    float NdotH = max(dot(N, H), 0.0);
-    float denom = (NdotH * NdotH * (a2 - 1.0) + 1.0);
-    return a2 / max(PI * denom * denom, 0.0000001);
-}
-
-float GeometrySchlickGGX(float NdotV, float roughness) {
-    float r = (roughness + 1.0);
-    float k = (r * r) / 8.0;
-    return NdotV / (NdotV * (1.0 - k) + k);
-}
-
-float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
-    return GeometrySchlickGGX(max(dot(N, L), 0.0), roughness) * GeometrySchlickGGX(max(dot(N, V), 0.0), roughness);
-}
-
-vec3 CalcPBR(vec3 N, vec3 V, vec3 L, vec3 lightColor, vec3 albedo, float roughness, float metallic) {
-    vec3 H = normalize(V + L);
-    vec3 F0 = mix(vec3(0.04), albedo, metallic);
-
-    vec3 F = FresnelSchlick(max(dot(H, V), 0.0), F0);       
-    vec3 specular = (DistributionGGX(N, H, roughness) * GeometrySmith(N, V, L, roughness) * F) / (4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001);
-    
-    vec3 kD = (vec3(1.0) - F) * (1.0 - metallic); 
-    return (kD * albedo / PI + specular) * lightColor * max(dot(N, L), 0.0);
+float valueNoise(vec2 x) {
+    vec2 i = floor(x);
+    vec2 f = fract(x);
+    float a = hash(i);
+    float b = hash(i + vec2(1.0, 0.0));
+    float c = hash(i + vec2(0.0, 1.0));
+    float d = hash(i + vec2(1.0, 1.0));
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
 }
 
 void main() {
-    float ao = 1.0;
-    float roughness = 0.8;
-    float metallic = 0.0;
+    float distanceToCamera = length(ubo.cameraPos - fragWorldPos);
 
-    // 1. Calculate Triplanar Weights (steepness/normal direction)
-    vec3 blendWeights = abs(fragNormal);
-    blendWeights /= (blendWeights.x + blendWeights.y + blendWeights.z);
+    vec3 blendWeights = max(fragColor, vec3(0.0));
+    float weightSum = blendWeights.r + blendWeights.g + blendWeights.b;
+    blendWeights /= max(weightSum, 0.0001);
 
-    // 2. Blend Albedo Maps based on splat map configuration
-    vec4 albedo = vec4(0.0);
+    vec3 normal = normalize(fragNormal);
 
-    if (fragColor.r > 0.01) {
-        albedo += texture(globalTextures[0], fragTexCoord) * fragColor.r;
-    }
-    if (fragColor.g > 0.01) {
-        albedo += texture(globalTextures[1], fragTexCoord) * fragColor.g;
-    }
-    if (fragColor.b > 0.01) {
-        albedo += TriplanarSample(2, fragWorldPos * 0.05, blendWeights) * fragColor.b;
-    }
-
-    // 3. Normal Mapping Reconstruction & Blending
-    vec3 N_geo = normalize(fragNormal);
-    vec3 T = normalize(fragTangent);
-    T = normalize(T - N_geo * dot(N_geo, T)); 
-    vec3 B = cross(N_geo, T) * fragTangentHandedness;
-    mat3 TBN = mat3(T, B, N_geo);
-
-    // Unpack compressed BC5/BC7 texture layers
-    vec3 nSand  = UnpackNormal(texture(normalTextures[0], fragTexCoord));
-    vec3 nGrass = UnpackNormal(texture(normalTextures[1], fragTexCoord));
-    // Triplanar sample Rock normal map to match albedo mapping layouts and fix cliff textures
-    vec3 nRock  = TriplanarSampleNormal(2, fragWorldPos * 0.05, blendWeights);
+    // --- NEW: PROCEDURAL NORMAL PERTURBATION (Up-Close Only) ---
+    // We fade the bump mapping out completely past 150 units to save ALU
+    // and prevent nasty high-frequency pixel aliasing in the distance.
+    float detailFade = clamp(1.0 - (distanceToCamera / 150.0), 0.0, 1.0);
     
-    vec3 blendedNormal = (nSand * fragColor.r) + (nGrass * fragColor.g) + (nRock * fragColor.b);
-    vec3 N = normalize(TBN * blendedNormal);
-
-    // 4. Lighting Loop
-    vec3 V = normalize(ubo.cameraPos - fragWorldPos);
-    vec3 result = ubo.ambient * albedo.xyz;
-
-    for (uint i = 0u; i < ubo.lightCount; ++i) {
-        Light L = lightBuffer.lights[i];
-        vec3 lightVec = normalize(L.positionOrDir.xyz - (L.positionOrDir.w > 0.5 ? fragWorldPos : vec3(0.0)));
-        float atten = (L.positionOrDir.w > 0.5) ? (1.0 / length(L.positionOrDir.xyz - fragWorldPos)) : 1.0;
+    if (detailFade > 0.0) {
+        float bumpFreq = 2.5; // Controls the size of the pebbles/bumps
+        float eps = 0.05;
+        vec2 p = fragWorldPos.xz * bumpFreq;
         
-        result += CalcPBR(N, V, lightVec, L.color.rgb * L.color.a * atten, albedo.xyz, roughness, metallic);
+        // Cheap finite difference to get the slope of the noise
+        float hL = valueNoise(p - vec2(eps, 0.0));
+        float hR = valueNoise(p + vec2(eps, 0.0));
+        float hD = valueNoise(p - vec2(0.0, eps));
+        float hU = valueNoise(p + vec2(0.0, eps));
+        
+        vec2 gradient = vec2(hR - hL, hU - hD) / (2.0 * eps);
+        
+        // Dynamic bump strength: Rocks are jagged (high), Grass is bumpy (mid), Sand is smooth (low)
+        float matBump = 0.05 * blendWeights.r + 0.3 * blendWeights.g + 0.9 * blendWeights.b;
+        float finalBump = matBump * detailFade;
+        
+        // Apply the gradient to the normal's X and Z axes
+        normal.x -= gradient.x * finalBump;
+        normal.z -= gradient.y * finalBump;
+        normal = normalize(normal);
     }
+    // -----------------------------------------------------------
 
-    float dist = length(ubo.cameraPos - fragWorldPos);
-    float fogFactor = clamp((dist - ubo.fogStart) / (ubo.fogEnd - ubo.fogStart), 0.0, 1.0);
-    if (dist > ubo.fogEnd) fogFactor = 1.0;
+    // 1. HEIGHT & SLOPE CALCULATION
+    float slope = clamp(normal.y, 0.0, 1.0);
+    float elevation = clamp(fragWorldPos.y / 150.0, 0.0, 1.0);
+
+    // 2. DYNAMIC ALU COLOR VARIATION
+    float n = valueNoise(fragWorldPos.xz * 0.02);
+    float noisyElevation = clamp(elevation + (n * 0.3 - 0.15), 0.0, 1.0);
+
+    vec3 sandColor = mix(vec3(0.40, 0.28, 0.15), vec3(0.55, 0.40, 0.22), noisyElevation);
     
-    vec3 fogColor = vec3(0.6, 0.7, 0.8);
-    vec3 finalColor = mix(result, fogColor, fogFactor);
+    vec3 lushGrass = vec3(0.10, 0.30, 0.06);
+    vec3 dryGrass  = vec3(0.25, 0.35, 0.10);
+    vec3 grassColor = mix(lushGrass, dryGrass, noisyElevation) * mix(0.6, 1.0, slope);
 
-    outColor = vec4(finalColor, 1.0);
+    vec3 darkRock  = vec3(0.15, 0.16, 0.17);
+    vec3 lightRock = vec3(0.35, 0.36, 0.38);
+    vec3 rockColor = mix(darkRock, lightRock, noisyElevation);
+
+    float snowMask = smoothstep(0.7, 0.9, noisyElevation) * smoothstep(0.6, 0.9, slope);
+    rockColor = mix(rockColor, vec3(0.85, 0.88, 0.92), snowMask);
+    
+    blendWeights.b = max(blendWeights.b, snowMask); 
+    weightSum = blendWeights.r + blendWeights.g + blendWeights.b;
+    blendWeights /= max(weightSum, 0.0001);
+
+    // 3. FINAL BLEND
+    vec3 terrainColor =
+        sandColor * blendWeights.r +
+        grassColor * blendWeights.g +
+        rockColor * blendWeights.b;
+
+    float colorBreakup = mix(0.85, 1.15, n);
+    terrainColor *= colorBreakup;
+
+    // 4. LIGHTING
+    vec3 sunDirection = normalize(ubo.sunDirection.xyz);
+    
+    // Lighting now uses the newly perturbed normal!
+    float diffuse = max(dot(normal, sunDirection), 0.0);
+    float wrappedDiffuse = diffuse * 0.85 + 0.15;
+
+    vec3 lighting =
+        vec3(ubo.ambient) +
+        ubo.sunColor.rgb *
+        ubo.sunColor.a *
+        wrappedDiffuse;
+
+    outColor = vec4(
+        ApplyFog(terrainColor * lighting, distanceToCamera),
+        1.0);
 }

@@ -212,6 +212,8 @@ private:
     std::unordered_set<int64_t> m_desiredKeysLookup;
     std::vector<std::pair<int64_t, std::pair<int, int>>> m_desiredList;
 
+    static std::vector<std::pair<int, int>> s_sortedChunkOffsets;
+
     std::unordered_map<int64_t, int> loadedChunks;
     std::unordered_map<int64_t, int> loadingChunks;
     std::vector<ActiveJob> asyncResults;
@@ -230,6 +232,7 @@ private:
     static std::vector<glm::vec2> ConvexHull(std::vector<glm::vec2> points);
     static std::pair<float, glm::vec3> CalculateHeightAndColor(float worldX, float worldZ);
     int DesiredLodForDistance(float distance) const;
+    static void PrecomputeChunkOffsets(int viewDistance);
 
     static uint32_t Hash2D(int x, int z, int seed);
 

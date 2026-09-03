@@ -12,6 +12,8 @@
 #include <vulkan/vulkan_core.h>
 #include <fstream>
 #include <random>
+#include <future>
+#include <array>
 
 #include "mesh.h"
 
@@ -154,6 +156,10 @@ private:
 
     VkCommandPool commandPool = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> commandBuffers;
+
+    static constexpr uint32_t NUM_RENDER_THREADS = 4;
+    std::vector<std::vector<VkCommandPool>> threadCommandPools;
+    std::vector<std::vector<VkCommandBuffer>> threadCommandBuffers;
 
     DeferredQueue<BufferDeletion> m_pendingDeletionsGlobal;
 
@@ -388,6 +394,6 @@ public:
 #ifdef NDEBUG
     const bool enableValidationLayers = false;
 #else
-    const bool enableValidationLayers = false;
+    const bool enableValidationLayers = true;
 #endif
 };

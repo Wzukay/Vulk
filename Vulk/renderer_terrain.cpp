@@ -179,15 +179,31 @@ void TerrainRenderer::Cull(VkCommandBuffer commandBuffer, const glm::vec3& camer
 
     TerrainChunkGPUData* chunkDataMapped = m_chunkDataMappedPtrs[currentFrameIndex];
 
-    // --- 1. GATHER AND SORT CHUNKS FRONT-TO-BACK ---
     std::vector<std::pair<float, const TerrainChunkGPU*>> sortedChunks;
     sortedChunks.reserve(m_terrainChunks.size());
 
+    uint32_t submittedVerts = 0;
+    uint32_t submittedInds = 0;
+
     for (const auto& [key, chunk] : m_terrainChunks) {
         if (!chunk.ready) continue;
+
+        // --- FIX: CPU Frustum Culling & UI Stats ---
+        if (!m_renderer->IsWorldSphereInFrustum(chunk.center, chunk.radius)) {
+            outCulledCount++;
+            continue;
+        }
+
         float distSq = glm::length2(chunk.center - cameraPos);
         sortedChunks.push_back({ distSq, &chunk });
+
+        submittedVerts += chunk.vertexCount;
+        submittedInds += chunk.indexCount;
     }
+
+    // Push the active chunk geometry totals back to the main thread
+    outVertexCount += submittedVerts;
+    outIndexCount += submittedInds;
 
     std::sort(sortedChunks.begin(), sortedChunks.end(),
         [](const auto& a, const auto& b) { return a.first < b.first; });
