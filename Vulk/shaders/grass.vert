@@ -1,113 +1,147 @@
 #version 450
-#include "common_structures.glsl"
 
-layout(location = 0) in vec3 inInstancePos;
-layout(location = 1) in float inInstanceRotation;
-layout(location = 2) in vec3 inInstanceScale;
-layout(location = 3) in float inInstanceWindOffset;
+// FIX: Replaced physical vertex inputs with a Storage Buffer fetch mechanism
+struct GrassInstance {
+    vec3 position;
+    float rotation;
+    vec3 scale;
+    float windOffset;
+};
+
+// Set 1 corresponds to `m_globalComputeSets`. Binding 1 is `m_culledBuffers`.
+layout(set = 1, binding = 1) readonly buffer CulledInstances {
+    GrassInstance instances[];
+};
+
+layout(location = 0) out vec2 fragUV;
+layout(location = 1) out vec3 fragNormal;
+
+layout(set = 0, binding = 0) uniform UniformBufferObject {
+    mat4 view; mat4 proj; vec3 cameraPos; float ambient;
+    vec4 fadeParams; vec2 screenSize; float specularPower; uint lightCount;
+    float fogStart; float fogEnd; vec4 sunDirection; vec4 sunColor;
+    mat4 inverseViewProj; mat4 inverseProj; mat4 inverseView;
+} ubo;
 
 layout(push_constant) uniform PushConstants {
-    float time;
-    uint textureId;
-    float windStrength;
-    float windSpeed;
-    float lodFactor;
-} push;
+    float time; uint textureId; float windStrength; float windSpeed; float lodFactor;
+} pc;
 
-layout(location = 0) out vec2 outUV;
-layout(location = 1) out vec3 outWorldPos;
-layout(location = 2) out vec3 outNormal;
+vec3 EvaluateBezier(vec3 p0, vec3 p1, vec3 p2, vec3 p3, float t) {
+    float u = 1.0 - t;
+    return (u*u*u)*p0 + 3.0*(u*u)*t*p1 + 3.0*u*(t*t)*p2 + (t*t*t)*p3;
+}
 
-// 1. Predefined Positions (9 vertices)
-const vec3 VERT_POSITIONS[9] = vec3[9](
-    // Bottom segment
-    vec3(-0.55, 0.0, 0.0), vec3( 0.55, 0.0, 0.0), vec3( 0.35, 0.5, 0.0),
-    vec3(-0.55, 0.0, 0.0), vec3( 0.35, 0.5, 0.0), vec3(-0.35, 0.5, 0.0),
-    // Top segment
-    vec3(-0.35, 0.5, 0.0), vec3( 0.35, 0.5, 0.0), vec3( 0.0,  1.0, 0.0)
-);
-
-const vec2 VERT_UVS[9] = vec2[9](
-    vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(0.8, 0.5),
-    vec2(0.0, 0.0), vec2(0.8, 0.5), vec2(0.2, 0.5),
-    vec2(0.2, 0.5), vec2(0.8, 0.5), vec2(0.5, 1.0)
-);
-
-// 2. Pre-normalized Spherical Base Normals (Zero runtime sqrt/normalize cost)
-const vec3 VERT_NORMALS[9] = vec3[9](
-    vec3(-0.84366, 0.53688, 0.0), vec3( 0.84366, 0.53688, 0.0), vec3( 0.70711, 0.70711, 0.0),
-    vec3(-0.84366, 0.53688, 0.0), vec3( 0.70711, 0.70711, 0.0), vec3(-0.70711, 0.70711, 0.0),
-    vec3(-0.70711, 0.70711, 0.0), vec3( 0.70711, 0.70711, 0.0), vec3( 0.0,     1.0,     0.0)
-);
+vec3 EvaluateBezierDerivative(vec3 p0, vec3 p1, vec3 p2, vec3 p3, float t) {
+    float u = 1.0 - t;
+    return 3.0*u*u*(p1 - p0) + 6.0*u*t*(p2 - p1) + 3.0*t*t*(p3 - p2);
+}
 
 void main() {
-    uint vIdx = gl_VertexIndex;
-    vec3 localPos = VERT_POSITIONS[vIdx];
-    outUV = VERT_UVS[vIdx];
+    // FIX: Programmable Vertex Pulling! Grab the specific instance for this draw call
+    GrassInstance inst = instances[gl_InstanceIndex];
+    vec3 inPos = inst.position;
+    float inRot = inst.rotation;
+    vec3 inScale = inst.scale;
+    float inWindOff = inst.windOffset;
 
-    float heightNorm = localPos.y; // 0 at base, 0.5 mid, 1 at tip
-    float bendFactor = heightNorm * heightNorm;
+    float dist = distance(inPos, ubo.cameraPos);
+    
+    int lodLevel = 0;
+    if (dist > ubo.fadeParams.w * 0.6) {
+        lodLevel = 2; // Far: 3 verts
+    } else if (dist > ubo.fadeParams.w * 0.25) {
+        lodLevel = 1; // Mid: 9 verts
+    }
 
-    // Per-blade pseudorandom hash
-    float bladeRand = fract(sin(inInstancePos.x * 12.9898 + inInstancePos.z * 78.233 + inInstancePos.y * 45.164) * 43758.5453);
+    int activeTriangles = (lodLevel == 0) ? 5 : ((lodLevel == 1) ? 3 : 1);
+    int tri = gl_VertexIndex / 3;
+    int v = gl_VertexIndex % 3;
 
-    vec3 scaledPos = localPos * inInstanceScale;
+    if (tri >= activeTriangles) {
+        gl_Position = vec4(0.0);
+        return;
+    }
 
-    // Static curvature
-    float bendOffset = (0.10 + bladeRand * 0.15) * inInstanceScale.y * bendFactor;
-    scaledPos.x += bendOffset;
+    bool isTipTri = (tri == activeTriangles - 1);
+    int segment = tri / 2;
+    int totalSegments = (activeTriangles + 1) / 2;
 
-    // Rotation around Y
-    float c = cos(inInstanceRotation);
-    float s = sin(inInstanceRotation);
+    float y0 = float(segment) / float(totalSegments);
+    float y1 = float(segment + 1) / float(totalSegments);
 
-    vec3 rotatedPos = vec3(
-        scaledPos.x * c - scaledPos.z * s,
-        scaledPos.y,
-        scaledPos.x * s + scaledPos.z * c
-    );
+    float w0 = 1.0 - pow(y0, 1.5); 
+    float w1 = 1.0 - pow(y1, 1.5);
 
-    // Rotated Normal using precomputed table lookup
-    vec3 sphereNormal = VERT_NORMALS[vIdx];
-    outNormal = vec3(
-        sphereNormal.x * c - sphereNormal.z * s,
-        sphereNormal.y,
-        sphereNormal.x * s + sphereNormal.z * c
-    );
-
-    // Wind Animation (Skip entirely if heightNorm == 0 or beyond distance range)
-    float windScale = 1.0 - push.lodFactor;
-
-    if (windScale > 0.1 && heightNorm > 0.0) {
-        vec3 camDiff = ubo.cameraPos - inInstancePos;
-        float distSq = dot(camDiff, camDiff);
-
-        const float ANIM_MAX_DIST_SQ = 900.0;   // 30.0 * 30.0
-        const float ANIM_FADE_START_SQ = 100.0; // 10.0 * 10.0
-        const float INV_RANGE_SQ = 1.0 / (ANIM_MAX_DIST_SQ - ANIM_FADE_START_SQ);
-
-        if (distSq < ANIM_MAX_DIST_SQ) {
-            float animFactor = 1.0 - clamp((distSq - ANIM_FADE_START_SQ) * INV_RANGE_SQ, 0.0, 1.0);
-            float windMultiplier = 0.5 + 0.4 * bladeRand;
-
-            float adjustedTime = push.time * push.windSpeed + inInstanceWindOffset;
-
-            float baseWave = sin(adjustedTime + inInstancePos.x * 0.15 + inInstancePos.z * 0.15);
-            float microFlutter = sin(adjustedTime * 2.5 + inInstancePos.y) * cos(adjustedTime * 1.8);
-            float totalWave = (baseWave * 1.2 + microFlutter * 0.3);
-
-            float gustTime = push.time * 0.15 + inInstancePos.x * 0.005 + inInstancePos.z * 0.007;
-            float gust = (sin(gustTime) * 0.5 + 0.5) * 0.4 + 0.8;
-            float finalWindStrength = push.windStrength * gust;
-
-            float effectiveWind = finalWindStrength * animFactor * bendFactor * windMultiplier;
-
-            rotatedPos.x += totalWave * effectiveWind * 0.5;
-            rotatedPos.z += totalWave * effectiveWind * 0.2;
-            rotatedPos.y -= (totalWave * totalWave) * effectiveWind * 0.05;
+    vec2 uv;
+    if (isTipTri) {
+        if (v == 0) uv = vec2(-w0, y0);
+        else if (v == 1) uv = vec2(w0, y0);
+        else uv = vec2(0.0, y1);
+    } else {
+        bool isSecondTri = (tri % 2 == 1);
+        if (!isSecondTri) {
+            if (v == 0) uv = vec2(-w0, y0);
+            else if (v == 1) uv = vec2(w0, y0);
+            else uv = vec2(-w1, y1);
+        } else {
+            if (v == 0) uv = vec2(w0, y0);
+            else if (v == 1) uv = vec2(w1, y1);
+            else uv = vec2(-w1, y1);
         }
     }
 
-    outWorldPos = rotatedPos + inInstancePos;
-    gl_Position = ubo.proj * ubo.view * vec4(outWorldPos, 1.0);
+    float widthOffset = uv.x;
+    float t = uv.y; 
+    
+    fragUV = vec2(widthOffset * 0.5 + 0.5, t);
+
+    float finalRot = inRot;
+    if (lodLevel == 2) {
+        vec3 toCam = normalize(ubo.cameraPos - inPos);
+        finalRot = atan(toCam.x, toCam.z);
+    }
+
+    float c = cos(finalRot);
+    float s = sin(finalRot);
+    vec3 sideDir = vec3(c, 0.0, s); 
+    vec3 forwardDir = vec3(-s, 0.0, c); 
+
+    float bladeHeight = inScale.y;
+    vec3 p0 = inPos;
+    vec3 p1 = p0 + vec3(0.0, bladeHeight * 0.3, 0.0);
+    vec3 naturalLean = forwardDir * 0.3 * bladeHeight;
+    
+    float windWave = sin(pc.time * pc.windSpeed + inPos.x * 0.2 + inPos.z * 0.2 + inWindOff);
+    vec3 windDir = normalize(vec3(1.0, 0.0, 1.0));
+    vec3 windPush = windDir * (windWave * pc.windStrength * bladeHeight * 0.5);
+
+    vec3 p2 = p0 + vec3(0.0, bladeHeight * 0.7, 0.0) + naturalLean + windPush * 0.5;
+    vec3 p3 = p0 + vec3(0.0, bladeHeight, 0.0) + naturalLean * 1.5 + windPush;
+    
+    float bendDist = length(p3.xz - p0.xz);
+    p3.y -= bendDist * 0.55; 
+    p2.y -= bendDist * 0.15;
+
+    vec3 spinePos = EvaluateBezier(p0, p1, p2, p3, t);
+    vec3 curveTangent = normalize(EvaluateBezierDerivative(p0, p1, p2, p3, t));
+
+    vec3 worldPos = spinePos + (sideDir * widthOffset * inScale.x * 0.4);
+
+    vec3 surfaceNormal = normalize(cross(sideDir, curveTangent));
+    vec3 tiltedNormal = normalize(surfaceNormal * 0.6 + vec3(0.0, 0.8, 0.0));
+    float fadeLerp = clamp((dist - ubo.fadeParams.z) / (ubo.fadeParams.w - ubo.fadeParams.z), 0.0, 1.0);
+    fragNormal = normalize(mix(tiltedNormal, vec3(0.0, 1.0, 0.0), fadeLerp));
+
+    vec3 viewDir = normalize(ubo.cameraPos - inPos);
+    vec3 pushDir = viewDir;
+    pushDir.y = 0.0;
+    if (length(pushDir) > 0.001) { pushDir = normalize(pushDir); } 
+    else { pushDir = vec3(1.0, 0.0, 0.0); }
+    
+    float topDownFactor = max(viewDir.y, 0.0);
+    vec3 skewOffset = pushDir * (t * t) * topDownFactor * (bladeHeight * 0.35); 
+    worldPos += skewOffset;
+
+    gl_Position = ubo.proj * ubo.view * vec4(worldPos, 1.0);
 }

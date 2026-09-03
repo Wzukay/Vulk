@@ -15,21 +15,26 @@ layout(push_constant) uniform PushConstants {
     vec2 screenSize;
     float radius;
     float bias;
+    vec2 renderScale;
 } pc;
 
 // Robust matrix unprojection
-vec3 GetViewPos(vec2 uv) {
-    float rawDepth = texture(depthMap, uv).r;
-    vec4 clipSpace = vec4(uv * 2.0 - 1.0, rawDepth, 1.0);
+vec3 GetViewPos(vec2 screenUV) {
+    vec2 activeUV = screenUV * pc.renderScale;
+    float rawDepth = texture(depthMap, activeUV).r;
+    
+    // Clip space MUST use normalized screenUV, not activeUV
+    vec4 clipSpace = vec4(screenUV * 2.0 - 1.0, rawDepth, 1.0);
     vec4 viewSpace = ubo.inverseProjection * clipSpace;
     return viewSpace.xyz / viewSpace.w;
 }
 
-vec3 GetNormalFromDepth(vec2 uv, vec3 p0) {
-    vec2 texelSize = 1.0 / pc.screenSize;
+vec3 GetNormalFromDepth(vec2 screenUV, vec3 p0) {
+    // Screen texel size steps across the logical viewport
+    vec2 screenTexelSize = 1.0 / pc.screenSize;
     
-    vec3 p1 = GetViewPos(uv + vec2(texelSize.x, 0.0));
-    vec3 p2 = GetViewPos(uv + vec2(0.0, texelSize.y));
+    vec3 p1 = GetViewPos(screenUV + vec2(screenTexelSize.x, 0.0));
+    vec3 p2 = GetViewPos(screenUV + vec2(0.0, screenTexelSize.y));
     
     // FIXED: Swapped p2 and p1 to account for Vulkan's Y-down coordinate 
     // system. This forces the normal to point out towards the camera (+Z).
@@ -44,7 +49,8 @@ vec3 GetNormalFromDepth(vec2 uv, vec3 p0) {
 }
 
 void main() {
-    float rawDepth = texture(depthMap, fragUV).r;
+    vec2 activeUV = fragUV * pc.renderScale;
+    float rawDepth = texture(depthMap, activeUV).r;
     
     // Discard skybox/background fragments at the far plane
     if (rawDepth >= 1.0) {
@@ -70,14 +76,16 @@ void main() {
         vec4 offset = vec4(samplePos, 1.0);
         offset = ubo.projection * offset;
         offset.xyz /= offset.w;
-        offset.xy = offset.xy * 0.5 + 0.5;
+        offset.xy = offset.xy * 0.5 + 0.5; // Normalized screen space (0 to 1)
         
         if (offset.x < 0.0 || offset.x > 1.0 || offset.y < 0.0 || offset.y > 1.0) {
             continue;
         }
         
         // Matrix unprojection for the sample point depth
-        float rawSampleDepth = texture(depthMap, offset.xy).r;
+        vec2 sampleActiveUV = offset.xy * pc.renderScale;
+        float rawSampleDepth = texture(depthMap, sampleActiveUV).r;
+        
         vec4 sampleClip = vec4(offset.xy * 2.0 - 1.0, rawSampleDepth, 1.0);
         vec4 sampleView = ubo.inverseProjection * sampleClip;
         float sampleViewZ = sampleView.z / sampleView.w;

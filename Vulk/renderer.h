@@ -63,7 +63,8 @@ struct Light {
 
 class VulkanRenderer {
 private:
-    static constexpr int MAX_FRAMES_IN_FLIGHT = 3;
+    static constexpr uint32_t MAX_SUPPORTED_FRAMES_IN_FLIGHT = 3;
+    uint32_t m_framesInFlight = 3;
     static constexpr uint32_t MAX_LIGHTS = 256;
 
 private:
@@ -121,6 +122,9 @@ public:
     VkCommandPool GetCommandPool() const { return commandPool; }
     VkQueue GetGraphicsQueue() const { return graphicsQueue; }
     GLFWwindow* GetWindow() const { return window; }
+    uint32_t GetFramesInFlight() const {
+        return m_framesInFlight;
+    }
 
 private:
     uint32_t drawCallCount = 0, culledCount = 0, sceneTotalVertices = 0, sceneTotalIndices = 0;
@@ -345,6 +349,7 @@ private:
     GrassRenderer m_grassRenderer;
 public:
     void AddGrass(int64_t key, const std::vector<GrassInstance>& grassInstances);
+    void RemoveGrass(int64_t key);
 
 private:
     // SSAO Resources
@@ -383,6 +388,6 @@ public:
 #ifdef NDEBUG
     const bool enableValidationLayers = false;
 #else
-    const bool enableValidationLayers = true;
+    const bool enableValidationLayers = false;
 #endif
 };

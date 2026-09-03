@@ -30,8 +30,6 @@ struct GrassChunkGPU {
     uint32_t indirectOffset = 0;
     uint32_t instanceCount = 0;
 
-    std::array<VkDescriptorSet, 3> computeDescriptorSets = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
-
     glm::vec3 center = glm::vec3(0.0f);
     float radius = 0.0f;
 };
@@ -53,11 +51,6 @@ struct GrassComputePushConstants {
     float _padding;
 
     glm::vec4 frustumPlanes[6];
-};
-
-struct GrassGarbage {
-    std::array<VkDescriptorSet, 3> sets;
-    uint64_t safeFrame;
 };
 
 class GrassRenderer {
@@ -90,12 +83,16 @@ private:
     VulkanRenderer* m_renderer = nullptr;
     RingBufferUploader* m_uploader = nullptr;
 
+    uint32_t m_framesInFlight = 3;
+
     // --- SUBALLOCATOR GLOBALS ---
     uint32_t m_maxInstances = 5000000;
     uint32_t m_maxIndirect = 5000;
 
     VkBuffer m_instanceBuffer = VK_NULL_HANDLE;
     VkDeviceMemory m_instanceMemory = VK_NULL_HANDLE;
+
+    std::array<VkDescriptorSet, 3> m_globalComputeSets = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
 
     std::array<VkBuffer, 3> m_culledBuffers = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
     std::array<VkDeviceMemory, 3> m_culledMemories = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
@@ -112,7 +109,6 @@ private:
     std::atomic<uint32_t> m_nextIndirectOffset{ 0 };
     std::mutex m_allocMutex;
     DeferredQueue<SpanReturn> m_pendingSpanReturns;
-    std::vector<GrassGarbage> m_garbageSets;
 
     std::pair<uint32_t, uint32_t> AllocateSpace(uint32_t instanceCount, uint32_t indirectCount);
     void DeferSpanReturn(const FreeSpan& instSpan, const FreeSpan& indSpan, uint64_t safeFrame);

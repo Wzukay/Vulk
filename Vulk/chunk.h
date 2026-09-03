@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <queue>
 #include <optional>
+#include <shared_mutex>
 
 #include "asset_manager.h"
 #include "scene.h"
@@ -108,11 +109,17 @@ struct TerrainSample
     glm::vec3 biomeWeights;
 };
 
+struct ChunkGridCache {
+    int resolution = 0;
+    std::vector<float> heightData;
+};
 struct ChunkJobResult {
     ChunkCoord coord;
     std::vector<ModelVertex> vertices;
     std::vector<uint32_t> indices;
     int lod;
+
+    ChunkGridCache physicsGrid;
 
     std::vector<GrassInstance> grassInstances;
     std::vector<PropInstance> props;
@@ -125,11 +132,6 @@ struct ChunkSortItem {
     int targetResolution;
     bool isImmediate;
 };
-struct ChunkGridCache {
-    int resolution;
-    std::vector<float> heightData;
-};
-
 
 struct ActiveJob {
     std::future<ChunkJobResult> future;
@@ -184,6 +186,7 @@ public:
     bool Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& renderer);
 
     static float GetCachedHeightFromGrid(float worldX, float worldZ);
+    static void PublishGridCache(int64_t chunkKey, ChunkGridCache&& gridCache);
     static void RemoveGridCache(int64_t chunkKey);
     static float GetHeight(float worldX, float worldZ);
 
@@ -217,6 +220,7 @@ private:
     glm::vec3 m_lastPreGenCamForward = glm::vec3(0.0f);
 
     static std::unordered_map<int64_t, ChunkGridCache> s_activeChunkGrids;
+    static std::shared_mutex s_activeChunkGridsMutex;
 
     void UpdateFogParamsBasedOnData(VulkanRenderer& renderer);
 
@@ -230,8 +234,10 @@ private:
     static uint32_t Hash2D(int x, int z, int seed);
 
     void GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSize,
-        ChunkJobResult& outResult,
-        std::shared_ptr<std::atomic<bool>> cancelToken = nullptr);
-    void GenerateChunkProps(int chunkX, int chunkZ, int lod, ChunkJobResult& outResult);
-    void GenerateChunkSwarms(int chunkX, int chunkZ, int lod, ChunkJobResult& outResult);
+        ChunkJobResult& outResult, std::shared_ptr<std::atomic<bool>> cancelToken = nullptr);
+
+    void GenerateChunkProps(int chunkX, int chunkZ, int lod, ChunkJobResult& outResult,
+        const std::function<std::pair<float, glm::vec3>(float, float)>& heightColorFunc);
+    void GenerateChunkSwarms(int chunkX, int chunkZ, int lod, ChunkJobResult& outResult,
+        const std::function<std::pair<float, glm::vec3>(float, float)>& heightColorFunc);
 };

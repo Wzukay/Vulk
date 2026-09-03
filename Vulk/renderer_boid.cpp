@@ -1,11 +1,16 @@
 #include "renderer_boid.h"
 #include "renderer.h"
+#include "ring_buffer_uploader.h"
+
 #include <stdexcept>
 #include <algorithm>
 
-void BoidRenderer::Init(VkDevice device, VulkanRenderer* renderer, VkFormat colorFormat, VkFormat depthFormat, VkDescriptorSetLayout sharedSetLayout, VkSampleCountFlagBits msaaSamples) {
+void BoidRenderer::Init(VkDevice device, VulkanRenderer* renderer, RingBufferUploader* uploader, VkFormat colorFormat, VkFormat depthFormat,
+    VkDescriptorSetLayout sharedSetLayout, VkSampleCountFlagBits msaaSamples)
+{
     m_device = device;
     m_renderer = renderer;
+    m_uploader = uploader;
 
     VkDeviceSize bufferSize = m_maxBoids * sizeof(BoidInstance);
     for (int i = 0; i < 2; i++) {
@@ -26,6 +31,11 @@ void BoidRenderer::Cleanup() {
         m_renderer->DestroyBuffer(m_boidBuffers[i], m_boidMemories[i]);
     }
 
+    for (auto& [key, token] : m_pendingUploads) {
+        token->store(true, std::memory_order_release);
+    }
+
+    m_pendingUploads.clear();
     m_swarms.clear();
     m_freeBoidSpans.clear();
 
@@ -62,76 +72,186 @@ uint32_t BoidRenderer::AllocateSpace(uint32_t boidCount) {
     }
 }
 
-void BoidRenderer::AddSwarm(int64_t chunkKey, const std::vector<BoidInstance>& initialBoids, uint32_t textureId) {
+void BoidRenderer::AddSwarm(
+    int64_t chunkKey,
+    const std::vector<BoidInstance>& initialBoids,
+    uint32_t textureId)
+{
+    if (initialBoids.empty()) {
+        return;
+    }
+
+    // Cancel an upload for an older version of this chunk.
+    auto pendingIt = m_pendingUploads.find(chunkKey);
+    if (pendingIt != m_pendingUploads.end()) {
+        pendingIt->second->store(true, std::memory_order_release);
+        m_pendingUploads.erase(pendingIt);
+    }
+
+    // Remove an already-visible swarm before replacing it.
     if (m_swarms.find(chunkKey) != m_swarms.end()) {
         RemoveSwarm(chunkKey);
     }
 
-    BoidSwarmGPU swarm;
-    swarm.boidCount = static_cast<uint32_t>(initialBoids.size());
-    swarm.textureId = textureId;
+    const uint32_t boidCount =
+        static_cast<uint32_t>(initialBoids.size());
+    const uint32_t boidOffset = AllocateSpace(boidCount);
 
-    if (!initialBoids.empty()) {
-        swarm.baseCenter = glm::vec3(initialBoids[0].position);
-        swarm.currentCenter = swarm.baseCenter;
-        swarm.lifeTime = 0.0f;
+    auto swarm = std::make_shared<BoidSwarmGPU>();
+    swarm->boidOffset = boidOffset;
+    swarm->boidCount = boidCount;
+    swarm->textureId = textureId;
+    swarm->pingPongIndex = 0;
+
+    for (const BoidInstance& boid : initialBoids) {
+        swarm->baseCenter += glm::vec3(boid.position);
     }
 
-    uint32_t boidOffset = AllocateSpace(swarm.boidCount);
-    swarm.boidOffset = boidOffset;
+    swarm->baseCenter /= static_cast<float>(boidCount);
+    swarm->currentCenter = swarm->baseCenter;
 
-    VkDeviceSize offsetBytes = boidOffset * sizeof(BoidInstance);
-    VkDeviceSize sizeBytes = swarm.boidCount * sizeof(BoidInstance);
+    const VkDeviceSize offsetBytes =
+        static_cast<VkDeviceSize>(boidOffset) * sizeof(BoidInstance);
+    const VkDeviceSize sizeBytes =
+        static_cast<VkDeviceSize>(boidCount) * sizeof(BoidInstance);
 
-    VkBuffer stagingBuffer;
-    VkDeviceMemory stagingMemory;
-    m_renderer->CreateBuffer(sizeBytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingMemory);
+    for (int i = 0; i < 2; ++i) {
+        VkDescriptorSetAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocInfo.descriptorPool = m_descriptorPool;
+        allocInfo.descriptorSetCount = 1;
+        allocInfo.pSetLayouts = &m_computeSetLayout;
 
-    void* data;
-    vkMapMemory(m_device, stagingMemory, 0, sizeBytes, 0, &data);
-    memcpy(data, initialBoids.data(), sizeBytes);
-    vkUnmapMemory(m_device, stagingMemory);
-
-    VkCommandBuffer cmd = m_renderer->BeginSingleTimeCommands();
-    VkBufferCopy copyRegion{ 0, offsetBytes, sizeBytes };
-    vkCmdCopyBuffer(cmd, stagingBuffer, m_boidBuffers[0], 1, &copyRegion);
-    m_renderer->EndSingleTimeCommands(cmd);
-    m_renderer->DestroyBuffer(stagingBuffer, stagingMemory);
-
-    VkDescriptorSetLayout layouts[] = { m_computeSetLayout, m_computeSetLayout };
-    VkDescriptorSetAllocateInfo allocInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, nullptr, m_descriptorPool, 2, layouts };
-    if (vkAllocateDescriptorSets(m_device, &allocInfo, swarm.computeSets) != VK_SUCCESS) {
-        throw std::runtime_error("Failed to allocate boid descriptor sets");
+        if (vkAllocateDescriptorSets(
+            m_device,
+            &allocInfo,
+            &swarm->computeSets[i]) != VK_SUCCESS) {
+            throw std::runtime_error(
+                "Failed to allocate boid compute descriptor set");
+        }
     }
 
-    VkDescriptorBufferInfo bInfo0{ m_boidBuffers[0], offsetBytes, sizeBytes };
-    VkDescriptorBufferInfo bInfo1{ m_boidBuffers[1], offsetBytes, sizeBytes };
+    VkDescriptorBufferInfo bufferInfo0{};
+    bufferInfo0.buffer = m_boidBuffers[0];
+    bufferInfo0.offset = offsetBytes;
+    bufferInfo0.range = sizeBytes;
+
+    VkDescriptorBufferInfo bufferInfo1{};
+    bufferInfo1.buffer = m_boidBuffers[1];
+    bufferInfo1.offset = offsetBytes;
+    bufferInfo1.range = sizeBytes;
 
     VkWriteDescriptorSet writes[4]{};
-    writes[0] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, swarm.computeSets[0], 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &bInfo0, nullptr };
-    writes[1] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, swarm.computeSets[0], 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &bInfo1, nullptr };
-    writes[2] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, swarm.computeSets[1], 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &bInfo1, nullptr };
-    writes[3] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, swarm.computeSets[1], 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &bInfo0, nullptr };
+
+    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[0].dstSet = swarm->computeSets[0];
+    writes[0].dstBinding = 0;
+    writes[0].descriptorCount = 1;
+    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[0].pBufferInfo = &bufferInfo0;
+
+    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[1].dstSet = swarm->computeSets[0];
+    writes[1].dstBinding = 1;
+    writes[1].descriptorCount = 1;
+    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[1].pBufferInfo = &bufferInfo1;
+
+    writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[2].dstSet = swarm->computeSets[1];
+    writes[2].dstBinding = 0;
+    writes[2].descriptorCount = 1;
+    writes[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[2].pBufferInfo = &bufferInfo1;
+
+    writes[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[3].dstSet = swarm->computeSets[1];
+    writes[3].dstBinding = 1;
+    writes[3].descriptorCount = 1;
+    writes[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[3].pBufferInfo = &bufferInfo0;
+
     vkUpdateDescriptorSets(m_device, 4, writes, 0, nullptr);
 
-    m_swarms[chunkKey] = swarm;
+    auto cancelToken = std::make_shared<std::atomic_bool>(false);
+    m_pendingUploads[chunkKey] = cancelToken;
+
+    CopyRegion uploadRegion{};
+    uploadRegion.srcData = initialBoids.data();
+    uploadRegion.size = sizeBytes;
+    uploadRegion.dstBuffer = m_boidBuffers[0];
+    uploadRegion.dstOffset = offsetBytes;
+
+    m_uploader->QueueBatchUpload(
+        { uploadRegion },
+        [this, chunkKey, swarm, cancelToken]() {
+            const auto activeIt = m_pendingUploads.find(chunkKey);
+
+            // Do not let an old callback erase a newer upload's token.
+            const bool isCurrent =
+                activeIt != m_pendingUploads.end() &&
+                activeIt->second == cancelToken;
+
+            if (isCurrent) {
+                m_pendingUploads.erase(activeIt);
+            }
+
+            if (!isCurrent ||
+                cancelToken->load(std::memory_order_acquire)) {
+                const uint32_t aligned =
+                    (swarm->boidCount + 7u) & ~7u;
+
+                {
+                    std::lock_guard<std::mutex> lock(m_allocMutex);
+                    m_freeBoidSpans.push_back({
+                        swarm->boidOffset,
+                        aligned
+                        });
+                }
+
+                vkFreeDescriptorSets(
+                    m_device,
+                    m_descriptorPool,
+                    2,
+                    swarm->computeSets);
+
+                return;
+            }
+
+            m_swarms[chunkKey] = *swarm;
+        });
 }
 
 void BoidRenderer::RemoveSwarm(int64_t chunkKey) {
-    auto it = m_swarms.find(chunkKey);
-    if (it != m_swarms.end()) {
-        std::lock_guard<std::mutex> lock(m_allocMutex);
-        uint32_t aligned = (it->second.boidCount + 7) & ~7;
-        m_freeBoidSpans.push_back({ it->second.boidOffset, aligned });
-
-        BoidGarbage gc{};
-        gc.sets[0] = it->second.computeSets[0];
-        gc.sets[1] = it->second.computeSets[1];
-        gc.safeFrame = m_renderer->GetFrameCounter() + 3;
-        m_garbageSets.push_back(gc);
-
-        m_swarms.erase(it);
+    auto pendingIt = m_pendingUploads.find(chunkKey);
+    if (pendingIt != m_pendingUploads.end()) {
+        pendingIt->second->store(true, std::memory_order_release);
+        m_pendingUploads.erase(pendingIt);
     }
+
+    auto it = m_swarms.find(chunkKey);
+    if (it == m_swarms.end()) {
+        return;
+    }
+
+    const uint32_t aligned =
+        (it->second.boidCount + 7u) & ~7u;
+
+    {
+        std::lock_guard<std::mutex> lock(m_allocMutex);
+        m_freeBoidSpans.push_back({
+            it->second.boidOffset,
+            aligned
+            });
+    }
+
+    BoidGarbage garbage{};
+    garbage.sets[0] = it->second.computeSets[0];
+    garbage.sets[1] = it->second.computeSets[1];
+    garbage.safeFrame = m_renderer->GetFrameCounter() + m_renderer->GetFramesInFlight();
+
+    m_garbageSets.push_back(garbage);
+    m_swarms.erase(it);
 }
 
 void BoidRenderer::TickCompute(VkCommandBuffer computeCmd, float deltaTime) {

@@ -1,12 +1,18 @@
 #version 450
 
-layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
-
 struct GrassInstance {
     vec3 position;
     float rotation;
     vec3 scale;
     float windOffset;
+};
+
+layout(std430, binding = 0) readonly buffer InInstances {
+    GrassInstance inInstances[];
+};
+
+layout(std430, binding = 1) writeonly buffer OutInstances {
+    GrassInstance outInstances[];
 };
 
 struct VkDrawIndirectCommand {
@@ -16,12 +22,11 @@ struct VkDrawIndirectCommand {
     uint firstInstance;
 };
 
-// Bindings setup to match renderer_grass.cpp
-layout(std430, set = 0, binding = 0) readonly buffer InInstances { GrassInstance inData[]; };
-layout(std430, set = 0, binding = 1) writeonly buffer OutInstances { GrassInstance outData[]; };
-layout(std430, set = 0, binding = 2) buffer DrawCmd { VkDrawIndirectCommand cmd; };
+layout(std430, binding = 2) buffer IndirectBuffer {
+    VkDrawIndirectCommand drawCmd;
+};
 
-layout(push_constant) uniform GrassComputePushConstants {
+layout(push_constant) uniform PushConstants {
     vec3 cameraPos;
     float fadeStart;
     uint totalInstances;
@@ -29,60 +34,97 @@ layout(push_constant) uniform GrassComputePushConstants {
     float fadeEnd;
     float _padding;
     vec4 frustumPlanes[6];
-} push;
+} pc;
 
-// Fast pseudo-random hash based on instance ID
-float hash(uint n) {
-    n = (n << 13U) ^ n;
-    n = n * (n * n * 15731U + 789221U) + 1376312589U;
-    return float(n & 0x7fffffffU) / float(0x7fffffff);
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+// --- VORONOI NOISE GENERATOR ---
+vec2 hash22(vec2 p) {
+    p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
+    return fract(sin(p) * 43758.5453123);
+}
+
+// Returns the distance to the closest Voronoi cell center
+float calculateVoronoiDistance(vec2 x) {
+    vec2 n = floor(x);
+    vec2 f = fract(x);
+
+    float minDist = 8.0;
+
+    // Check the 9 neighboring grid cells
+    for (int j = -1; j <= 1; j++) {
+        for (int i = -1; i <= 1; i++) {
+            vec2 g = vec2(float(i), float(j));
+            vec2 o = hash22(n + g); // Jitter the center
+            vec2 r = g + o - f;
+            float d = dot(r, r); // Squared distance
+
+            if (d < minDist) {
+                minDist = d;
+            }
+        }
+    }
+    return sqrt(minDist);
 }
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
-    if (idx >= push.totalInstances) return;
+    if (idx >= pc.totalInstances) return;
 
-    GrassInstance inst = inData[idx];
-    vec3 pos = inst.position;
+    GrassInstance inst = inInstances[idx];
 
-    // 1. GPU Frustum Culling
+    // 1. Frustum Culling
     bool visible = true;
-    for (int i = 0; i < 6; i++) {
-        if (dot(push.frustumPlanes[i].xyz, pos) + push.frustumPlanes[i].w + 10.0 < 0.0) {
+    for (int i = 0; i < 6; ++i) {
+        if (dot(pc.frustumPlanes[i].xyz, inst.position) + pc.frustumPlanes[i].w + 3.0 < 0.0) { 
             visible = false;
             break;
         }
     }
+
     if (!visible) return;
 
-    // 2. Maximum Distance Cutoff (tied directly to UI settings)
-    float dist = length(pos - push.cameraPos);
-    if (dist > push.fadeEnd) return;
+    // 2. VORONOI CLUMPING
+    // Multiply by frequency. 0.08 means clumps are roughly 12.5 meters wide.
+    float distToClumpCenter = calculateVoronoiDistance(inst.position.xz * 0.08);
+    
+    // clumpMask: 1.0 at the center of the patch, 0.0 at the edges
+    float clumpMask = smoothstep(0.85, 0.2, distToClumpCenter);
 
-    // 3. Distance-Based Density Thinning
-    // Start thinning out at 40% of the UI fadeStart distance (e.g. 240 units if fadeStart is 600)
-    float thinStart = push.fadeStart * 0.4; 
-
-    if (dist > thinStart) {
-        float t = clamp((dist - thinStart) / (push.fadeEnd - thinStart), 0.0, 1.0);
-
-        float horizonFade = smoothstep(0.85, 1.0, t);
-        float survivalProbability = mix(1.0, 0.0, t); 
-        
-        survivalProbability *= (1.0 - horizonFade);
-
-        if (hash(idx) > survivalProbability) {
-            return;
-        }
+    // Hard cull grass that falls in the empty spaces between Voronoi cells
+    if (clumpMask < 0.05) {
+        return; 
     }
 
-    // 4. Passed all tests! Add to the draw buffer.
-    uint outIdx = atomicAdd(cmd.instanceCount, 1);
-    outData[outIdx] = inst;
+    // Taper the height of the grass so it grows shorter near the edges of the clump
+    // Base height is preserved at 50%, and the remaining 50% scales with the mask
+    inst.scale.y *= 0.5 + (clumpMask * 0.5);
+
+    // 3. Ghost Recon Distance & Density Scaling
+    float dist = distance(inst.position, pc.cameraPos);
+    if (dist > pc.fadeEnd) return;
+
+    float fadeFactor = clamp((dist - pc.fadeStart) / (pc.fadeEnd - pc.fadeStart), 0.0, 1.0);
+    float randomVal = fract(sin(float(idx) * 12.9898 + inst.position.x) * 43758.5453);
+
+    // Survival relies on BOTH distance and clump placement.
+    // Even close to the camera, we thin out the grass at the clump edges.
+    float survivalThreshold = (1.0 - (fadeFactor * 0.85)) * clumpMask; 
+    if (randomVal > survivalThreshold) {
+        return;
+    }
+
+    // Make the survivors wider to cover the empty space left by dropped grass
+    inst.scale.x *= 1.0 + (fadeFactor * 2.5); 
+    inst.scale.z *= 1.0 + (fadeFactor * 2.5);
+
+    // 4. Write survivor to output buffers
+    uint outIdx = atomicAdd(drawCmd.instanceCount, 1);
+    outInstances[outIdx] = inst;
 
     if (outIdx == 0) {
-        cmd.vertexCount = push.vertexCount;
-        cmd.firstVertex = 0;
-        cmd.firstInstance = 0;
+        drawCmd.vertexCount = pc.vertexCount;
+        drawCmd.firstVertex = 0;
+        drawCmd.firstInstance = 0;
     }
 }

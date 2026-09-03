@@ -17,6 +17,7 @@ void Settings::LoadFromFile(const std::string& path) {
         if (!(iss >> key >> value)) continue;
 
         if (key == "renderDistance") renderDistance = std::stof(value);
+        else if (key == "chunkSize") chunkSize = std::stof(value);
         else if (key == "enableDRS") enableDRS = (value == "true" || value == "1");
         else if (key == "targetFPS") targetFPS = std::stof(value);
         else if (key == "renderScale") renderScale = std::stof(value);
@@ -34,6 +35,7 @@ void Settings::LoadFromFile(const std::string& path) {
         else if (key == "anisotropicFiltering") anisotropicFiltering = (value == "true" || value == "1");
         else if (key == "maxAnisotropy") maxAnisotropy = std::stof(value);
         else if (key == "msaaSamples") msaaSamples = std::stoi(value);
+        else if (key == "framesInFlight") framesInFlight = std::stoi(value);
         else if (key == "showStats") showStats = (value == "true" || value == "1");
         else if (key == "timeScale") timeScale = std::stof(value);
         else if (key == "windowWidth") windowWidth = std::stoi(value);
@@ -47,6 +49,7 @@ void Settings::SaveToFile(const std::string& path) const {
     if (!file) return;
     file << "# Settings file\n";
     file << "renderDistance " << renderDistance << "\n";
+    file << "chunkSize " << chunkSize << "\n";
     file << "enableDRS " << (enableDRS ? "true" : "false") << "\n";
     file << "targetFPS " << targetFPS << "\n";
     file << "renderScale " << renderScale << "\n";
@@ -64,6 +67,7 @@ void Settings::SaveToFile(const std::string& path) const {
     file << "anisotropicFiltering " << (anisotropicFiltering ? "true" : "false") << "\n";
     file << "maxAnisotropy " << maxAnisotropy << "\n";
     file << "msaaSamples " << msaaSamples << "\n";
+    file << "framesInFlight " << framesInFlight << "\n";
     file << "showStats " << (showStats ? "true" : "false") << "\n";
     file << "timeScale " << timeScale << "\n";
     file << "windowWidth " << windowWidth << "\n";

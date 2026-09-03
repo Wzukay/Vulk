@@ -9,11 +9,10 @@
 #include <type_traits>
 #include <memory>
 #include <stdexcept>
-#include <atomic> // 🚀 Added for tracking active tasks safely
 
 class ThreadPool {
 public:
-    ThreadPool(size_t threads) : stop(false), active_tasks(0) { // 🚀 Initialize counter
+    ThreadPool(size_t threads) : stop(false), active_tasks(0) {
         for (size_t i = 0; i < threads; ++i) {
             workers.emplace_back([this] {
                 for (;;) {
@@ -30,14 +29,18 @@ public:
 
                         task = std::move(this->tasks.front());
                         this->tasks.pop();
+
+                        // Safely track that a worker has begun processing
+                        this->active_tasks++;
                     }
 
                     task(); // Execute the chunk generation job
 
-                    // 🚀 Task complete: Decrement and notify WaitForAll if we hit zero
                     {
-                        std::lock_guard<std::mutex> lock(this->queue_mutex);
-                        if (--active_tasks == 0) {
+                        std::unique_lock<std::mutex> lock(this->queue_mutex);
+                        this->active_tasks--;
+                        // Only notify if NO tasks are running AND the queue is empty
+                        if (this->active_tasks == 0 && this->tasks.empty()) {
                             this->wait_condition.notify_all();
                         }
                     }
@@ -62,8 +65,6 @@ public:
             if (stop) {
                 throw std::runtime_error("Enqueue requested on a stopped ThreadPool");
             }
-
-            active_tasks++; // 🚀 Increment counter when a job is queued
             tasks.emplace([task]() { (*task)(); });
         }
         condition.notify_one();
@@ -83,11 +84,10 @@ public:
         }
     }
 
-    // 🚀 Completely redesigned to accurately block until ALL threads are idle
     void WaitForAll() {
         std::unique_lock<std::mutex> lock(queue_mutex);
         wait_condition.wait(lock, [this]() {
-            return active_tasks == 0;
+            return active_tasks == 0 && tasks.empty();
             });
     }
 
@@ -97,7 +97,7 @@ private:
 
     std::mutex queue_mutex;
     std::condition_variable condition;
-    std::condition_variable wait_condition; // 🚀 Separate condition variable for synchronization
-    std::atomic<size_t> active_tasks;        // 🚀 Keeps track of queued/running tasks
+    std::condition_variable wait_condition;
+    size_t active_tasks; // Safely protected by queue_mutex     
     bool stop;
 };

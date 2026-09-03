@@ -46,7 +46,8 @@ public:
 
 private:
     static constexpr uint32_t MAX_TERRAIN_CHUNKS = 1024;
-    static constexpr uint32_t FRAMES_IN_FLIGHT = 3;
+    static constexpr uint32_t MAX_FRAMES_IN_FLIGHT = 3;
+    uint32_t m_framesInFlight = 3;
 
     float m_chunkSize = 512.0f;
 
@@ -66,14 +67,14 @@ private:
     VkDescriptorPool m_computeDescriptorPool = VK_NULL_HANDLE;
 
     // Per-frame compute buffers
-    std::array<VkDescriptorSet, FRAMES_IN_FLIGHT> m_computeDescriptorSets = { VK_NULL_HANDLE };
-    std::array<VkBuffer, FRAMES_IN_FLIGHT> m_chunkDataBuffers = { VK_NULL_HANDLE };
-    std::array<VkDeviceMemory, FRAMES_IN_FLIGHT> m_chunkDataMemories = { VK_NULL_HANDLE };
-    std::array<VkBuffer, FRAMES_IN_FLIGHT> m_indirectCommandBuffers = { VK_NULL_HANDLE };
-    std::array<VkDeviceMemory, FRAMES_IN_FLIGHT> m_indirectCommandMemories = { VK_NULL_HANDLE };
-    std::array<VkBuffer, FRAMES_IN_FLIGHT> m_drawCountBuffers = { VK_NULL_HANDLE };
-    std::array<VkDeviceMemory, FRAMES_IN_FLIGHT> m_drawCountMemories = { VK_NULL_HANDLE };
-    std::array<TerrainChunkGPUData*, FRAMES_IN_FLIGHT> m_chunkDataMappedPtrs = { nullptr };
+    std::array<VkDescriptorSet, MAX_FRAMES_IN_FLIGHT> m_computeDescriptorSets = { VK_NULL_HANDLE };
+    std::array<VkBuffer, MAX_FRAMES_IN_FLIGHT> m_chunkDataBuffers = { VK_NULL_HANDLE };
+    std::array<VkDeviceMemory, MAX_FRAMES_IN_FLIGHT> m_chunkDataMemories = { VK_NULL_HANDLE };
+    std::array<VkBuffer, MAX_FRAMES_IN_FLIGHT> m_indirectCommandBuffers = { VK_NULL_HANDLE };
+    std::array<VkDeviceMemory, MAX_FRAMES_IN_FLIGHT> m_indirectCommandMemories = { VK_NULL_HANDLE };
+    std::array<VkBuffer, MAX_FRAMES_IN_FLIGHT> m_drawCountBuffers = { VK_NULL_HANDLE };
+    std::array<VkDeviceMemory, MAX_FRAMES_IN_FLIGHT> m_drawCountMemories = { VK_NULL_HANDLE };
+    std::array<TerrainChunkGPUData*, MAX_FRAMES_IN_FLIGHT> m_chunkDataMappedPtrs = { nullptr };
 
     uint32_t m_cullChunkCount = 0;
 

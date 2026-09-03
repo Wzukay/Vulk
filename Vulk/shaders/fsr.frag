@@ -13,28 +13,30 @@ layout(push_constant) uniform FSRPushConstants {
     vec4 Const3;
     float sharpness;
     uint enableSSAO;
-    vec2 _pad;
+    vec2 renderScale;
 } pc;
 
 void main() {
     vec2 texSize = vec2(textureSize(sceneTexture, 0));
-    vec2 invTexSize = 1.0 / texSize;
+    vec2 invTexSize = 1.0 / texSize; // Step size is exactly 1 physical pixel
+    
+    vec2 activeUV = fragUV * pc.renderScale;
     
     vec3 finalRGB;
-    float alpha = texture(sceneTexture, fragUV).a;
+    float alpha = texture(sceneTexture, activeUV).a;
 
     // Skip sharpening if turned off
     if (pc.sharpness <= 0.0) {
-        finalRGB = texture(sceneTexture, fragUV).rgb;
+        finalRGB = texture(sceneTexture, activeUV).rgb;
     } else {
         // 1. Clean Bicubic/Linear Upscale fetch
-        vec3 c = texture(sceneTexture, fragUV).rgb;
+        vec3 c = texture(sceneTexture, activeUV).rgb;
 
-        // 2. RCAS - Sample surrounding pixels safely
-        vec3 b = texture(sceneTexture, fragUV + vec2( 0.0, -invTexSize.y)).rgb;
-        vec3 l = texture(sceneTexture, fragUV + vec2(-invTexSize.x,  0.0)).rgb;
-        vec3 r = texture(sceneTexture, fragUV + vec2( invTexSize.x,  0.0)).rgb;
-        vec3 t = texture(sceneTexture, fragUV + vec2( 0.0,  invTexSize.y)).rgb;
+        // 2. RCAS - Sample surrounding pixels safely using physical pixel steps
+        vec3 b = texture(sceneTexture, activeUV + vec2( 0.0, -invTexSize.y)).rgb;
+        vec3 l = texture(sceneTexture, activeUV + vec2(-invTexSize.x,  0.0)).rgb;
+        vec3 r = texture(sceneTexture, activeUV + vec2( invTexSize.x,  0.0)).rgb;
+        vec3 t = texture(sceneTexture, activeUV + vec2( 0.0,  invTexSize.y)).rgb;
 
         // Constrain sharpening limits to prevent glowing edge artifacts
         vec3 mn = min(min(min(b, l), r), t);
@@ -53,7 +55,7 @@ void main() {
 
     // Multiply the contact shadows into the scene before hitting the swapchain
     if (pc.enableSSAO == 1) {
-        float ssaoShadow = texture(ssaoMap, fragUV).r;
+        float ssaoShadow = texture(ssaoMap, activeUV).r;
         finalRGB *= ssaoShadow;
     }
 

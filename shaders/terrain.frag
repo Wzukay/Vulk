@@ -1,0 +1,147 @@
+#version 450
+#extension GL_EXT_nonuniform_qualifier : require
+#include "common_structures.glsl"
+
+struct Light {
+    vec4 positionOrDir;
+    vec4 color;
+    vec4 params;
+};
+
+layout(std430, binding = 1) readonly buffer LightBuffer {
+    Light lights[];
+} lightBuffer;
+
+layout(binding = 2) uniform sampler2D globalTextures[];
+layout(binding = 3) uniform sampler2D normalTextures[];
+
+layout(location = 0) in vec3 fragNormal;
+layout(location = 1) in vec2 fragTexCoord;
+layout(location = 2) flat in uint fragTextureId;
+layout(location = 3) in vec3 fragWorldPos;
+layout(location = 4) in vec3 fragTangent;
+layout(location = 5) in float fragTangentHandedness;
+layout(location = 6) flat in uint fragNormalTextureId;
+layout(location = 7) in vec3 fragColor; // Splat weights (r=sand, g=grass, b=rock)
+
+layout(location = 0) out vec4 outColor;
+
+const float PI = 3.14159265359;
+
+vec4 TriplanarSample(uint textureId, vec3 pos, vec3 weights) {
+    vec4 result = vec4(0.0);
+    // Dynamic branching skips memory reads if the axis weight is visually zero
+    if (weights.x > 0.001) result += texture(globalTextures[textureId], pos.yz) * weights.x;
+    if (weights.y > 0.001) result += texture(globalTextures[textureId], pos.xz) * weights.y;
+    if (weights.z > 0.001) result += texture(globalTextures[textureId], pos.xy) * weights.z;
+    return result;
+}
+
+// 1. UnpackNormal MUST be defined first
+vec3 UnpackNormal(vec4 sampledNormal) {
+    // Extract Red (X) and Green (Y) and transform from [0, 1] texture space to [-1, 1] simulation space
+    vec2 normalXY = sampledNormal.rg * 2.0 - 1.0;
+    // Mathematically derive Z component based on geometric unit vector length constraints
+    float normalZ = sqrt(max(0.0, 1.0 - dot(normalXY, normalXY)));
+    return vec3(normalXY, normalZ);
+}
+
+// 2. Now TriplanarSampleNormal can safely call UnpackNormal
+vec3 TriplanarSampleNormal(uint textureId, vec3 pos, vec3 weights) {
+    vec3 result = vec3(0.0);
+    if (weights.x > 0.001) result += UnpackNormal(texture(normalTextures[textureId], pos.yz)) * weights.x;
+    if (weights.y > 0.001) result += UnpackNormal(texture(normalTextures[textureId], pos.xz)) * weights.y;
+    if (weights.z > 0.001) result += UnpackNormal(texture(normalTextures[textureId], pos.xy)) * weights.z;
+    return result;
+}
+
+vec3 FresnelSchlick(float cosTheta, vec3 F0) { return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0); }
+
+float DistributionGGX(vec3 N, vec3 H, float roughness) {
+    float a = roughness * roughness;
+    float a2 = a * a;
+    float NdotH = max(dot(N, H), 0.0);
+    float denom = (NdotH * NdotH * (a2 - 1.0) + 1.0);
+    return a2 / max(PI * denom * denom, 0.0000001);
+}
+
+float GeometrySchlickGGX(float NdotV, float roughness) {
+    float r = (roughness + 1.0);
+    float k = (r * r) / 8.0;
+    return NdotV / (NdotV * (1.0 - k) + k);
+}
+
+float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
+    return GeometrySchlickGGX(max(dot(N, L), 0.0), roughness) * GeometrySchlickGGX(max(dot(N, V), 0.0), roughness);
+}
+
+vec3 CalcPBR(vec3 N, vec3 V, vec3 L, vec3 lightColor, vec3 albedo, float roughness, float metallic) {
+    vec3 H = normalize(V + L);
+    vec3 F0 = mix(vec3(0.04), albedo, metallic);
+
+    vec3 F = FresnelSchlick(max(dot(H, V), 0.0), F0);       
+    vec3 specular = (DistributionGGX(N, H, roughness) * GeometrySmith(N, V, L, roughness) * F) / (4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001);
+    
+    vec3 kD = (vec3(1.0) - F) * (1.0 - metallic); 
+    return (kD * albedo / PI + specular) * lightColor * max(dot(N, L), 0.0);
+}
+
+void main() {
+    float ao = 1.0;
+    float roughness = 0.8;
+    float metallic = 0.0;
+
+    // 1. Calculate Triplanar Weights (steepness/normal direction)
+    vec3 blendWeights = abs(fragNormal);
+    blendWeights /= (blendWeights.x + blendWeights.y + blendWeights.z);
+
+    // 2. Blend Albedo Maps based on splat map configuration
+    vec4 albedo = vec4(0.0);
+
+    if (fragColor.r > 0.01) {
+        albedo += texture(globalTextures[0], fragTexCoord) * fragColor.r;
+    }
+    if (fragColor.g > 0.01) {
+        albedo += texture(globalTextures[1], fragTexCoord) * fragColor.g;
+    }
+    if (fragColor.b > 0.01) {
+        albedo += TriplanarSample(2, fragWorldPos * 0.05, blendWeights) * fragColor.b;
+    }
+
+    // 3. Normal Mapping Reconstruction & Blending
+    vec3 N_geo = normalize(fragNormal);
+    vec3 T = normalize(fragTangent);
+    T = normalize(T - N_geo * dot(N_geo, T)); 
+    vec3 B = cross(N_geo, T) * fragTangentHandedness;
+    mat3 TBN = mat3(T, B, N_geo);
+
+    // Unpack compressed BC5/BC7 texture layers
+    vec3 nSand  = UnpackNormal(texture(normalTextures[0], fragTexCoord));
+    vec3 nGrass = UnpackNormal(texture(normalTextures[1], fragTexCoord));
+    // Triplanar sample Rock normal map to match albedo mapping layouts and fix cliff textures
+    vec3 nRock  = TriplanarSampleNormal(2, fragWorldPos * 0.05, blendWeights);
+    
+    vec3 blendedNormal = (nSand * fragColor.r) + (nGrass * fragColor.g) + (nRock * fragColor.b);
+    vec3 N = normalize(TBN * blendedNormal);
+
+    // 4. Lighting Loop
+    vec3 V = normalize(ubo.cameraPos - fragWorldPos);
+    vec3 result = ubo.ambient * albedo.xyz;
+
+    for (uint i = 0u; i < ubo.lightCount; ++i) {
+        Light L = lightBuffer.lights[i];
+        vec3 lightVec = normalize(L.positionOrDir.xyz - (L.positionOrDir.w > 0.5 ? fragWorldPos : vec3(0.0)));
+        float atten = (L.positionOrDir.w > 0.5) ? (1.0 / length(L.positionOrDir.xyz - fragWorldPos)) : 1.0;
+        
+        result += CalcPBR(N, V, lightVec, L.color.rgb * L.color.a * atten, albedo.xyz, roughness, metallic);
+    }
+
+    float dist = length(ubo.cameraPos - fragWorldPos);
+    float fogFactor = clamp((dist - ubo.fogStart) / (ubo.fogEnd - ubo.fogStart), 0.0, 1.0);
+    if (dist > ubo.fogEnd) fogFactor = 1.0;
+    
+    vec3 fogColor = vec3(0.6, 0.7, 0.8);
+    vec3 finalColor = mix(result, fogColor, fogFactor);
+
+    outColor = vec4(finalColor, 1.0);
+}

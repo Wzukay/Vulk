@@ -57,12 +57,14 @@ struct SSAOPushConstants {
     glm::vec2 screenSize;
     float radius;
     float bias;
+    glm::vec2 renderScale;
 };
 struct SSAOBlurPushConstants {
     glm::vec2 screenSize;
     glm::vec2 blurDirection;
     float colorSigma;
     float spatialSigma;
+    glm::vec2 renderScale;
 };
 struct FSRConstants {
     glm::vec4 const0;
@@ -71,7 +73,7 @@ struct FSRConstants {
     glm::vec4 const3;
     float sharpness;
     uint32_t enableSSAO;
-    float _pad[2];
+    glm::vec2 renderScale;
 };
 
 struct RenderTarget {

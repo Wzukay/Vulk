@@ -1,6 +1,8 @@
 #include "renderer_static.h"
 #include "renderer.h"
 #include "asset_manager.h"
+#include "settings.h"
+
 #include <iostream>
 #include <algorithm>
 #include <unordered_set>
@@ -9,6 +11,8 @@
 void StaticMeshRenderer::Init(VkDevice device, VulkanRenderer* renderer) {
     m_device = device;
     m_renderer = renderer;
+
+    m_framesInFlight = std::min(MAX_FRAMES_IN_FLIGHT_COUNT, m_framesInFlight);
 
     m_maxVertices = MAX_GLOBAL_VERTICES;
     m_maxIndices = MAX_GLOBAL_INDICES;
@@ -22,23 +26,29 @@ void StaticMeshRenderer::Init(VkDevice device, VulkanRenderer* renderer) {
     m_renderer->CreateBuffer(indexSize, VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_indexBuffer, m_indexMemory);
 
-    // Provision the Instance Buffer (Host Visible for high-speed CPU memory mapping)
-    constexpr VkDeviceSize FRAMES_IN_FLIGHT = 3;
-    VkDeviceSize totalInstanceBytes = sizeof(InstanceData) * m_maxInstances * FRAMES_IN_FLIGHT;
+    const VkDeviceSize totalInstanceBytes = sizeof(InstanceData) * m_maxInstances * m_framesInFlight;
     m_renderer->CreateBuffer(totalInstanceBytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         m_instanceBuffer, m_instanceMemory);
+
+    vkMapMemory(m_device, m_instanceMemory, 0, VK_WHOLE_SIZE, 0, reinterpret_cast<void**>(&m_mappedInstanceData));
 
     std::cout << "[StaticMeshRenderer] Initialized geometry pools and Instancing Pipeline.\n";
 }
 
 void StaticMeshRenderer::Cleanup() {
-    for (size_t i = 0; i < FRAMES_IN_FLIGHT_COUNT; ++i) {
+    if (m_mappedInstanceData != nullptr) {
+        vkUnmapMemory(m_device, m_instanceMemory);
+        m_mappedInstanceData = nullptr;
+    }
+
+    for (size_t i = 0; i < m_framesInFlight; ++i) {
         if (m_queryPools[i] != VK_NULL_HANDLE) {
             vkDestroyQueryPool(m_device, m_queryPools[i], nullptr);
             m_queryPools[i] = VK_NULL_HANDLE;
         }
     }
+
     m_renderer->DestroyBuffer(m_vertexBuffer, m_vertexMemory);
     m_renderer->DestroyBuffer(m_indexBuffer, m_indexMemory);
     m_renderer->DestroyBuffer(m_instanceBuffer, m_instanceMemory);
@@ -156,10 +166,24 @@ void StaticMeshRenderer::UpdateScene(const Scene& scene) {
 
             // Calculate the 512x512 mathematical bounds of the chunk dynamically
             if (bucket.chunkRadius == 0.0f) {
-                int cx = static_cast<int>(inst.chunkKey >> 32);
-                int cz = static_cast<int>(inst.chunkKey & 0xFFFFFFFF);
-                bucket.chunkCenter = glm::vec3(cx * 512.0f + 256.0f, 0.0f, cz * 512.0f + 256.0f);
-                bucket.chunkRadius = 512.0f * 1.41421356f * 0.5f; // Math hypotenuse for box radius
+                const int32_t cx = static_cast<int32_t>(inst.chunkKey >> 32);
+                const int32_t cz = static_cast<int32_t>(
+                    static_cast<uint32_t>(inst.chunkKey));
+
+                const float halfChunk = m_chunkSize * 0.5f;
+                const float horizontalRadius =
+                    m_chunkSize * 1.41421356f * 0.5f;
+
+                constexpr float verticalMargin = 250.0f;
+
+                bucket.chunkCenter = glm::vec3(
+                    static_cast<float>(cx) * m_chunkSize + halfChunk,
+                    verticalMargin * 0.5f,
+                    static_cast<float>(cz) * m_chunkSize + halfChunk);
+
+                bucket.chunkRadius = std::sqrt(
+                    horizontalRadius * horizontalRadius +
+                    verticalMargin * verticalMargin);
             }
         }
         else {
@@ -197,7 +221,8 @@ void StaticMeshRenderer::Draw(VkCommandBuffer commandBuffer, VkPipelineLayout pi
     VkPipeline staticPipeline, VkPipeline instancedPipeline,
     uint32_t& outDrawCalls, uint32_t& outCulledCount,
     uint32_t& outVertexCount, uint32_t& outIndexCount) {
-    
+
+    // 1. NON-INSTANCED STATIC MESHES
     if (!m_staticDrawList.empty()) {
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, staticPipeline);
 
@@ -214,7 +239,8 @@ void StaticMeshRenderer::Draw(VkCommandBuffer commandBuffer, VkPipelineLayout pi
             float worldRadius = sub.boundingRadiusLocal * entry.cachedMaxScale;
 
             if (!m_renderer->IsWorldSphereInFrustum(worldCenter, worldRadius)) {
-                outCulledCount++; continue;
+                outCulledCount++;
+                continue;
             }
 
             PushConstants constants{};
@@ -225,28 +251,33 @@ void StaticMeshRenderer::Draw(VkCommandBuffer commandBuffer, VkPipelineLayout pi
 
             vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &constants);
             vkCmdDrawIndexed(commandBuffer, sub.indexCount, 1, sub.firstIndex, sub.vertexOffset, 0);
-            outDrawCalls++; outVertexCount += sub.indexCount; outIndexCount += sub.indexCount;
+
+            outDrawCalls++;
+            outVertexCount += sub.indexCount;
+            outIndexCount += sub.indexCount;
         }
     }
 
-    // 2. HARDWARE INSTANCED MESHES (Forests, Foliage)
+    // 2. HARDWARE INSTANCED MESHES (Trees, Rocks, Foliage)
     if (!m_instancedGroups.empty()) {
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, instancedPipeline);
-
-        VkBuffer vertexBuffers[] = { m_vertexBuffer, m_instanceBuffer };
 
         VkDeviceSize frameInstanceStride = sizeof(InstanceData) * m_maxInstances;
         VkDeviceSize frameByteOffset = currentFrameIndex * frameInstanceStride;
 
+        VkBuffer vertexBuffers[] = { m_vertexBuffer, m_instanceBuffer };
         VkDeviceSize offsets[] = { 0, frameByteOffset };
         vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, offsets);
         vkCmdBindIndexBuffer(commandBuffer, m_indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
-        InstanceData* mappedData;
-        vkMapMemory(m_device, m_instanceMemory, frameByteOffset, frameInstanceStride, 0, (void**)&mappedData);
+        // Directly use the persistently mapped memory offset for this frame
+        InstanceData* frameInstances = reinterpret_cast<InstanceData*>(
+            reinterpret_cast<uint8_t*>(m_mappedInstanceData) + frameByteOffset
+            );
 
         uint32_t currentInstanceOffset = 0;
-        const float maxFoliageDistSq = 4000.0f * 4000.0f;
+        const float maxFoliageDistance = g_Settings.GetStaticFadeEnd();
+        const float maxFoliageDistSq = maxFoliageDistance * maxFoliageDistance;
 
         for (const auto& pair : m_instancedGroups) {
             const std::string& meshName = pair.first;
@@ -258,25 +289,40 @@ void StaticMeshRenderer::Draw(VkCommandBuffer commandBuffer, VkPipelineLayout pi
 
                 if (!m_renderer->IsWorldSphereInFrustum(bucket.chunkCenter, bucket.chunkRadius)) {
                     outCulledCount += static_cast<uint32_t>(bucket.transforms.size());
-                    continue; 
+                    continue;
                 }
 
                 uint32_t visibleCount = 0;
 
                 for (const auto& transform : bucket.transforms) {
-                    glm::vec3 pos = glm::vec3(transform[3]);
+                    const glm::vec3 position = glm::vec3(transform[3]);
 
-                    if (glm::distance2(pos, cameraPos) > maxFoliageDistSq) {
-                        outCulledCount++;
+                    if (glm::distance2(position, cameraPos) > maxFoliageDistSq) {
+                        ++outCulledCount;
+                        continue;
+                    }
+
+                    const float maxScale = std::max({
+                        glm::length(glm::vec3(transform[0])),
+                        glm::length(glm::vec3(transform[1])),
+                        glm::length(glm::vec3(transform[2]))
+                        });
+
+                    const float instanceRadius = alloc.maxBoundingRadius * maxScale;
+
+                    if (!m_renderer->IsWorldSphereInFrustum(position, instanceRadius)) {
+                        ++outCulledCount;
                         continue;
                     }
 
                     if (currentInstanceOffset + visibleCount >= m_maxInstances) {
+                        outCulledCount += static_cast<uint32_t>(bucket.transforms.size() - visibleCount);
                         break;
                     }
 
-                    mappedData[currentInstanceOffset + visibleCount].modelMatrix = transform;
-                    visibleCount++;
+                    frameInstances[currentInstanceOffset + visibleCount].modelMatrix = transform;
+                    frameInstances[currentInstanceOffset + visibleCount].customData = glm::vec4(0.0f);
+                    ++visibleCount;
                 }
 
                 if (visibleCount > 0) {
@@ -284,9 +330,11 @@ void StaticMeshRenderer::Draw(VkCommandBuffer commandBuffer, VkPipelineLayout pi
                         PushConstants constants{};
                         constants.textureId = sub.textureId;
                         constants.normalTextureId = sub.normalTextureId;
-                        vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &constants);
+                        constants.ormTextureId = sub.ormTextureId;
 
+                        vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &constants);
                         vkCmdDrawIndexed(commandBuffer, sub.indexCount, visibleCount, sub.firstIndex + alloc.firstIndex, sub.vertexOffset + alloc.vertexOffset, currentInstanceOffset);
+
                         outDrawCalls++;
                         outVertexCount += (sub.indexCount * visibleCount);
                         outIndexCount += (sub.indexCount * visibleCount);
@@ -295,6 +343,5 @@ void StaticMeshRenderer::Draw(VkCommandBuffer commandBuffer, VkPipelineLayout pi
                 }
             }
         }
-        vkUnmapMemory(m_device, m_instanceMemory);
     }
 }

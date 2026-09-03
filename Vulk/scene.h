@@ -27,6 +27,9 @@ public:
 
     // Call this whenever chunks load or unload to rebuild the renderer arrays!
     void MarkDirty() const { m_isDirty = true; }
+    bool NeedsRendererUpdate() const {
+        return m_isDirty;
+    }
 
     void AddInstance(const std::string& meshName, const glm::mat4& transform, uint32_t objectId) {
         Entity entity = m_registry.CreateEntity();
@@ -51,15 +54,13 @@ public:
         std::vector<Entity> toDestroy;
 
         for (Entity e : chunkProps) {
-            if (m_registry.GetComponent<ChunkPropComponent>(e).chunkKey == key) {
-                toDestroy.push_back(e);
-            }
+            if (m_registry.GetComponent<ChunkPropComponent>(e).chunkKey == key) toDestroy.push_back(e);
         }
 
-        for (Entity e : toDestroy) {
-            m_registry.DestroyEntity(e);
-        }
-        m_isDirty = true; // Force renderer rebuild when chunk dies
+        if (toDestroy.empty()) return;
+
+        for (Entity e : toDestroy) m_registry.DestroyEntity(e);
+        m_isDirty = true;
     }
 
     const std::vector<MeshInstance>& GetInstances() const {

@@ -5,6 +5,7 @@
 struct Settings {
     // --- Rendering ---
     float renderDistance = 5000.0f;
+    float chunkSize = 512.0f;
     bool enableDRS = false;
     int targetFPS = 60;
     float renderScale = 0.75f;
@@ -16,6 +17,7 @@ struct Settings {
     bool anisotropicFiltering = true;
     float maxAnisotropy = 16.0f;
     int msaaSamples = 4;
+    int framesInFlight = 3;
 
     // --- World & LOD Distances (Normalized Ratios 0.0 to 1.0) ---
     float fogStartRatio = 0.70f;        // 70% of renderDistance
@@ -26,14 +28,6 @@ struct Settings {
 
     float grassFadeStartRatio = 0.08f;  // 8% of renderDistance
     float grassFadeEndRatio = 0.12f;    // 12% of renderDistance
-
-    // Helper getters for the engine to retrieve absolute world-space distances
-    float GetFogStart() const { return renderDistance * fogStartRatio; }
-    float GetFogEnd() const { return renderDistance * fogEndRatio; }
-    float GetStaticFadeStart() const { return renderDistance * staticFadeStartRatio; }
-    float GetStaticFadeEnd() const { return renderDistance * staticFadeEndRatio; }
-    float GetGrassFadeStart() const { return renderDistance * grassFadeStartRatio; }
-    float GetGrassFadeEnd() const { return renderDistance * grassFadeEndRatio; }
 
     // --- Debug ---
     bool showStats = true;
@@ -46,6 +40,13 @@ struct Settings {
 
     void LoadFromFile(const std::string& path = "settings.ini");
     void SaveToFile(const std::string& path = "settings.ini") const;
+
+    float GetFogStart() const { return renderDistance * fogStartRatio; }
+    float GetFogEnd() const { return renderDistance * fogEndRatio; }
+    float GetStaticFadeStart() const { return renderDistance * staticFadeStartRatio; }
+    float GetStaticFadeEnd() const { return renderDistance * staticFadeEndRatio; }
+    float GetGrassFadeStart() const { return renderDistance * grassFadeStartRatio; }
+    float GetGrassFadeEnd() const { return renderDistance * grassFadeEndRatio; }
 };
 
 // Global instance (accessible from anywhere)

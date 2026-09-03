@@ -7,10 +7,16 @@
 #include <glm/glm.hpp>
 
 class VulkanRenderer;
+class RingBufferUploader;
 
 struct BoidInstance {
     alignas(16) glm::vec4 position; // xyz: position, w: scale
     alignas(16) glm::vec4 velocity; // xyz: velocity, w: animation time
+};
+
+struct BoidGarbage {
+    VkDescriptorSet sets[2];
+    uint64_t safeFrame;
 };
 
 struct BoidComputeParams {
@@ -42,7 +48,11 @@ struct BoidSwarmGPU {
 
 class BoidRenderer {
 public:
-    void Init(VkDevice device, VulkanRenderer* renderer, VkFormat colorFormat, VkFormat depthFormat, VkDescriptorSetLayout sharedSetLayout, VkSampleCountFlagBits msaaSamples);
+    void Init(VkDevice device, VulkanRenderer* renderer,
+        RingBufferUploader* uploader,
+        VkFormat colorFormat, VkFormat depthFormat,
+        VkDescriptorSetLayout sharedSetLayout,
+        VkSampleCountFlagBits msaaSamples);
     void Cleanup();
 
     void AddSwarm(int64_t chunkKey, const std::vector<BoidInstance>& initialBoids, uint32_t textureId);
@@ -53,10 +63,9 @@ public:
     VkPipeline m_graphicsPipeline = VK_NULL_HANDLE;
 
 private:
-    struct BoidGarbage {
-        VkDescriptorSet sets[2];
-        uint64_t safeFrame;
-    };
+    RingBufferUploader* m_uploader = nullptr;
+    std::unordered_map<int64_t, std::shared_ptr<std::atomic_bool>> m_pendingUploads;
+
     std::vector<BoidGarbage> m_garbageSets;
 
     struct FreeSpan { uint32_t offset; uint32_t count; };

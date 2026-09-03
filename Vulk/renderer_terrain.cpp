@@ -13,6 +13,7 @@ void TerrainRenderer::Init(VkDevice device, VulkanRenderer* renderer,
     m_uploader = uploader;
     m_maxVertices = maxVertices;
     m_maxIndices = maxIndices;
+    m_framesInFlight = m_renderer->GetFramesInFlight();
 
     VkDeviceSize vertexSize = sizeof(ModelVertex) * maxVertices;
     VkDeviceSize indexSize = sizeof(uint32_t) * maxIndices;
@@ -31,7 +32,7 @@ void TerrainRenderer::Init(VkDevice device, VulkanRenderer* renderer,
     VkDeviceSize indirectSize = sizeof(VkDrawIndexedIndirectCommand) * MAX_TERRAIN_CHUNKS;
 
     // Allocate resources per frame-in-flight
-    for (uint32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
+    for (uint32_t i = 0; i < m_framesInFlight; i++) {
         m_renderer->CreateBuffer(chunkDataSize,
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
@@ -53,14 +54,14 @@ void TerrainRenderer::Init(VkDevice device, VulkanRenderer* renderer,
     CreateComputePipeline();
 
     VkDescriptorPoolSize poolSizes[2] = {};
-    poolSizes[0] = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3 * FRAMES_IN_FLIGHT };
-    poolSizes[1] = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, FRAMES_IN_FLIGHT };
+    poolSizes[0] = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3 * m_framesInFlight };
+    poolSizes[1] = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, m_framesInFlight };
 
-    VkDescriptorPoolCreateInfo poolInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, nullptr, 0, FRAMES_IN_FLIGHT, 2, poolSizes };
+    VkDescriptorPoolCreateInfo poolInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, nullptr, 0, m_framesInFlight, 2, poolSizes };
     vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_computeDescriptorPool);
 
-    std::vector<VkDescriptorSetLayout> layouts(FRAMES_IN_FLIGHT, m_computeDescriptorSetLayout);
-    VkDescriptorSetAllocateInfo allocInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, nullptr, m_computeDescriptorPool, FRAMES_IN_FLIGHT, layouts.data() };
+    std::vector<VkDescriptorSetLayout> layouts(m_framesInFlight, m_computeDescriptorSetLayout);
+    VkDescriptorSetAllocateInfo allocInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, nullptr, m_computeDescriptorPool, m_framesInFlight, layouts.data() };
     vkAllocateDescriptorSets(m_device, &allocInfo, m_computeDescriptorSets.data());
 
     UpdateComputeDescriptors();
@@ -89,7 +90,7 @@ void TerrainRenderer::Cleanup() {
         m_computeDescriptorPool = VK_NULL_HANDLE;
     }
 
-    for (uint32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
+    for (uint32_t i = 0; i < m_framesInFlight; i++) {
         if (m_chunkDataMappedPtrs[i] != nullptr) {
             vkUnmapMemory(m_device, m_chunkDataMemories[i]);
             m_chunkDataMappedPtrs[i] = nullptr;
@@ -166,7 +167,7 @@ void TerrainRenderer::RemoveTerrainChunk(int64_t key) {
 
     DeferSpanReturn({ it2->second.vertexOffset, it2->second.vertexCount },
         { it2->second.indexOffset, it2->second.indexCount },
-        m_renderer->GetFrameCounter() + 3);
+        m_renderer->GetFrameCounter() + m_renderer->GetFramesInFlight());
     m_terrainChunks.erase(it2);
 }
 
@@ -248,38 +249,129 @@ void TerrainRenderer::Draw(VkCommandBuffer commandBuffer, VkPipelineLayout pipel
 
 // ---- private methods ----
 
-std::pair<uint32_t, uint32_t> TerrainRenderer::AllocateSpace(uint32_t vertexCount, uint32_t indexCount) {
+std::pair<uint32_t, uint32_t> TerrainRenderer::AllocateSpace(
+    uint32_t vertexCount,
+    uint32_t indexCount)
+{
     std::lock_guard<std::mutex> lock(m_terrainAllocMutex);
 
-    auto vIt = std::find_if(m_freeVertexSpans.begin(), m_freeVertexSpans.end(),
-        [&](const FreeSpan& s) { return s.count >= vertexCount; });
-    auto iIt = std::find_if(m_freeIndexSpans.begin(), m_freeIndexSpans.end(),
-        [&](const FreeSpan& s) { return s.count >= indexCount; });
+    auto coalesceSpans = [](std::vector<FreeSpan>& spans) {
+        if (spans.empty()) {
+            return;
+        }
 
-    uint32_t vertexOffset, indexOffset;
+        std::sort(
+            spans.begin(),
+            spans.end(),
+            [](const FreeSpan& a, const FreeSpan& b) {
+                return a.offset < b.offset;
+            });
 
-    if (vIt != m_freeVertexSpans.end()) {
-        vertexOffset = vIt->offset;
-        m_freeVertexSpans.erase(vIt);
-    }
-    else {
-        uint32_t current = m_nextVertexOffset.fetch_add(vertexCount);
-        if (current + vertexCount > m_maxVertices) {
+        size_t writeIndex = 0;
+
+        for (size_t readIndex = 1;
+            readIndex < spans.size();
+            ++readIndex) {
+            FreeSpan& merged = spans[writeIndex];
+            const FreeSpan& candidate = spans[readIndex];
+
+            const uint64_t mergedEnd =
+                static_cast<uint64_t>(merged.offset) + merged.count;
+            const uint64_t candidateEnd =
+                static_cast<uint64_t>(candidate.offset) + candidate.count;
+
+            // Merge touching or overlapping ranges.
+            if (candidate.offset <= mergedEnd) {
+                const uint64_t newEnd =
+                    std::max(mergedEnd, candidateEnd);
+
+                merged.count = static_cast<uint32_t>(
+                    newEnd - merged.offset);
+            }
+            else {
+                ++writeIndex;
+                spans[writeIndex] = candidate;
+            }
+        }
+
+        spans.resize(writeIndex + 1);
+        };
+
+    coalesceSpans(m_freeVertexSpans);
+    coalesceSpans(m_freeIndexSpans);
+
+    auto vertexIt = std::find_if(
+        m_freeVertexSpans.begin(),
+        m_freeVertexSpans.end(),
+        [vertexCount](const FreeSpan& span) {
+            return span.count >= vertexCount;
+        });
+
+    auto indexIt = std::find_if(
+        m_freeIndexSpans.begin(),
+        m_freeIndexSpans.end(),
+        [indexCount](const FreeSpan& span) {
+            return span.count >= indexCount;
+        });
+
+    const uint32_t nextVertex =
+        m_nextVertexOffset.load(std::memory_order_relaxed);
+    const uint32_t nextIndex =
+        m_nextIndexOffset.load(std::memory_order_relaxed);
+
+    // Validate both allocations before changing either allocator state.
+    if (vertexIt == m_freeVertexSpans.end()) {
+        if (vertexCount > m_maxVertices ||
+            nextVertex > m_maxVertices - vertexCount) {
             throw std::runtime_error("Terrain vertex buffer overflow");
         }
-        vertexOffset = current;
     }
 
-    if (iIt != m_freeIndexSpans.end()) {
-        indexOffset = iIt->offset;
-        m_freeIndexSpans.erase(iIt);
-    }
-    else {
-        uint32_t current = m_nextIndexOffset.fetch_add(indexCount);
-        if (current + indexCount > m_maxIndices) {
+    if (indexIt == m_freeIndexSpans.end()) {
+        if (indexCount > m_maxIndices ||
+            nextIndex > m_maxIndices - indexCount) {
             throw std::runtime_error("Terrain index buffer overflow");
         }
-        indexOffset = current;
+    }
+
+    uint32_t vertexOffset = 0;
+
+    if (vertexIt != m_freeVertexSpans.end()) {
+        vertexOffset = vertexIt->offset;
+
+        if (vertexIt->count == vertexCount) {
+            m_freeVertexSpans.erase(vertexIt);
+        }
+        else {
+            vertexIt->offset += vertexCount;
+            vertexIt->count -= vertexCount;
+        }
+    }
+    else {
+        vertexOffset = nextVertex;
+        m_nextVertexOffset.store(
+            nextVertex + vertexCount,
+            std::memory_order_relaxed);
+    }
+
+    uint32_t indexOffset = 0;
+
+    if (indexIt != m_freeIndexSpans.end()) {
+        indexOffset = indexIt->offset;
+
+        if (indexIt->count == indexCount) {
+            m_freeIndexSpans.erase(indexIt);
+        }
+        else {
+            indexIt->offset += indexCount;
+            indexIt->count -= indexCount;
+        }
+    }
+    else {
+        indexOffset = nextIndex;
+        m_nextIndexOffset.store(
+            nextIndex + indexCount,
+            std::memory_order_relaxed);
     }
 
     return { vertexOffset, indexOffset };
@@ -289,25 +381,45 @@ void TerrainRenderer::DeferSpanReturn(const FreeSpan& vertexSpan, const FreeSpan
     m_pendingSpanReturns.Push({ vertexSpan, indexSpan }, safeFrame);
 }
 
-void TerrainRenderer::UploadTerrainChunkAsync(TerrainChunkGPU& chunk,
+void TerrainRenderer::UploadTerrainChunkAsync(
+    TerrainChunkGPU& chunk,
     const std::vector<ModelVertex>& verts,
-    const std::vector<uint32_t>& indices) {
-    VkDeviceSize vertexSize = sizeof(ModelVertex) * verts.size();
-    VkDeviceSize indexSize = sizeof(uint32_t) * indices.size();
+    const std::vector<uint32_t>& indices)
+{
+    const VkDeviceSize vertexSize =
+        sizeof(ModelVertex) * verts.size();
+    const VkDeviceSize indexSize =
+        sizeof(uint32_t) * indices.size();
 
-    if (vertexSize == 0 || indexSize == 0) return;
+    if (vertexSize == 0 || indexSize == 0) {
+        return;
+    }
 
-    auto [vOffset, iOffset] = AllocateSpace(static_cast<uint32_t>(verts.size()),
+    const auto [vertexOffset, indexOffset] = AllocateSpace(
+        static_cast<uint32_t>(verts.size()),
         static_cast<uint32_t>(indices.size()));
 
-    chunk.vertexOffset = vOffset;
-    chunk.indexOffset = iOffset;
+    chunk.vertexOffset = vertexOffset;
+    chunk.indexOffset = indexOffset;
     chunk.vertexCount = static_cast<uint32_t>(verts.size());
     chunk.indexCount = static_cast<uint32_t>(indices.size());
 
     std::vector<CopyRegion> regions;
-    regions.push_back({ verts.data(), vertexSize, m_vertexBuffer, vOffset * sizeof(ModelVertex) });
-    regions.push_back({ indices.data(), indexSize, m_indexBuffer, iOffset * sizeof(uint32_t) });
+    regions.reserve(2);
+
+    regions.push_back({
+        verts.data(),
+        vertexSize,
+        m_vertexBuffer,
+        static_cast<VkDeviceSize>(vertexOffset) * sizeof(ModelVertex)
+        });
+
+    regions.push_back({
+        indices.data(),
+        indexSize,
+        m_indexBuffer,
+        static_cast<VkDeviceSize>(indexOffset) * sizeof(uint32_t)
+        });
 
     auto chunkPtr = std::make_shared<TerrainChunkGPU>(chunk);
     auto keyPtr = std::make_shared<int64_t>(chunk.key);
@@ -315,24 +427,54 @@ void TerrainRenderer::UploadTerrainChunkAsync(TerrainChunkGPU& chunk,
 
     m_pendingFlags[chunk.key] = cancelledFlag;
 
-    m_uploader->QueueBatchUpload(regions, [this, chunkPtr, keyPtr, cancelledFlag]() {
-        m_pendingFlags.erase(*keyPtr);
+    m_uploader->QueueBatchUpload(
+        regions,
+        [this, chunkPtr, keyPtr, cancelledFlag]() {
+            auto pendingIt = m_pendingFlags.find(*keyPtr);
 
-        if (*cancelledFlag) {
-            std::lock_guard<std::mutex> lock(m_terrainAllocMutex);
-            m_freeVertexSpans.push_back({ chunkPtr->vertexOffset, chunkPtr->vertexCount });
-            m_freeIndexSpans.push_back({ chunkPtr->indexOffset, chunkPtr->indexCount });
-            return;
-        }
+            // Only this upload may remove its own pending-token entry.
+            const bool isCurrent =
+                pendingIt != m_pendingFlags.end() &&
+                pendingIt->second == cancelledFlag;
 
-        auto oldIt = m_terrainChunks.find(*keyPtr);
-        if (oldIt != m_terrainChunks.end()) {
-            DeferSpanReturn({ oldIt->second.vertexOffset, oldIt->second.vertexCount },
-                { oldIt->second.indexOffset, oldIt->second.indexCount },
-                m_renderer->GetFrameCounter() + 3);
-        }
-        chunkPtr->ready = true;
-        m_terrainChunks[*keyPtr] = *chunkPtr;
+            if (isCurrent) {
+                m_pendingFlags.erase(pendingIt);
+            }
+
+            // Old/cancelled uploads must never insert terrain after a newer
+            // upload or a chunk removal has replaced their token.
+            if (!isCurrent || *cancelledFlag) {
+                std::lock_guard<std::mutex> lock(m_terrainAllocMutex);
+
+                m_freeVertexSpans.push_back({
+                    chunkPtr->vertexOffset,
+                    chunkPtr->vertexCount
+                    });
+
+                m_freeIndexSpans.push_back({
+                    chunkPtr->indexOffset,
+                    chunkPtr->indexCount
+                    });
+
+                return;
+            }
+
+            auto oldIt = m_terrainChunks.find(*keyPtr);
+            if (oldIt != m_terrainChunks.end()) {
+                DeferSpanReturn(
+                    {
+                        oldIt->second.vertexOffset,
+                        oldIt->second.vertexCount
+                    },
+                    {
+                        oldIt->second.indexOffset,
+                        oldIt->second.indexCount
+                    },
+                    m_renderer->GetFrameCounter() + m_renderer->GetFramesInFlight());
+            }
+
+            chunkPtr->ready = true;
+            m_terrainChunks[*keyPtr] = *chunkPtr;
         });
 }
 
@@ -454,7 +596,7 @@ void TerrainRenderer::CreateComputePipeline() {
 }
 
 void TerrainRenderer::UpdateComputeDescriptors() {
-    for (uint32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
+    for (uint32_t i = 0; i < m_framesInFlight; i++) {
         VkDescriptorBufferInfo chunkInfo{ m_chunkDataBuffers[i], 0, sizeof(TerrainChunkGPUData) * MAX_TERRAIN_CHUNKS };
         VkDescriptorBufferInfo cmdInfo{ m_indirectCommandBuffers[i], 0, sizeof(VkDrawIndexedIndirectCommand) * MAX_TERRAIN_CHUNKS };
         VkDescriptorBufferInfo countInfo{ m_drawCountBuffers[i], 0, sizeof(uint32_t) };
@@ -469,7 +611,7 @@ void TerrainRenderer::UpdateComputeDescriptors() {
 }
 
 void TerrainRenderer::UpdateHZBDescriptor(VkImageView hzbView, VkSampler hzbSampler) {
-    for (uint32_t i = 0; i < FRAMES_IN_FLIGHT; i++) {
+    for (uint32_t i = 0; i < m_framesInFlight; i++) {
         VkDescriptorImageInfo hzbInfo{ hzbSampler, hzbView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
         VkWriteDescriptorSet write{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, m_computeDescriptorSets[i], 3, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &hzbInfo, nullptr, nullptr };
         vkUpdateDescriptorSets(m_device, 1, &write, 0, nullptr);

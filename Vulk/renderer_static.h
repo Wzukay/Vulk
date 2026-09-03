@@ -48,10 +48,17 @@ public:
         uint32_t& outDrawCalls, uint32_t& outCulledCount,
         uint32_t& outVertexCount, uint32_t& outIndexCount);
 
+    void SetChunkSize(float chunkSize) {
+        m_chunkSize = chunkSize;
+    }
+
 private:
     static constexpr VkDeviceSize MAX_GLOBAL_VERTICES = 5'000'000;
     static constexpr VkDeviceSize MAX_GLOBAL_INDICES = 10'000'000;
-    static constexpr uint32_t FRAMES_IN_FLIGHT_COUNT = 2;
+    static constexpr uint32_t MAX_FRAMES_IN_FLIGHT_COUNT = 3;
+    uint32_t m_framesInFlight = 3;
+
+    float m_chunkSize = 512.0f;
 
     VkDevice m_device = VK_NULL_HANDLE;
     VulkanRenderer* m_renderer = nullptr;
@@ -69,6 +76,8 @@ private:
     VkDeviceSize m_maxVertices = 0;
     VkDeviceSize m_maxIndices = 0;
 
+    InstanceData* m_mappedInstanceData = nullptr;
+
     // Deduplication tracking
     std::unordered_map<std::string, MeshBufferAllocation> m_meshAllocations;
     std::unordered_map<std::string, InstancedGroup> m_instancedGroups;
@@ -78,9 +87,9 @@ private:
     std::vector<DrawEntry> m_staticDrawList;
     std::vector<DrawEntry> m_visibleStaticDrawList;
 
-    std::array<VkQueryPool, FRAMES_IN_FLIGHT_COUNT> m_queryPools = { VK_NULL_HANDLE, VK_NULL_HANDLE };
-    std::array<std::vector<uint64_t>, FRAMES_IN_FLIGHT_COUNT> m_visibilityBuffers;
-    std::array<bool, FRAMES_IN_FLIGHT_COUNT> m_hasIssuedQueries = { false, false };
+    std::array<VkQueryPool, MAX_FRAMES_IN_FLIGHT_COUNT> m_queryPools = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+    std::array<std::vector<uint64_t>, MAX_FRAMES_IN_FLIGHT_COUNT> m_visibilityBuffers;
+    std::array<bool, MAX_FRAMES_IN_FLIGHT_COUNT> m_hasIssuedQueries = { false, false };
 
     glm::vec3 m_lastCameraPos = glm::vec3(0.0f);
     glm::vec3 m_lastFrustumNormal = glm::vec3(0.0f);

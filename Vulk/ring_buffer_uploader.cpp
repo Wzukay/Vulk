@@ -64,7 +64,12 @@ void RingBufferUploader::Shutdown() {
             vkFreeCommandBuffers(m_device, m_uploadCommandPool, 1, &upload.commandBuffer);
         }
     }
+
     m_pendingUploads.clear();
+
+    m_writeOffset = 0;
+    m_readOffset = 0;
+    m_stagingUsed = 0;
 
     // Destroy command pool first (it owns command buffers)
     if (m_uploadCommandPool != VK_NULL_HANDLE) {
@@ -97,44 +102,101 @@ VkFence RingBufferUploader::QueueUpload(const void* data, VkDeviceSize size,
     return QueueBatchUpload(regions, onComplete);
 }
 
-VkFence RingBufferUploader::QueueBatchUpload(const std::vector<CopyRegion>& regions,
-    std::function<void()> onComplete) {
-    if (regions.empty()) return VK_NULL_HANDLE;
-
-    // Calculate total size
-    VkDeviceSize totalSize = 0;
-    for (const auto& r : regions) {
-        totalSize += r.size;
+VkFence RingBufferUploader::QueueBatchUpload(
+    const std::vector<CopyRegion>& regions,
+    std::function<void()> onComplete)
+{
+    if (regions.empty()) {
+        return VK_NULL_HANDLE;
     }
 
-    VkDeviceSize stagingOffset;
+    VkDeviceSize totalSize = 0;
+    for (const CopyRegion& region : regions) {
+        if (region.srcData == nullptr || region.size == 0) {
+            throw std::runtime_error(
+                "RingBufferUploader: invalid copy region");
+        }
+
+        totalSize += region.size;
+    }
+
+    if (totalSize > m_bufferSize) {
+        throw std::runtime_error(
+            "RingBufferUploader: upload exceeds staging-buffer capacity");
+    }
+
+    // Reclaim already-completed uploads before considering a stall.
+    RetireCompletedUploads();
+
+    VkDeviceSize stagingOffset = 0;
+
+    // If the ring is full, wait only for the oldest upload that owns the
+    // required staging region. This preserves correctness without queue-idle.
+    while (!TryReserveStagingSpace(totalSize, stagingOffset)) {
+        if (m_pendingUploads.empty()) {
+            throw std::runtime_error(
+                "RingBufferUploader: unable to reserve staging space");
+        }
+
+        VkFence oldestFence = m_pendingUploads.front().fence;
+        const VkResult waitResult = vkWaitForFences(
+            m_device,
+            1,
+            &oldestFence,
+            VK_TRUE,
+            UINT64_MAX);
+
+        if (waitResult != VK_SUCCESS) {
+            throw std::runtime_error(
+                "RingBufferUploader: failed waiting for staging space");
+        }
+
+        RetireCompletedUploads();
+    }
+
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        if (m_writeOffset + totalSize > m_bufferSize) {
-            m_writeOffset = 0;
-        }
-        stagingOffset = m_writeOffset;
-        for (const auto& r : regions) {
-            std::memcpy(static_cast<char*>(m_mappedData) + m_writeOffset, r.srcData, r.size);
-            m_writeOffset += r.size;
+
+        VkDeviceSize writeOffset = stagingOffset;
+        for (const CopyRegion& region : regions) {
+            std::memcpy(
+                static_cast<char*>(m_mappedData) + writeOffset,
+                region.srcData,
+                static_cast<size_t>(region.size));
+
+            writeOffset += region.size;
         }
     }
 
-    VkCommandBuffer cmd = BeginCommandBuffer();
-    VkDeviceSize currentOffset = stagingOffset;
-    for (const auto& r : regions) {
-        VkBufferCopy copyRegion{ currentOffset, r.dstOffset, r.size };
-        vkCmdCopyBuffer(cmd, m_stagingBuffer, r.dstBuffer, 1, &copyRegion);
-        currentOffset += r.size;
+    VkCommandBuffer commandBuffer = BeginCommandBuffer();
+
+    VkDeviceSize sourceOffset = stagingOffset;
+    for (const CopyRegion& region : regions) {
+        VkBufferCopy copyRegion{};
+        copyRegion.srcOffset = sourceOffset;
+        copyRegion.dstOffset = region.dstOffset;
+        copyRegion.size = region.size;
+
+        vkCmdCopyBuffer(
+            commandBuffer,
+            m_stagingBuffer,
+            region.dstBuffer,
+            1,
+            &copyRegion);
+
+        sourceOffset += region.size;
     }
+
     VkFence fence = CreateFence();
-    SubmitCommandBuffer(cmd, fence);
+    SubmitCommandBuffer(commandBuffer, fence);
 
-    PendingUpload upload;
+    PendingUpload upload{};
     upload.fence = fence;
-    upload.commandBuffer = cmd;
-    upload.onComplete = onComplete;
+    upload.commandBuffer = commandBuffer;
+    upload.onComplete = std::move(onComplete);
     upload.submitFrame = m_renderer->GetFrameCounter();
+    upload.stagingOffset = stagingOffset;
+    upload.stagingSize = totalSize;
 
     m_pendingUploads.push_back(std::move(upload));
 
@@ -142,23 +204,8 @@ VkFence RingBufferUploader::QueueBatchUpload(const std::vector<CopyRegion>& regi
 }
 
 void RingBufferUploader::Tick(uint64_t currentFrame) {
-    for (auto it = m_pendingUploads.begin(); it != m_pendingUploads.end(); ) {
-        VkResult status = vkGetFenceStatus(m_device, it->fence);
-        if (status == VK_SUCCESS) {
-            if (it->onComplete) {
-                it->onComplete();
-            }
-            vkDestroyFence(m_device, it->fence, nullptr);
-            vkFreeCommandBuffers(m_device, m_uploadCommandPool, 1, &it->commandBuffer);
-            it = m_pendingUploads.erase(it);
-        }
-        else if (status == VK_NOT_READY) {
-            ++it;
-        }
-        else {
-            throw std::runtime_error("RingBufferUploader: vkGetFenceStatus failed");
-        }
-    }
+    (void)currentFrame;
+    RetireCompletedUploads();
 }
 
 // ---- Private helpers ----
@@ -205,5 +252,108 @@ void RingBufferUploader::SubmitCommandBuffer(VkCommandBuffer cmd, VkFence fence)
     VkQueue queue = m_renderer->GetGraphicsQueue();
     if (vkQueueSubmit(queue, 1, &submitInfo, fence) != VK_SUCCESS) {
         throw std::runtime_error("RingBufferUploader: failed to submit command buffer");
+    }
+}
+bool RingBufferUploader::TryReserveStagingSpace(VkDeviceSize size, VkDeviceSize& outOffset) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    static constexpr VkDeviceSize ALIGNMENT = 64;
+
+    VkDeviceSize alignedSize = (size + ALIGNMENT - 1) & ~(ALIGNMENT - 1);
+
+    if (alignedSize > m_bufferSize || alignedSize > m_bufferSize - m_stagingUsed) {
+        return false;
+    }
+
+    if (m_stagingUsed == 0) {
+        m_readOffset = 0;
+        m_writeOffset = 0;
+        outOffset = 0;
+        m_writeOffset = alignedSize % m_bufferSize;
+        m_stagingUsed = alignedSize;
+        return true;
+    }
+
+    if (m_writeOffset >= m_readOffset) {
+        const VkDeviceSize tailSpace = m_bufferSize - m_writeOffset;
+
+        if (alignedSize <= tailSpace) {
+            outOffset = m_writeOffset;
+            m_writeOffset = (m_writeOffset + alignedSize) % m_bufferSize;
+            m_stagingUsed += alignedSize;
+            return true;
+        }
+
+        if (alignedSize <= m_readOffset) {
+            outOffset = 0;
+            m_writeOffset = alignedSize;
+            // Pad the lost tail space so tracking remains accurate
+            m_stagingUsed += alignedSize + tailSpace;
+            return true;
+        }
+
+        return false;
+    }
+
+    const VkDeviceSize gapSpace = m_readOffset - m_writeOffset;
+    if (alignedSize <= gapSpace) {
+        outOffset = m_writeOffset;
+        m_writeOffset += alignedSize;
+        m_stagingUsed += alignedSize;
+        return true;
+    }
+
+    return false;
+}
+
+void RingBufferUploader::CompleteFrontUpload() {
+    PendingUpload upload = std::move(m_pendingUploads.front());
+    m_pendingUploads.pop_front();
+
+    if (upload.onComplete) {
+        upload.onComplete();
+    }
+
+    if (upload.fence != VK_NULL_HANDLE) {
+        vkDestroyFence(m_device, upload.fence, nullptr);
+    }
+
+    if (upload.commandBuffer != VK_NULL_HANDLE) {
+        vkFreeCommandBuffers(
+            m_device,
+            m_uploadCommandPool,
+            1,
+            &upload.commandBuffer);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+
+        m_readOffset = (upload.stagingOffset + upload.stagingSize) % m_bufferSize;
+        m_stagingUsed -= upload.stagingSize;
+
+        if (m_stagingUsed == 0) {
+            m_readOffset = 0;
+            m_writeOffset = 0;
+        }
+    }
+}
+
+void RingBufferUploader::RetireCompletedUploads() {
+    while (!m_pendingUploads.empty()) {
+        const VkResult status = vkGetFenceStatus(
+            m_device,
+            m_pendingUploads.front().fence);
+
+        if (status == VK_NOT_READY) {
+            return;
+        }
+
+        if (status != VK_SUCCESS) {
+            throw std::runtime_error(
+                "RingBufferUploader: vkGetFenceStatus failed");
+        }
+
+        CompleteFrontUpload();
     }
 }

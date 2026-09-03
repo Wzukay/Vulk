@@ -259,7 +259,7 @@ VkSampleCountFlagBits VulkanRenderer::GetMaxUsableSampleCount() {
 	return VK_SAMPLE_COUNT_1_BIT;
 }
 void VulkanRenderer::DeferBufferDeletion(BufferDeletion&& del) {
-	m_pendingDeletionsGlobal.Push(std::move(del), m_globalFrameCounter + MAX_FRAMES_IN_FLIGHT);
+	m_pendingDeletionsGlobal.Push(std::move(del), m_globalFrameCounter + m_framesInFlight);
 }
 VkSampleCountFlagBits VulkanRenderer::IntToSampleCount(int samples) {
 	switch (samples) {
@@ -277,7 +277,19 @@ VkSampleCountFlagBits VulkanRenderer::IntToSampleCount(int samples) {
 bool VulkanRenderer::ShouldClose() { return glfwWindowShouldClose(window); }
 void VulkanRenderer::PollEvents() { glfwPollEvents(); }
 
-void VulkanRenderer::Initialize(int width, int height, const std::string& title) {
+void VulkanRenderer::Initialize(
+	int width,
+	int height,
+	const std::string& title)
+{
+	m_framesInFlight = std::clamp(
+		static_cast<uint32_t>(g_Settings.framesInFlight),
+		2u,
+		MAX_SUPPORTED_FRAMES_IN_FLIGHT);
+
+	g_Settings.framesInFlight =
+		static_cast<int>(m_framesInFlight);
+
 	InitWindow(width, height, title);
 	InitVulkan();
 }
@@ -375,7 +387,7 @@ void VulkanRenderer::InitVulkan() {
 
 	m_grassRenderer.Init(logicalDevice, this, &m_uploader, swapChainImageFormat, depthFormat, descriptorSetLayout, m_currentMsaaSamples);
 
-	m_boidRenderer.Init(logicalDevice, this, swapChainImageFormat, depthFormat, descriptorSetLayout, m_currentMsaaSamples);
+	m_boidRenderer.Init(logicalDevice, this, &m_uploader, swapChainImageFormat, depthFormat, descriptorSetLayout, m_currentMsaaSamples);
 
 	currentSettings = g_Settings;
 }
@@ -723,9 +735,9 @@ void VulkanRenderer::CreateCommandBuffers() {
 	}
 }
 void VulkanRenderer::CreateSyncObjects() {
-	imageAvailableSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
-	renderFinishedSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
-	inFlightFences.resize(MAX_FRAMES_IN_FLIGHT);
+	imageAvailableSemaphores.resize(m_framesInFlight);
+	renderFinishedSemaphores.resize(m_framesInFlight);
+	inFlightFences.resize(m_framesInFlight);
 
 	imagesInFlight.assign(swapChainImages.size(), VK_NULL_HANDLE);
 
@@ -736,7 +748,7 @@ void VulkanRenderer::CreateSyncObjects() {
 	fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
 	fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT; // Crucial: start opened
 
-	for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+	for (size_t i = 0; i < m_framesInFlight; i++) {
 		if (vkCreateSemaphore(logicalDevice, &semaphoreInfo, nullptr, &imageAvailableSemaphores[i]) != VK_SUCCESS ||
 			vkCreateSemaphore(logicalDevice, &semaphoreInfo, nullptr, &renderFinishedSemaphores[i]) != VK_SUCCESS ||
 			vkCreateFence(logicalDevice, &fenceInfo, nullptr, &inFlightFences[i]) != VK_SUCCESS) {
@@ -746,7 +758,7 @@ void VulkanRenderer::CreateSyncObjects() {
 	}
 }
 void VulkanRenderer::CreateOffscreenResolve() {
-	CreateImage(GetInternalWidth(), GetInternalHeight(), 1, VK_SAMPLE_COUNT_1_BIT, swapChainImageFormat,
+	CreateImage(swapChainExtent.width, swapChainExtent.height, 1, VK_SAMPLE_COUNT_1_BIT, swapChainImageFormat,
 		VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
 		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, offscreenTarget.image, offscreenTarget.memory);
 
@@ -1227,7 +1239,7 @@ VkImageView VulkanRenderer::CreateImageView(VkImage image, VkFormat format, VkIm
 
 void VulkanRenderer::CreateDepthResources() {
 	VkFormat depthFormat = FindDepthFormat();
-	CreateImage(GetInternalWidth(), GetInternalHeight(), 1, m_currentMsaaSamples, depthFormat,
+	CreateImage(swapChainExtent.width, swapChainExtent.height, 1, m_currentMsaaSamples, depthFormat,
 		VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
 		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, depthTarget.image, depthTarget.memory);
 	depthTarget.view = CreateImageView(depthTarget.image, depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT, 1);
@@ -1249,15 +1261,15 @@ void VulkanRenderer::CreateColorResources() {
 	if (m_currentMsaaSamples != VK_SAMPLE_COUNT_1_BIT) {
 		VkFormat colorFormat = swapChainImageFormat;
 		// NOW USES INTERNAL RESOLUTION
-		CreateImage(GetInternalWidth(), GetInternalHeight(), 1, m_currentMsaaSamples, colorFormat,
+		CreateImage(swapChainExtent.width, swapChainExtent.height, 1, m_currentMsaaSamples, colorFormat,
 			VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
 			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, colorTarget.image, colorTarget.memory);
 		colorTarget.view = CreateImageView(colorTarget.image, colorFormat, VK_IMAGE_ASPECT_COLOR_BIT, 1);
 	}
 }
 void VulkanRenderer::CreateSSAOResources() {
-	uint32_t width = std::max(1u, GetInternalWidth() / 2);
-	uint32_t height = std::max(1u, GetInternalHeight() / 2);
+	uint32_t width = std::max(1u, swapChainExtent.width / 2);
+	uint32_t height = std::max(1u, swapChainExtent.height / 2);
 
 	CreateImage(width, height, 1, VK_SAMPLE_COUNT_1_BIT, VK_FORMAT_R8_UNORM,
 		VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
@@ -1298,8 +1310,8 @@ void VulkanRenderer::CreateSSAOResources() {
 	memcpy(ssaoUBOMapped, &uboData, sizeof(SSAOUBO));
 }
 void VulkanRenderer::CreateSSAOBlurResources() {
-	uint32_t width = std::max(1u, GetInternalWidth() / 2);
-	uint32_t height = std::max(1u, GetInternalHeight() / 2);
+	uint32_t width = std::max(1u, swapChainExtent.width / 2);
+	uint32_t height = std::max(1u, swapChainExtent.height / 2);
 
 	// 1. Ping-Pong intermediate image (Horizontal blur output)
 	CreateImage(width, height, 1, VK_SAMPLE_COUNT_1_BIT, VK_FORMAT_R8_UNORM,
@@ -1352,8 +1364,8 @@ void VulkanRenderer::GenerateSSAOResources() {
 	// - Upload ssaoNoise to a 4x4 VK_FORMAT_R16G16B16A16_SFLOAT Vulkan Texture
 }
 void VulkanRenderer::CreateHZBResources() {
-	uint32_t width = GetInternalWidth();
-	uint32_t height = GetInternalHeight();
+	uint32_t width = swapChainExtent.width;
+	uint32_t height = swapChainExtent.height;
 	hzbDimensions = glm::vec2((float)width, (float)height);
 
 	// Calculate how many mip levels we need for the screen size
@@ -1464,8 +1476,8 @@ void VulkanRenderer::GenerateHZB(VkCommandBuffer commandBuffer) {
 
 	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, hzbPipeline);
 
-	uint32_t currentWidth = static_cast<uint32_t>(hzbDimensions.x);
-	uint32_t currentHeight = static_cast<uint32_t>(hzbDimensions.y);
+	uint32_t currentWidth = static_cast<uint32_t>(GetInternalWidth());
+	uint32_t currentHeight = static_cast<uint32_t>(GetInternalHeight());
 
 	for (uint32_t i = 0; i < hzbMipLevels; i++) {
 		// If not the first mip, transition the *previous* mip to READ_ONLY so we can sample from it
@@ -2062,7 +2074,8 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 	m_grassRenderer.Cull(commandBuffer, static_cast<uint32_t>(currentFrame));
 
 	if (currentScene != nullptr) {
-		m_terrainRenderer.Cull(commandBuffer, cameraPosition, m_currentViewProj, hzbDimensions, (float)(hzbMipLevels - 1), static_cast<uint32_t>(currentFrame), culledCount, sceneTotalVertices, sceneTotalIndices);
+		glm::vec2 dynamicHzbSize = glm::vec2((float)GetInternalWidth(), (float)GetInternalHeight());
+		m_terrainRenderer.Cull(commandBuffer, cameraPosition, m_currentViewProj, dynamicHzbSize, (float)(hzbMipLevels - 1), static_cast<uint32_t>(currentFrame), culledCount, sceneTotalVertices, sceneTotalIndices);
 	}
 
 	if (m_currentMsaaSamples != VK_SAMPLE_COUNT_1_BIT) {
@@ -2070,7 +2083,12 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 	}
 
 	TransitionImageLayout(commandBuffer, offscreenTarget.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
-	TransitionImageLayout(commandBuffer, depthTarget.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, 0, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_IMAGE_ASPECT_DEPTH_BIT);
+	TransitionImageLayout(commandBuffer, depthTarget.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+		VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+		VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		0,
+		VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT,
+		VK_IMAGE_ASPECT_DEPTH_BIT);
 
 	VkViewport viewport{ 0.0f, 0.0f, (float)GetInternalWidth(), (float)GetInternalHeight(), 0.0f, 1.0f };
 	VkRect2D scissor{ {0, 0}, {GetInternalWidth(), GetInternalHeight()} };
@@ -2132,9 +2150,11 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 	}
 	vkCmdEndRendering(commandBuffer);
 
-	// ==========================================
-	// POST-PROCESSING & COMPOSITION
-	// ==========================================
+	glm::vec2 activeScale = glm::vec2(
+		(float)GetInternalWidth() / (float)swapChainExtent.width,
+		(float)GetInternalHeight() / (float)swapChainExtent.height
+	);
+
 	if (g_Settings.enableSSAO) {
 		uint32_t ssaoWidth = std::max(1u, GetInternalWidth() / 2);
 		uint32_t ssaoHeight = std::max(1u, GetInternalHeight() / 2);
@@ -2169,6 +2189,7 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 		ssaoPC.screenSize = glm::vec2(ssaoWidth, ssaoHeight);
 		ssaoPC.radius = 0.75f;
 		ssaoPC.bias = 0.025f;
+		ssaoPC.renderScale = activeScale;
 		vkCmdPushConstants(commandBuffer, ssaoPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SSAOPushConstants), &ssaoPC);
 		vkCmdDraw(commandBuffer, 3, 1, 0, 0);
 		vkCmdEndRendering(commandBuffer);
@@ -2192,7 +2213,7 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 		vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, ssaoBlurPipeline);
 		vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, ssaoBlurPipelineLayout, 0, 1, &ssaoBlurDescriptorSetHorizontal, 0, nullptr);
 
-		SSAOBlurPushConstants blurHPC{ glm::vec2(ssaoWidth, ssaoHeight), glm::vec2(1.0f, 0.0f), 0.20f, 1.0f };
+		SSAOBlurPushConstants blurHPC{ glm::vec2(ssaoWidth, ssaoHeight), glm::vec2(1.0f, 0.0f), 0.20f, 1.0f, activeScale };
 		vkCmdPushConstants(commandBuffer, ssaoBlurPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SSAOBlurPushConstants), &blurHPC);
 		vkCmdDraw(commandBuffer, 3, 1, 0, 0);
 		vkCmdEndRendering(commandBuffer);
@@ -2216,7 +2237,7 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 		vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, ssaoBlurPipeline);
 		vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, ssaoBlurPipelineLayout, 0, 1, &ssaoBlurDescriptorSetVertical, 0, nullptr);
 
-		SSAOBlurPushConstants blurVPC{ glm::vec2(ssaoWidth, ssaoHeight), glm::vec2(0.0f, 1.0f), 0.2f, 1.0f };
+		SSAOBlurPushConstants blurVPC{ glm::vec2(ssaoWidth, ssaoHeight), glm::vec2(0.0f, 1.0f), 0.2f, 1.0f, activeScale };
 		vkCmdPushConstants(commandBuffer, ssaoBlurPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SSAOBlurPushConstants), &blurVPC);
 		vkCmdDraw(commandBuffer, 3, 1, 0, 0);
 		vkCmdEndRendering(commandBuffer);
@@ -2270,6 +2291,7 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 		FSRConstants fc{};
 		fc.sharpness = g_Settings.enableFSR ? 0.2f : 0.0f;
 		fc.enableSSAO = g_Settings.enableSSAO ? 1 : 0;
+		fc.renderScale = activeScale;
 
 		vkCmdPushConstants(commandBuffer, compositionPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(FSRConstants), &fc);
 		vkCmdDraw(commandBuffer, 3, 1, 0, 0);
@@ -2322,6 +2344,7 @@ void VulkanRenderer::RemoveTerrainChunk(int64_t key) {
 }
 void VulkanRenderer::SetTerrainChunkSize(float size) {
 	m_terrainRenderer.SetChunkSize(size);
+	m_staticMeshRenderer.SetChunkSize(size);
 }
 void VulkanRenderer::ClearHeightCache() {
 	m_terrainRenderer.ClearHeightCache();
@@ -2329,6 +2352,9 @@ void VulkanRenderer::ClearHeightCache() {
 
 void VulkanRenderer::AddGrass(int64_t key, const std::vector<GrassInstance>& grassInstances) {
 	m_grassRenderer.AddGrass(key, grassInstances);
+}
+void VulkanRenderer::RemoveGrass(int64_t key) {
+	m_grassRenderer.RemoveChunk(key);
 }
 
 void VulkanRenderer::AddBoid(int64_t chunkKey, const std::vector<BoidInstance>& initialBoids, uint32_t textureId) {
@@ -2356,11 +2382,6 @@ void VulkanRenderer::ApplySettings() {
 		needSwapchainRecreate = true;
 	}
 
-	if (std::abs(g_Settings.renderScale - currentSettings.renderScale) > 0.01f) {
-		currentSettings.renderScale = g_Settings.renderScale;
-		needSwapchainRecreate = true;
-	}
-
 	if (g_Settings.msaaSamples != currentSettings.msaaSamples) {
 		// Clamp and convert
 		VkSampleCountFlagBits newSamples = IntToSampleCount(g_Settings.msaaSamples);
@@ -2382,6 +2403,10 @@ void VulkanRenderer::ApplySettings() {
 			glfwSetWindowSize(window, g_Settings.windowWidth, g_Settings.windowHeight);
 			needSwapchainRecreate = true;
 		}
+	}
+
+	if (std::abs(g_Settings.renderScale - currentSettings.renderScale) > 0.01f) {
+		currentSettings.renderScale = g_Settings.renderScale;
 	}
 
 	if (needSwapchainRecreate) {
@@ -2476,6 +2501,8 @@ void VulkanRenderer::DrawFrame() {
 
 	m_uploader.Tick(m_globalFrameCounter);
 
+	vkWaitForFences(logicalDevice, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
+
 	m_pendingDeletionsGlobal.Flush(m_globalFrameCounter, [&](BufferDeletion& del) {
 		for (size_t i = 0; i < del.buffers.size(); ++i) {
 			DestroyBuffer(del.buffers[i], del.memories[i]);
@@ -2484,8 +2511,6 @@ void VulkanRenderer::DrawFrame() {
 
 	m_terrainRenderer.Tick(m_globalFrameCounter);
 	m_grassRenderer.Tick(m_globalFrameCounter);
-
-	vkWaitForFences(logicalDevice, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
 
 	uint32_t imageIndex;
 	VkResult acquireResult = vkAcquireNextImageKHR(logicalDevice, swapChain, UINT64_MAX,
@@ -2500,8 +2525,8 @@ void VulkanRenderer::DrawFrame() {
 		throw std::runtime_error("Failed to acquire swapchain image.");
 	}
 
-	if (imagesInFlight[imageIndex] != VK_NULL_HANDLE) {
-		vkWaitForFences(logicalDevice, 1, &imagesInFlight[imageIndex], VK_TRUE, UINT64_MAX);
+	if (imagesInFlight[imageIndex] != VK_NULL_HANDLE && imagesInFlight[imageIndex] != inFlightFences[currentFrame]) {
+		vkWaitForFences( logicalDevice, 1, &imagesInFlight[imageIndex], VK_TRUE, UINT64_MAX);
 	}
 
 	imagesInFlight[imageIndex] = inFlightFences[currentFrame];
@@ -2548,7 +2573,7 @@ void VulkanRenderer::DrawFrame() {
 	}
 
 	// Advance to next frame
-	currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
+	currentFrame = (currentFrame + 1) % m_framesInFlight;
 }
 void VulkanRenderer::DrawGUI() {
 	ImGui_ImplVulkan_NewFrame();
@@ -2615,23 +2640,26 @@ void VulkanRenderer::DrawGUI() {
 	ImGui::Render();
 }
 void VulkanRenderer::UpdateScene(const Scene& scene) {
-	m_staticMeshRenderer.UpdateScene(scene);
+	// Scene caches the ECS traversal, avoids rebuilding the static draw lists and instance buckets when nothing changed
+	if (scene.NeedsRendererUpdate()) {
+		m_staticMeshRenderer.UpdateScene(scene);
+	}
 
-	// Handle texture updates
 	if (g_AssetManager.IsTextureDirty()) {
 		UpdateTextureDescriptors(scene);
 		g_AssetManager.ClearTextureDirty();
 	}
 
-	// Handle light updates
 	if (scene.HasModifiedLights()) {
 		std::vector<Light> lights;
 		lights.reserve(scene.GetLights().size());
+
 		for (const auto& sl : scene.GetLights()) {
 			lights.push_back(sl.isPoint
 				? Light::Point(sl.position, sl.color, sl.intensity, sl.range)
 				: Light::Directional(sl.direction, sl.color, sl.intensity));
 		}
+
 		SetLights(lights);
 		scene.ClearModifiedLightsFlag();
 	}
@@ -2799,7 +2827,7 @@ void VulkanRenderer::Cleanup() {
 	}
 
 	if (logicalDevice != VK_NULL_HANDLE) {
-		for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+		for (size_t i = 0; i < m_framesInFlight; i++) {
 			if (renderFinishedSemaphores.size() > i && renderFinishedSemaphores[i] != VK_NULL_HANDLE) {
 				vkDestroySemaphore(logicalDevice, renderFinishedSemaphores[i], nullptr);
 			}
