@@ -5,8 +5,7 @@ layout(push_constant) uniform Constants {
     mat4 modelMatrix;
     uint textureId;
     uint normalTextureId;
-    uint objectId;
-    float lodBlend; 
+    uint objectId;  
     uint ormTextureId; // <-- NEW
 } push;
 

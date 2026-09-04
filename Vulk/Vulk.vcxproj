@@ -186,6 +186,7 @@
     <ClCompile Include="renderer_skybox.cpp" />
     <ClCompile Include="renderer_static.cpp" />
     <ClCompile Include="renderer_terrain.cpp" />
+    <ClCompile Include="renderer_water.cpp" />
     <ClCompile Include="ring_buffer_uploader.cpp" />
     <ClCompile Include="settings.cpp" />
   </ItemGroup>
@@ -212,6 +213,7 @@
     <ClInclude Include="renderer_skybox.h" />
     <ClInclude Include="renderer_static.h" />
     <ClInclude Include="renderer_terrain.h" />
+    <ClInclude Include="renderer_water.h" />
     <ClInclude Include="ring_buffer_uploader.h" />
     <ClInclude Include="scene.h" />
     <ClInclude Include="scene_types.h" />
@@ -245,6 +247,8 @@
     <None Include="shaders\terrain.frag" />
     <None Include="shaders\terrain.vert" />
     <None Include="shaders\terrain_cull.comp" />
+    <None Include="shaders\water.frag" />
+    <None Include="shaders\water.vert" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

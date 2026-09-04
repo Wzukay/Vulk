@@ -385,6 +385,8 @@ void VulkanRenderer::InitVulkan() {
 	m_terrainRenderer.Init(logicalDevice, this, &m_uploader, 5'000'000, 10'000'000);
 	m_terrainRenderer.UpdateHZBDescriptor(hzbTarget.view, hzbTarget.sampler);
 
+	m_waterRenderer.Init(logicalDevice, this, &m_uploader, swapChainImageFormat, depthFormat, descriptorSetLayout, m_currentMsaaSamples);
+
 	m_grassRenderer.Init(logicalDevice, this, &m_uploader, swapChainImageFormat, depthFormat, descriptorSetLayout, m_currentMsaaSamples);
 
 	m_boidRenderer.Init(logicalDevice, this, &m_uploader, swapChainImageFormat, depthFormat, descriptorSetLayout, m_currentMsaaSamples);
@@ -2353,9 +2355,7 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 			return recordTask(1, [&](VkCommandBuffer scb) {
 				if (terrainPipeline != VK_NULL_HANDLE) {
 					vkCmdBindPipeline(scb, VK_PIPELINE_BIND_POINT_GRAPHICS, terrainPipeline);
-
 					vkCmdBindDescriptorSets(scb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
-
 					m_terrainRenderer.Draw(scb, pipelineLayout, static_cast<uint32_t>(currentFrame), dc1);
 				}
 				});
@@ -2371,8 +2371,12 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 		// 4. Thread 3: Boids
 		auto f3 = std::async(std::launch::async, [&]() {
 			return recordTask(3, [&](VkCommandBuffer scb) {
+				// Draw Boids
 				vkCmdBindPipeline(scb, VK_PIPELINE_BIND_POINT_GRAPHICS, m_boidRenderer.m_graphicsPipeline);
 				m_boidRenderer.Draw(scb, descriptorSet, dc3);
+
+				// Draw Transparent Water last
+				m_waterRenderer.Draw(scb, descriptorSet, cameraPosition, static_cast<float>(glfwGetTime()));
 				});
 			});
 
@@ -2602,6 +2606,13 @@ void VulkanRenderer::AddBoid(int64_t chunkKey, const std::vector<BoidInstance>& 
 }
 void VulkanRenderer::RemoveBoid(int64_t chunkKey) {
 	m_boidRenderer.RemoveSwarm(chunkKey);
+}
+
+void VulkanRenderer::AddWaterChunk(int64_t key, const std::vector<ModelVertex>& vertices, const std::vector<uint32_t>& indices) {
+	m_waterRenderer.AddWaterChunk(key, vertices, indices);
+}
+void VulkanRenderer::RemoveWaterChunk(int64_t key) {
+	m_waterRenderer.RemoveWaterChunk(key);
 }
 
 void VulkanRenderer::ApplySettings() {
@@ -2916,6 +2927,7 @@ void VulkanRenderer::Cleanup() {
 
 	m_uploader.Shutdown();
 	m_terrainRenderer.Cleanup();
+	m_waterRenderer.Cleanup();
 	m_grassRenderer.Cleanup();
 	m_staticMeshRenderer.Cleanup();
 	m_skybox.Cleanup(logicalDevice);

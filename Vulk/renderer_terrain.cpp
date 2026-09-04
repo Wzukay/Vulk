@@ -198,7 +198,10 @@ void TerrainRenderer::Cull(VkCommandBuffer commandBuffer, const glm::vec3& camer
 
         chunkDataMapped[chunkIndex] = {
             glm::vec4(chunk.center, chunk.radius),
-            chunk.indexCount, chunk.indexOffset, chunk.vertexOffset, static_cast<uint32_t>(chunk.lod)
+            chunk.indexCount,
+            chunk.indexOffset,
+            chunk.vertexOffset,
+            static_cast<uint32_t>(chunk.lod)
         };
 
         chunkIndex++;
@@ -206,7 +209,6 @@ void TerrainRenderer::Cull(VkCommandBuffer commandBuffer, const glm::vec3& camer
         submittedInds += chunk.indexCount;
     }
 
-    // Push the active chunk geometry totals back to the main thread
     outVertexCount += submittedVerts;
     outIndexCount += submittedInds;
     m_cullChunkCount = chunkIndex;

@@ -27,7 +27,26 @@ layout(location = 6) flat out uint fragNormalTextureId;
 layout(location = 7) out vec3 fragColor;
 
 void main() {
-    float dynamicLodBlend = uintBitsToFloat(gl_InstanceIndex);
+    vec3 worldPosBase = (push.modelMatrix * vec4(inPosition, 1.0)).xyz;
+    
+    vec2 chunkCenterXZ = floor(worldPosBase.xz / 512.0) * 512.0 + 256.0;
+    vec3 chunkCenter = vec3(chunkCenterXZ.x, 0.0, chunkCenterXZ.y);
+    float distToCenter = length(ubo.cameraPos - chunkCenter);
+    
+    float closestEdge = max(0.0, distToCenter - (512.0 * 0.75));
+    float transWidth = 512.0 * 0.35;
+    
+    int currentLod = 0;
+    if (closestEdge > ubo.fadeParams.y) currentLod = 4;
+    else if (closestEdge > ubo.fadeParams.x) currentLod = 3;
+    else if (closestEdge > ubo.fadeParams.w) currentLod = 2;
+    else if (closestEdge > ubo.fadeParams.z) currentLod = 1;
+
+    float dynamicLodBlend = 0.0;
+    if (currentLod == 0) dynamicLodBlend = clamp((closestEdge - (ubo.fadeParams.z - transWidth)) / transWidth, 0.0, 1.0);
+    else if (currentLod == 1) dynamicLodBlend = clamp((closestEdge - (ubo.fadeParams.w - transWidth)) / transWidth, 0.0, 1.0);
+    else if (currentLod == 2) dynamicLodBlend = clamp((closestEdge - (ubo.fadeParams.x - transWidth)) / transWidth, 0.0, 1.0);
+    else if (currentLod == 3) dynamicLodBlend = clamp((closestEdge - (ubo.fadeParams.y - transWidth)) / transWidth, 0.0, 1.0);
 
     vec3 finalPos = mix(inPosition, inCoarsePos, dynamicLodBlend);
     vec3 finalNormal = mix(inNormal, inCoarseNormal, dynamicLodBlend);
@@ -38,27 +57,17 @@ void main() {
     mat3 normalMatrix = transpose(inverse(mat3(push.modelMatrix)));
     vec3 worldNormal = normalize(normalMatrix * finalNormal);
 
-    // --- NEW: Biome Weights from Tangent ---
     float slopeFactor = max(dot(worldNormal, vec3(0.0, 1.0, 0.0)), 0.0);
     float cliffWeight = smoothstep(0.5, 0.8, slopeFactor);
 
-    // Extract the texture weights packed by the CPU
     vec3 blendedWeights = inTangent.xyz;
-    
-    // Apply steep-slope cliff logic directly to the weights
     blendedWeights.r *= cliffWeight;
     blendedWeights.g *= cliffWeight;
     blendedWeights.b = max(blendedWeights.b, 1.0 - cliffWeight);
-
     float totalWeight = blendedWeights.r + blendedWeights.g + blendedWeights.b;
     
-    // Output the modified weights into fragTangent
     fragTangent = blendedWeights / max(totalWeight, 0.0001);
-
-    // --- NEW: Ground Color ---
-    // The raw base ground color from the Biome tables passes straight through
     fragColor = inColor;
-
     fragNormal = normalMatrix * finalNormal;
     fragTangentHandedness = inTangent.w;
     fragTexCoord = inTexCoord;

@@ -51,12 +51,31 @@ vec3 valueNoiseGrad(vec2 x) {
 
 void main() {
     float distanceToCamera = length(ubo.cameraPos - fragWorldPos);
+    vec3 normal = normalize(fragNormal);
+
+    if (fragTangentHandedness < -0.5) {
+        vec3 viewDir = normalize(ubo.cameraPos - fragWorldPos);
+        vec3 sunDir = normalize(ubo.sunDirection.xyz);
+        
+        // Add fake procedural ripples using the noise function
+        float ripple = valueNoiseGrad(fragWorldPos.xz * 0.8).x;
+        vec3 waterNormal = normalize(vec3(ripple * 0.1, 1.0, ripple * 0.1));
+        
+        vec3 deepWater = vec3(0.02, 0.15, 0.25);
+        vec3 finalWaterColor = mix(deepWater, fragColor, 0.3 + ripple * 0.2);
+        
+        // Massive specular highlight for shininess
+        vec3 reflectDir = reflect(-sunDir, waterNormal);
+        float spec = pow(max(dot(viewDir, reflectDir), 0.0), 128.0) * 1.5;
+        
+        vec3 lighting = vec3(ubo.ambient) + ubo.sunColor.rgb * (max(dot(waterNormal, sunDir), 0.0) + spec);
+        outColor = vec4(ApplyFog(finalWaterColor * lighting, distanceToCamera), 1.0);
+        return; // Exit early, do not run terrain logic!
+    }
 
     vec3 blendWeights = max(fragTangent, vec3(0.0));
     float weightSum = blendWeights.r + blendWeights.g + blendWeights.b;
     blendWeights /= max(weightSum, 0.0001);
-
-    vec3 normal = normalize(fragNormal);
     
     // We only need the height (.x) for the macro color variation
     float n = valueNoiseGrad(fragWorldPos.xz * 0.02).x;
@@ -107,7 +126,5 @@ void main() {
         ubo.sunColor.a *
         wrappedDiffuse;
 
-    outColor = vec4(
-        ApplyFog(terrainColor * lighting, distanceToCamera),
-        1.0);
+    outColor = vec4(fragColor, 1.0);
 }

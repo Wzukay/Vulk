@@ -31,6 +31,7 @@
 #include "renderer_terrain.h"
 #include "renderer_static.h"
 #include "renderer_boid.h"
+#include "renderer_water.h"
 
 #include "ring_buffer_uploader.h"
 
@@ -390,6 +391,12 @@ private:
 public:
     void AddBoid(int64_t chunkKey, const std::vector<BoidInstance>& initialBoids, uint32_t textureId);
     void RemoveBoid(int64_t chunkKey);
+
+private:
+    WaterRenderer m_waterRenderer;
+public:
+    void AddWaterChunk(int64_t key, const std::vector<ModelVertex>& vertices, const std::vector<uint32_t>& indices);
+    void RemoveWaterChunk(int64_t key);
 
 #ifdef NDEBUG
     const bool enableValidationLayers = false;

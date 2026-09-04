@@ -22,6 +22,7 @@ void Chunk::Init(VulkanRenderer& renderer) {
 
     PrecomputeChunkOffsets(viewDistanceChunks);
 }
+
 uint32_t Chunk::Hash2D(int x, int z, int seed) {
     uint32_t h = static_cast<uint32_t>(seed);
     h ^= static_cast<uint32_t>(x) * 374761393U + static_cast<uint32_t>(z) * 668265263U;
@@ -67,6 +68,40 @@ void Chunk::PrecomputeChunkOffsets(int viewDistance) {
     std::sort(s_sortedChunkOffsets.begin(), s_sortedChunkOffsets.end(), [](const auto& a, const auto& b) {
         return (a.first * a.first + a.second * a.second) < (b.first * b.first + b.second * b.second);
         });
+}
+float Chunk::GetLodMorph(float closestEdgeDistance, int currentLod) const {
+    float transitionWidth = chunkSize * 0.35f;
+
+    float transitionEnd = 0.0f;
+
+    switch (currentLod) {
+    case 0:
+        transitionEnd = g_Settings.GetGrassFadeStart();
+        break;
+
+    case 1:
+        transitionEnd = g_Settings.GetGrassFadeEnd();
+        break;
+
+    case 2:
+        transitionEnd = g_Settings.GetStaticFadeStart();
+        break;
+
+    case 3:
+        transitionEnd = g_Settings.GetStaticFadeEnd();
+        break;
+
+    default:
+        return 0.0f;
+    }
+
+    float transitionStart = transitionEnd - transitionWidth;
+
+    return glm::clamp(
+        (closestEdgeDistance - transitionStart) / transitionWidth,
+        0.0f,
+        1.0f
+    );
 }
 
 glm::vec3 Chunk::ChunkBoundsCenter(int cx, int cz) const {
@@ -188,6 +223,13 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
                 renderer.AddBoid(resultKey, result.boids, 3);
             }
 
+            if (!result.waterVertices.empty()) {
+                renderer.AddWaterChunk(resultKey, result.waterVertices, result.waterIndices);
+            }
+            else {
+                renderer.RemoveWaterChunk(resultKey);
+            }
+
             loadedChunks[resultKey] = result.lod;
             loadingChunks.erase(resultKey);
             m_bufferPool.Release({ std::move(result.vertices), std::move(result.indices) });
@@ -240,6 +282,7 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
                 renderer.RemoveTerrainChunk(it->first);
                 renderer.RemoveGrass(it->first);
                 renderer.RemoveBoid(it->first);
+                renderer.RemoveWaterChunk(it->first);
                 scene.RemoveChunk(it->first);
                 it = loadedChunks.erase(it);
             }
@@ -397,6 +440,7 @@ TerrainData Chunk::CalculateHeightAndColor(float worldX, float worldZ) {
     static thread_local FastNoiseLite detailNoise;
     static thread_local FastNoiseLite tempNoise;
     static thread_local FastNoiseLite moistNoise;
+    static thread_local FastNoiseLite riverNoise;
     static thread_local bool initialized = false;
 
     if (!initialized) {
@@ -425,6 +469,11 @@ TerrainData Chunk::CalculateHeightAndColor(float worldX, float worldZ) {
         moistNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
         moistNoise.SetFrequency(0.00036f);
 
+        riverNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+        riverNoise.SetFractalType(FastNoiseLite::FractalType_FBm);
+        riverNoise.SetFractalOctaves(2);
+        riverNoise.SetFrequency(0.002f);
+
         initialized = true;
     }
 
@@ -434,6 +483,7 @@ TerrainData Chunk::CalculateHeightAndColor(float worldX, float worldZ) {
     detailNoise.SetSeed(seed + 89);
     tempNoise.SetSeed(seed + 101);
     moistNoise.SetSeed(seed + 202);
+    riverNoise.SetSeed(seed + 999);
 
     auto clamp01 = [](float v) { return std::clamp(v, 0.0f, 1.0f); };
     auto n01 = [](float n) { return (n + 1.0f) * 0.5f; };
@@ -450,7 +500,7 @@ TerrainData Chunk::CalculateHeightAndColor(float worldX, float worldZ) {
     float detail = n01(detailNoise.GetNoise(worldX, worldZ));
 
     // Start with a foundational height to keep things above the void
-    float height = 5.0f;
+    float height = 25.0f;
 
     // Lowlands: Gentle, sweeping hills
     float plainsHeight = base * 25.0f;
@@ -489,7 +539,48 @@ TerrainData Chunk::CalculateHeightAndColor(float worldX, float worldZ) {
         blendedWeights.z += grassAmount * (1.0f - blend); // Shift grass weight into dirt weight
     }
 
-    return { height, blendedWeights, blendedColor };
+    // -- - 4. BIOME - BASED LAKE GENERATION-- -
+
+    float lakeWaterLevel = 12.0f;
+    float lakeMinHeight = 10.0f;
+    float lakeMaxHeight = 80.0f;
+
+    float hugeLakeNoise = n01(riverNoise.GetNoise(worldX * 0.25f, worldZ * 0.25f));
+    float mediumLakeNoise = n01(riverNoise.GetNoise(worldX * 0.65f + 1000.0f, worldZ * 0.65f - 2000.0f));
+
+    float hugeLakeMask = glm::smoothstep(0.64f, 0.82f, hugeLakeNoise);
+    float mediumLakeMask = glm::smoothstep(0.60f, 0.80f, mediumLakeNoise);
+
+    float lakeMask = std::max(hugeLakeMask, mediumLakeMask);
+
+    float lakeExpand = glm::smoothstep(0.58f, 0.70f, std::max(hugeLakeNoise, mediumLakeNoise));
+
+    lakeMask = std::max(lakeMask, lakeExpand * 0.85f);
+
+    float localDetail = std::abs(detailNoise.GetNoise(worldX, worldZ));
+    float mountainSteepness = mountainMask * 25.0f;
+    float terrainSteepness = mountainSteepness + localDetail * 8.0f;
+
+    float slopeMask = 1.0f - glm::smoothstep(8.0f, 20.0f, terrainSteepness);
+
+    lakeMask *= slopeMask;
+
+    if (height < lakeMinHeight || height > lakeMaxHeight) {
+        lakeMask = 0.0f;
+    }
+
+    if (lakeMask > 0.001f) {
+        float lakeDepth = hugeLakeMask > mediumLakeMask ? 14.0f : 8.0f;
+        float lakeBed = lakeWaterLevel - lakeDepth;
+
+        height = std::lerp(height, lakeBed, lakeMask);
+
+        blendedColor = glm::mix(blendedColor, glm::vec3(0.20f, 0.18f, 0.15f), lakeMask);
+
+        blendedWeights = glm::mix(blendedWeights, glm::vec3(1.0f, 0.0f, 0.0f), lakeMask);
+    }
+
+    return { height, blendedWeights, blendedColor, lakeMask > 0.001f ? lakeWaterLevel : 0.0f };
 }
 float Chunk::GetHeight(float worldX, float worldZ) {
     return CalculateHeightAndColor(worldX, worldZ).height;
@@ -583,6 +674,8 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
 
     int pad = 2;
     int gridSize = resolution + pad * 2;
+
+    std::vector<float> waterGrid(gridSize * gridSize);
     std::vector<float> heightGrid(gridSize * gridSize);
     std::vector<glm::vec3> colorGrid(gridSize * gridSize);
     std::vector<glm::vec3> groundColorGrid(gridSize * gridSize);
@@ -600,6 +693,7 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
             const float worldX = originX + (gx - pad) * step;
             TerrainData data = CalculateHeightAndColor(worldX, worldZ);
 
+            waterGrid[rowOffset + gx] = data.waterLevel;
             heightGrid[rowOffset + gx] = data.height;
             colorGrid[rowOffset + gx] = data.biomeWeights;
             groundColorGrid[rowOffset + gx] = data.groundColor;
@@ -629,6 +723,11 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
         int cx = std::clamp(localX + pad, 0, gridSize - 1);
         int cz = std::clamp(localZ + pad, 0, gridSize - 1);
         return groundColorGrid[cz * gridSize + cx];
+        };
+    auto GetCachedWater = [&](int localX, int localZ) -> float {
+        int cx = std::clamp(localX + pad, 0, gridSize - 1);
+        int cz = std::clamp(localZ + pad, 0, gridSize - 1);
+        return waterGrid[cz * gridSize + cx];
         };
 
     for (int z = 0; z < resolution; z++) {
@@ -692,6 +791,66 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
             uint32_t i2 = (z + 1) * resolution + x;
             uint32_t i3 = i2 + 1;
             outResult.indices.insert(outResult.indices.end(), { i0, i1, i2, i1, i3, i2 });
+        }
+    }
+
+    // --- 4.5 GENERATE FLAT LAKE MESH ---
+    outResult.waterVertices.clear();
+    outResult.waterIndices.clear();
+
+    std::unordered_map<uint32_t, uint32_t> waterVertIndices;
+
+    for (int z = 0; z < resolution - 1; ++z) {
+        if (isCancelled()) {
+            discardCancelledResult();
+            return;
+        }
+
+        for (int x = 0; x < resolution - 1; ++x) {
+            float w00 = GetCachedWater(x, z);
+            float w10 = GetCachedWater(x + 1, z);
+            float w01 = GetCachedWater(x, z + 1);
+            float w11 = GetCachedWater(x + 1, z + 1);
+
+            if (w00 <= 0.0f || w10 <= 0.0f || w01 <= 0.0f || w11 <= 0.0f) {
+                continue;
+            }
+
+            float waterHeight = std::max(std::max(w00, w10), std::max(w01, w11));
+
+            auto addWaterVert = [&](int vx, int vz) -> uint32_t {
+                uint32_t key = vz * resolution + vx;
+
+                auto it = waterVertIndices.find(key);
+
+                if (it != waterVertIndices.end()) {
+                    return it->second;
+                }
+
+                ModelVertex v{};
+                v.pos = glm::vec3(originX + vx * step, waterHeight, originZ + vz * step);
+                v.normal = glm::vec3(0.0f, 1.0f, 0.0f);
+                v.tangent = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
+                v.color = glm::vec3(0.1f, 0.4f, 0.5f);
+
+                uint32_t index = static_cast<uint32_t>(outResult.waterVertices.size());
+
+                outResult.waterVertices.push_back(v);
+
+                waterVertIndices[key] = index;
+
+                return index;
+                };
+
+            uint32_t i00 = addWaterVert(x, z);
+            uint32_t i10 = addWaterVert(x + 1, z);
+            uint32_t i01 = addWaterVert(x, z + 1);
+            uint32_t i11 = addWaterVert(x + 1, z + 1);
+
+            outResult.waterIndices.insert(outResult.waterIndices.end(), {
+                i00, i10, i01,
+                i10, i11, i01
+                });
         }
     }
 
@@ -793,7 +952,16 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
         glm::vec3 c1 = glm::mix(c01, c11, tx);
         glm::vec3 finalC = glm::mix(c0, c1, tz);
 
-        return { finalH, finalW, finalC };
+        float water00 = GetCachedWater(x0, z0);
+        float water10 = GetCachedWater(x1, z0);
+        float water01 = GetCachedWater(x0, z1);
+        float water11 = GetCachedWater(x1, z1);
+
+        float water0 = std::lerp(water00, water10, tx);
+        float water1 = std::lerp(water01, water11, tx);
+        float finalWater = std::lerp(water0, water1, tz);
+
+        return { finalH, finalW, finalC, finalWater };
         };
 
     GenerateChunkProps(chunkX, chunkZ, outResult.lod, outResult, GetFastLocalData);
@@ -894,7 +1062,10 @@ void Chunk::GenerateChunkProps(int chunkX, int chunkZ, int lod, ChunkJobResult& 
             if (def.props.empty()) continue;
 
             uint32_t coordHash = Hash2D(chunkX * 1000 + ix, chunkZ * 1000 + iz, s_globalSeed);
+
             TerrainData data = heightColorFunc(worldX, worldZ);
+
+            if (data.waterLevel > 0.0f) continue;
 
             float masks[2] = { treeNoise.GetNoise(worldX, worldZ), stoneNoise.GetNoise(worldX, worldZ) };
             float spawnChance = (coordHash % 1000) / 1000.0f;
@@ -926,7 +1097,6 @@ void Chunk::GenerateChunkProps(int chunkX, int chunkZ, int lod, ChunkJobResult& 
         }
     }
 }
-
 void Chunk::GenerateChunkSwarms(int chunkX, int chunkZ, int lod, ChunkJobResult& outResult,
     const std::function<TerrainData(float, float)>& heightColorFunc) {
 
@@ -940,6 +1110,9 @@ void Chunk::GenerateChunkSwarms(int chunkX, int chunkZ, int lod, ChunkJobResult&
     if (def.swarms.empty()) return;
 
     TerrainData data = heightColorFunc(centerWorldX, centerWorldZ);
+
+    if (data.waterLevel > 0.0f) return;
+
     uint32_t coordHash = Hash2D(chunkX, chunkZ, s_globalSeed);
     float spawnChance = (coordHash % 1000) / 1000.0f;
 
@@ -953,10 +1126,17 @@ void Chunk::GenerateChunkSwarms(int chunkX, int chunkZ, int lod, ChunkJobResult&
                 float jitterX = ((coordHash * (i + 1) % 100) / 100.0f) * (rule.spreadRadius * 2) - rule.spreadRadius;
                 float jitterZ = ((coordHash * (i + 3) % 100) / 100.0f) * (rule.spreadRadius * 2) - rule.spreadRadius;
 
+                float boidX = centerWorldX + jitterX;
+                float boidZ = centerWorldZ + jitterZ;
+
+                TerrainData boidData = heightColorFunc(boidX, boidZ);
+
+                if (boidData.waterLevel > 0.0f) continue;
+
                 float scaleT = ((coordHash * (i + 7) % 100) / 100.0f);
                 float randomScale = std::lerp(rule.minScale, rule.maxScale, scaleT);
 
-                b.position = glm::vec4(centerWorldX + jitterX, data.height + rule.verticalOffset + (i % 4), centerWorldZ + jitterZ, randomScale);
+                b.position = glm::vec4(boidX, boidData.height + rule.verticalOffset + (i % 4), boidZ, randomScale);
 
                 float randomTimeOffset = static_cast<float>((coordHash * i) % 1000);
                 b.velocity = glm::vec4(1.0f, 0.0f, 0.0f, randomTimeOffset);

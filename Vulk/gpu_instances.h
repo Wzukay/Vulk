@@ -49,7 +49,6 @@ struct PushConstants {
     uint32_t textureId;         // 4 bytes
     uint32_t normalTextureId;   // 4 bytes
     uint32_t objectId;          // 4 bytes
-    float lodBlend;
     uint32_t ormTextureId;
 };
 
@@ -140,9 +139,9 @@ struct TerrainChunkGPU {
     bool cachedOccluded = false;
 };
 struct TerrainChunkGPUData {
-    glm::vec4 centerRadius; // xyz = world center, w = bounding radius
+    glm::vec4 bounds;
     uint32_t indexCount;
-    uint32_t firstIndex;
+    uint32_t indexOffset;
     uint32_t vertexOffset;
     uint32_t lod;
 };

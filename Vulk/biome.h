@@ -58,6 +58,11 @@ struct BiomeDefinition {
     glm::vec3 textureWeights;
     glm::vec3 groundColor;
 
+    float lakeSpawnChance;
+    float lakeWaterLevel;
+    float lakeMinHeight;
+    float lakeMaxHeight;
+
     std::vector<PropSpawnRule> props;
     std::vector<SwarmSpawnRule> swarms;
 };

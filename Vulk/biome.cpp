@@ -35,6 +35,10 @@ static const BiomeDefinition G_BIOMES[] = {
         .heightScale = 0.0f, .exponent = 0.0f,
         .textureWeights = glm::vec3(1.0f, 0.0f, 0.0f), // 100% Sand
         .groundColor = glm::vec3(0.76f, 0.69f, 0.50f), // Warm Tan
+        .lakeSpawnChance = 0.15f,
+        .lakeWaterLevel = 10.0f,
+        .lakeMinHeight = 5.0f,
+        .lakeMaxHeight = 45.0f,
         .props = {
             PropSpawnRule{ ROCK_MESHES, 0.01f, 0.8f, NOISE_INDEX_ROCKS, 2.0f, 150.0f, 0.5f, 1.2f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
         },
@@ -45,6 +49,10 @@ static const BiomeDefinition G_BIOMES[] = {
         .heightScale = 0.0f, .exponent = 0.0f,
         .textureWeights = glm::vec3(0.4f, 0.6f, 0.0f),
         .groundColor = glm::vec3(0.58f, 0.58f, 0.30f), // Dry Yellow-Green
+        .lakeSpawnChance = 0.30f,
+        .lakeWaterLevel = 12.0f,
+        .lakeMinHeight = 5.0f,
+        .lakeMaxHeight = 55.0f,
         .props = {
             PropSpawnRule{ TREE_MESHES, 0.02f, 0.4f, NOISE_INDEX_TREES, 2.0f, 60.0f, 0.08f, 0.12f, TREE_GROUND_OFFSET, CULL_LOD_TREES, false },
             PropSpawnRule{ ROCK_MESHES, 0.02f, 0.6f, NOISE_INDEX_ROCKS, 2.0f, 180.0f, 0.8f, 1.5f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
@@ -55,7 +63,10 @@ static const BiomeDefinition G_BIOMES[] = {
         .type = BiomeType::Jungle,
         .heightScale = 0.0f, .exponent = 0.0f,
         .textureWeights = glm::vec3(0.1f, 0.9f, 0.0f),
-        .groundColor = glm::vec3(0.15f, 0.35f, 0.12f), // Deep Vibrant Green
+        .groundColor = glm::vec3(0.15f, 0.35f, 0.12f), // Deep Vibrant Green.lakeSpawnChance = 0.45f,
+        .lakeWaterLevel = 14.0f,
+        .lakeMinHeight = 5.0f,
+        .lakeMaxHeight = 70.0f,
         .props = {
         // High density, variable size trees to simulate canopy
         PropSpawnRule{ TREE_MESHES, 0.30f, 0.0f, NOISE_INDEX_TREES, 2.0f, 90.0f, 0.06f, 0.25f, TREE_GROUND_OFFSET, CULL_LOD_TREES, false }
@@ -67,6 +78,10 @@ static const BiomeDefinition G_BIOMES[] = {
     .heightScale = 0.0f, .exponent = 0.0f,
     .textureWeights = glm::vec3(0.6f, 0.4f, 0.0f),
     .groundColor = glm::vec3(0.25f, 0.28f, 0.18f), // Murky Mud Green
+    .lakeSpawnChance = 0.90f,
+    .lakeWaterLevel = 11.0f,
+    .lakeMinHeight = 2.0f,
+    .lakeMaxHeight = 35.0f,
     .props = {
         PropSpawnRule{ TREE_MESHES, 0.10f, 0.3f, NOISE_INDEX_TREES, 2.0f, 30.0f, 0.08f, 0.15f, TREE_GROUND_OFFSET, CULL_LOD_TREES, false },
         PropSpawnRule{ ROCK_MESHES, 0.05f, 0.4f, NOISE_INDEX_ROCKS, 2.0f, 40.0f, 1.0f, 2.0f, -0.5f, CULL_LOD_ROCKS, true } // Sunken rocks
@@ -83,6 +98,10 @@ static const BiomeDefinition G_BIOMES[] = {
     .heightScale = 0.0f, .exponent = 0.0f,
     .textureWeights = glm::vec3(0.3f, 0.7f, 0.0f),
     .groundColor = glm::vec3(0.48f, 0.58f, 0.24f),
+    .lakeSpawnChance = 0.25f,
+    .lakeWaterLevel = 12.0f,
+    .lakeMinHeight = 5.0f,
+    .lakeMaxHeight = 55.0f,
     .props = {
         // Tiny trees acting as bushes
         PropSpawnRule{ TREE_MESHES, 0.08f, 0.5f, NOISE_INDEX_TREES, 2.0f, 80.0f, 0.03f, 0.05f, -0.5f, CULL_LOD_TREES, true },
@@ -95,6 +114,10 @@ static const BiomeDefinition G_BIOMES[] = {
     .heightScale = 0.0f, .exponent = 0.0f,
     .textureWeights = glm::vec3(0.0f, 1.0f, 0.0f),
     .groundColor = glm::vec3(0.35f, 0.49f, 0.18f), // Lush Green
+    .lakeSpawnChance = 0.65f,
+    .lakeWaterLevel = 13.0f,
+    .lakeMinHeight = 5.0f,
+    .lakeMaxHeight = 50.0f,
     .props = {
         PropSpawnRule{ ROCK_MESHES, 0.01f, 0.8f, NOISE_INDEX_ROCKS, 2.0f, 180.0f, 0.8f, 1.2f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
     },
@@ -105,6 +128,10 @@ static const BiomeDefinition G_BIOMES[] = {
     .heightScale = 0.0f, .exponent = 0.0f,
     .textureWeights = glm::vec3(0.1f, 0.9f, 0.0f),
     .groundColor = glm::vec3(0.28f, 0.42f, 0.18f),
+    .lakeSpawnChance = 0.35f,
+    .lakeWaterLevel = 13.0f,
+    .lakeMinHeight = 5.0f,
+    .lakeMaxHeight = 65.0f,
     .props = {
         PropSpawnRule{ TREE_MESHES, 0.12f, 0.2f, NOISE_INDEX_TREES, 2.0f, 85.0f, 0.08f, 0.14f, TREE_GROUND_OFFSET, CULL_LOD_TREES, false },
         PropSpawnRule{ ROCK_MESHES, 0.05f, 0.5f, NOISE_INDEX_ROCKS, 2.0f, 180.0f, 1.0f, 1.5f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
@@ -116,6 +143,10 @@ static const BiomeDefinition G_BIOMES[] = {
     .heightScale = 0.0f, .exponent = 0.0f,
     .textureWeights = glm::vec3(0.3f, 0.7f, 0.0f),
     .groundColor = glm::vec3(0.20f, 0.30f, 0.14f), // Very dark green
+    .lakeSpawnChance = 0.30f,
+    .lakeWaterLevel = 14.0f,
+    .lakeMinHeight = 5.0f,
+    .lakeMaxHeight = 60.0f,
     .props = {
         PropSpawnRule{ TREE_MESHES, 0.25f, 0.05f, NOISE_INDEX_TREES, 2.0f, 100.0f, 0.10f, 0.18f, TREE_GROUND_OFFSET, CULL_LOD_TREES, false }
     },
@@ -131,6 +162,10 @@ static const BiomeDefinition G_BIOMES[] = {
     .heightScale = 0.0f, .exponent = 0.0f,
     .textureWeights = glm::vec3(0.5f, 0.3f, 0.2f),
     .groundColor = glm::vec3(0.45f, 0.42f, 0.38f), // Dead Brown/Grey
+    .lakeSpawnChance = 0.25f,
+    .lakeWaterLevel = 10.0f,
+    .lakeMinHeight = 5.0f,
+    .lakeMaxHeight = 45.0f,
     .props = {
         PropSpawnRule{ ROCK_MESHES, 0.05f, 0.4f, NOISE_INDEX_ROCKS, 2.0f, 180.0f, 0.5f, 1.0f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
     },
@@ -141,6 +176,10 @@ static const BiomeDefinition G_BIOMES[] = {
     .heightScale = 0.0f, .exponent = 0.0f,
     .textureWeights = glm::vec3(0.2f, 0.6f, 0.2f),
     .groundColor = glm::vec3(0.32f, 0.38f, 0.32f), // Cold desaturated green
+    .lakeSpawnChance = 0.35f,
+    .lakeWaterLevel = 12.0f,
+    .lakeMinHeight = 5.0f,
+    .lakeMaxHeight = 65.0f,
     .props = {
         PropSpawnRule{ TREE_MESHES, 0.15f, 0.2f, NOISE_INDEX_TREES, 2.0f, 100.0f, 0.06f, 0.12f, TREE_GROUND_OFFSET, CULL_LOD_TREES, false },
         PropSpawnRule{ ROCK_MESHES, 0.08f, 0.4f, NOISE_INDEX_ROCKS, 2.0f, 180.0f, 1.0f, 1.5f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
@@ -152,6 +191,10 @@ static const BiomeDefinition G_BIOMES[] = {
     .heightScale = 0.0f, .exponent = 0.0f,
     .textureWeights = glm::vec3(0.0f, 0.0f, 1.0f), // 100% Snow/Rock texture
     .groundColor = glm::vec3(0.85f, 0.88f, 0.92f), // Pure Snow
+    .lakeSpawnChance = 0.10f,
+    .lakeWaterLevel = 11.0f,
+    .lakeMinHeight = 5.0f,
+    .lakeMaxHeight = 40.0f,
     .props = {
         PropSpawnRule{ ROCK_MESHES, 0.03f, 0.5f, NOISE_INDEX_ROCKS, 2.0f, 200.0f, 1.0f, 2.0f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
     },
@@ -162,6 +205,10 @@ static const BiomeDefinition G_BIOMES[] = {
     .heightScale = 0.0f, .exponent = 0.0f,
     .textureWeights = glm::vec3(0.1f, 0.0f, 0.9f),
     .groundColor = glm::vec3(0.50f, 0.52f, 0.55f), // Grey rock base
+    .lakeSpawnChance = 0.0f,
+    .lakeWaterLevel = 0.0f,
+    .lakeMinHeight = 0.0f,
+    .lakeMaxHeight = 0.0f,
     .props = {
         // Massive boulders bridging the landscape
         PropSpawnRule{ ROCK_MESHES, 0.12f, 0.2f, NOISE_INDEX_ROCKS, 2.0f, 250.0f, 1.5f, 4.0f, -0.5f, CULL_LOD_ROCKS, true }

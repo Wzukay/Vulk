@@ -6,7 +6,6 @@ layout(push_constant) uniform Constants {
     uint textureId;
     uint normalTextureId;
     uint objectId;
-    float lodBlend; 
     uint ormTextureId; // <-- NEW
 } push;
 

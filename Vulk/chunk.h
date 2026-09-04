@@ -47,6 +47,7 @@ struct TerrainData {
     float height;
     glm::vec3 biomeWeights; // Used for texture splatting
     glm::vec3 groundColor;  // Used for base ground tint
+    float waterLevel;
 };
 
 struct TerrainSample
@@ -63,6 +64,10 @@ struct ChunkJobResult {
     ChunkCoord coord;
     std::vector<ModelVertex> vertices;
     std::vector<uint32_t> indices;
+
+    std::vector<ModelVertex> waterVertices;
+    std::vector<uint32_t> waterIndices;
+
     int lod;
 
     ChunkGridCache physicsGrid;
@@ -177,10 +182,10 @@ private:
     glm::vec3 ChunkBoundsCenter(int cx, int cz) const;
     float ChunkBoundsRadius() const;
 
-    static std::vector<glm::vec2> ConvexHull(std::vector<glm::vec2> points);
     static TerrainData CalculateHeightAndColor(float worldX, float worldZ);
     int DesiredLodForDistance(float distance) const;
     static void PrecomputeChunkOffsets(int viewDistance);
+    float GetLodMorph(float closestEdgeDistance, int currentLod) const;
 
     static uint32_t Hash2D(int x, int z, int seed);
 
