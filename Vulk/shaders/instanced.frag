@@ -13,7 +13,6 @@ layout(location = 3) in vec3 fragWorldPos;
 layout(location = 4) in vec3 fragTangent;
 layout(location = 5) in float fragTangentHandedness;
 layout(location = 6) flat in uint fragNormalTextureId;
-layout(location = 7) flat in uint fragOrmTextureId;
 
 layout(location = 0) out vec4 outColor;
 

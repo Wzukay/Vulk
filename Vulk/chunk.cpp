@@ -758,17 +758,19 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
 
             glm::vec3 tangentX(2.0f * step, hR - hL, 0.0f);
             glm::vec3 tangentZ(0.0f, hU - hD, 2.0f * step);
-            v.normal = glm::normalize(glm::cross(tangentZ, tangentX));
+            glm::vec3 calculatedNormal = glm::normalize(glm::cross(tangentZ, tangentX));
             glm::vec3 t = glm::normalize(tangentX);
-            t = glm::normalize(t - v.normal * glm::dot(v.normal, t));
+            t = glm::normalize(t - calculatedNormal * glm::dot(calculatedNormal, t));
 
-            // Note: v.tangent.w can store a 4th texture weight if needed in the future
-            v.tangent = glm::vec4(biomeWeights, 1.0f);
+            v.normal = EncodeNormal(calculatedNormal);
+            v.tangent = glm::vec4(t, 1.0f); 
 
             int cx = ((x + 1) / 2) * 2;
             int cz = ((z + 1) / 2) * 2;
 
             float hCoarse = GetCachedHeight(cx, cz);
+            glm::vec3 coarseBiomeWeights = GetCachedColor(cx, cz);
+
             float hL_coarse = GetCachedHeight(cx - 2, cz);
             float hR_coarse = GetCachedHeight(cx + 2, cz);
             float hD_coarse = GetCachedHeight(cx, cz - 2);
@@ -777,9 +779,12 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
             glm::vec3 coarseTangentX(4.0f * step, hR_coarse - hL_coarse, 0.0f);
             glm::vec3 coarseTangentZ(0.0f, hU_coarse - hD_coarse, 4.0f * step);
             glm::vec3 coarseNormal = glm::normalize(glm::cross(coarseTangentZ, coarseTangentX));
+            glm::vec3 calculatedCoarseNormal = glm::normalize(glm::cross(coarseTangentZ, coarseTangentX));
 
-            v.coarsePos = glm::vec3(originX + cx * step, hCoarse, originZ + cz * step);
-            v.coarseNormal = coarseNormal;
+            v.coarseNormal = EncodeNormal(calculatedCoarseNormal);
+            v.coarseTangent = glm::vec4(coarseBiomeWeights, 1.0f);
+            v.coarseY = hCoarse;
+
             outResult.vertices.push_back(v);
         }
     }
@@ -822,21 +827,26 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
                 uint32_t key = vz * resolution + vx;
 
                 auto it = waterVertIndices.find(key);
-
                 if (it != waterVertIndices.end()) {
                     return it->second;
                 }
 
                 ModelVertex v{};
                 v.pos = glm::vec3(originX + vx * step, waterHeight, originZ + vz * step);
-                v.normal = glm::vec3(0.0f, 1.0f, 0.0f);
+
+                // FIX: Encode the upward normal into the 4-byte uint32_t
+                v.normal = EncodeNormal(glm::vec3(0.0f, 1.0f, 0.0f));
+
                 v.tangent = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
                 v.color = glm::vec3(0.1f, 0.4f, 0.5f);
 
+                // FIX: Initialize coarse fields to match the base fields for water
+                v.coarseY = v.pos.y;
+                v.coarseNormal = v.normal;
+                v.coarseTangent = v.tangent;
+
                 uint32_t index = static_cast<uint32_t>(outResult.waterVertices.size());
-
                 outResult.waterVertices.push_back(v);
-
                 waterVertIndices[key] = index;
 
                 return index;
@@ -859,15 +869,13 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
         uint32_t skirtA = (uint32_t)outResult.vertices.size();
         ModelVertex vA = outResult.vertices[indexA];
         vA.pos.y -= skirtDepth;
-        vA.coarsePos = vA.pos;
-        vA.coarseNormal = vA.normal;
+        vA.coarseY -= skirtDepth; // FIX: Ensure the skirt morphs down cleanly!
         outResult.vertices.push_back(vA);
 
         uint32_t skirtB = (uint32_t)outResult.vertices.size();
         ModelVertex vB = outResult.vertices[indexB];
         vB.pos.y -= skirtDepth;
-        vB.coarsePos = vB.pos;
-        vB.coarseNormal = vB.normal;
+        vB.coarseY -= skirtDepth; // FIX: Ensure the skirt morphs down cleanly!
         outResult.vertices.push_back(vB);
 
         outResult.indices.insert(outResult.indices.end(), { indexA, skirtA, indexB, indexB, skirtA, skirtB });

@@ -15,7 +15,6 @@ layout(std430, binding = 1) readonly buffer LightBuffer {
 
 layout(binding = 2) uniform sampler2D globalTextures[];
 layout(binding = 3) uniform sampler2D normalTextures[];
-layout(binding = 5) uniform sampler2D ormTextures[];
 
 layout(location = 0) in vec3 fragNormal;
 layout(location = 1) in vec2 fragTexCoord;
@@ -24,7 +23,6 @@ layout(location = 3) in vec3 fragWorldPos;
 layout(location = 4) in vec3 fragTangent;
 layout(location = 5) in float fragTangentHandedness;
 layout(location = 6) flat in uint fragNormalTextureId;
-layout(location = 7) flat in uint fragOrmTextureId;
 
 layout(location = 0) out vec4 outColor;
 
@@ -202,13 +200,10 @@ void main() {
                 nonuniformEXT(fragNormalTextureId)],
             fragTexCoord)));
 
-    vec4 orm = texture(
-        ormTextures[nonuniformEXT(fragOrmTextureId)],
-        fragTexCoord);
-
-    float ao = orm.r;
-    float roughness = orm.g;
-    float metallic = orm.b;
+    // --- HARDCODED PBR VALUES (ORM removed) ---
+    float ao = 1.0;           // No ambient occlusion
+    float roughness = 0.5;    // Medium roughness
+    float metallic = 0.0;     // Non-metallic
 
     vec3 V = normalize(ubo.cameraPos - fragWorldPos);
     vec3 result = vec3(0.0);

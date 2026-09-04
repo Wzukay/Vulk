@@ -34,7 +34,6 @@ struct StaticIndirectBatch {
     uint32_t sourceCount = 0;
     uint32_t textureId = 0;
     uint32_t normalTextureId = 0;
-    uint32_t ormTextureId = 0;
 };
 
 struct StaticCullPushConstants {

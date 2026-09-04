@@ -49,7 +49,7 @@ struct PushConstants {
     uint32_t textureId;         // 4 bytes
     uint32_t normalTextureId;   // 4 bytes
     uint32_t objectId;          // 4 bytes
-    uint32_t ormTextureId;
+    float morphBlend;
 };
 
 struct SSAOPushConstants {
@@ -147,12 +147,17 @@ struct TerrainChunkGPUData {
 };
 
 struct ComputePush {
-    glm::mat4 viewProj;
-    glm::vec3 cameraPos;
-    uint32_t totalChunks;
-    glm::vec2 hzbSize;
-    float maxMip;
+    glm::mat4 viewProj;         // 64 bytes
+    glm::vec4 fadeParams;       // 16 bytes
+    glm::vec3 cameraPos;        // 12 bytes
+    float chunkSize;            // 4 bytes
+    glm::vec2 hzbSize;          // 8 bytes
+    float maxMip;               // 4 bytes
+    float transitionWidth;      // 4 bytes
+    uint32_t totalChunks;       // 4 bytes
+    // Total: 116 bytes
 };
+static_assert(sizeof(ComputePush) == 116, "ComputePush size must be 116 bytes");
 
 struct GrassChunkMetadata {
     glm::vec3 center;
@@ -172,11 +177,11 @@ struct PropInstance {
 };
 struct InstanceData {
     alignas(16) glm::mat4 modelMatrix;
-    alignas(16) glm::vec4 customData; // x = windPhase, y = albedo tint, z = metallic override, w = reserved
+    alignas(16) glm::vec4 customData;
 
     static VkVertexInputBindingDescription getBindingDescription() {
         VkVertexInputBindingDescription bindingDescription{};
-        bindingDescription.binding = 1; // Binding 0 is usually vertices
+        bindingDescription.binding = 1;
         bindingDescription.stride = sizeof(InstanceData);
         bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
         return bindingDescription;
@@ -185,17 +190,17 @@ struct InstanceData {
     static std::array<VkVertexInputAttributeDescription, 5> getAttributeDescriptions() {
         std::array<VkVertexInputAttributeDescription, 5> attributeDescriptions{};
 
-        // Matrix requires 4 vec4 slots. Since ModelVertex uses locations 0-6, this starts at 7.
+        // Locations 5, 6, 7, 8 for mat4 columns
         for (int i = 0; i < 4; i++) {
             attributeDescriptions[i].binding = 1;
-            attributeDescriptions[i].location = 7 + i; // FIX: Shifted to start at 7
+            attributeDescriptions[i].location = 5 + i;
             attributeDescriptions[i].format = VK_FORMAT_R32G32B32A32_SFLOAT;
             attributeDescriptions[i].offset = offsetof(InstanceData, modelMatrix) + sizeof(glm::vec4) * i;
         }
 
-        // Custom Data Payload
+        // Location 9 for customData
         attributeDescriptions[4].binding = 1;
-        attributeDescriptions[4].location = 11; // FIX: Shifted to 11
+        attributeDescriptions[4].location = 9;
         attributeDescriptions[4].format = VK_FORMAT_R32G32B32A32_SFLOAT;
         attributeDescriptions[4].offset = offsetof(InstanceData, customData);
 

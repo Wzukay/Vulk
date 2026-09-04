@@ -23,12 +23,16 @@ layout(std430, set = 0, binding = 1) writeonly buffer DrawCommands { VkDrawIndex
 layout(std430, set = 0, binding = 2) buffer DrawCount { uint visibleCount; };
 layout(set = 0, binding = 3) uniform sampler2D hzb;
 
-layout(push_constant) uniform CullPushConstants {
-    mat4 viewProj;
-    vec3 cameraPos;
-    uint totalChunks;
-    vec2 hzbSize;
-    float maxMip;
+layout(push_constant, std430) uniform CullPushConstants {
+    mat4 viewProj;          // 64 bytes (offset 0)
+    vec4 fadeParams;        // 16 bytes (offset 64)
+    vec3 cameraPos;         // 12 bytes (offset 80) — aligned to 4 because std430 doesn't pad vec3 to 16!
+    float chunkSize;        // 4 bytes (offset 92)
+    vec2 hzbSize;           // 8 bytes (offset 96)
+    float maxMip;           // 4 bytes (offset 104)
+    float transitionWidth;  // 4 bytes (offset 108)
+    uint totalChunks;       // 4 bytes (offset 112)
+    // Total: 116 bytes
 } push;
 
 void main() {
@@ -107,14 +111,37 @@ void main() {
     }
 
     float dist = length(center - push.cameraPos);
+    float closestEdge = max(0.0, dist - (push.chunkSize * 0.75));
+    float transWidth = push.transitionWidth;
     float blend = 0.0;
+
+    // Note: chunk.lod is the LOD the geometry was generated with.
+    // We compute the blend from that LOD toward the next higher LOD.
     if (chunk.lod == 0) {
-        float morphEnd = 512.0 * 2.0;
-        float t = clamp(dist / morphEnd, 0.0, 1.0);
-        blend = t * t * (3.0 - 2.0 * t);
+        float transStart = push.fadeParams.z - transWidth; // grassFadeStart - transWidth
+        float transEnd   = push.fadeParams.z;              // grassFadeStart
+        blend = clamp((closestEdge - transStart) / (transEnd - transStart), 0.0, 1.0);
+    } else if (chunk.lod == 1) {
+        float transStart = push.fadeParams.w - transWidth; // grassFadeEnd - transWidth
+        float transEnd   = push.fadeParams.w;              // grassFadeEnd
+        blend = clamp((closestEdge - transStart) / (transEnd - transStart), 0.0, 1.0);
+    } else if (chunk.lod == 2) {
+        float transStart = push.fadeParams.x - transWidth; // staticFadeStart - transWidth
+        float transEnd   = push.fadeParams.x;              // staticFadeStart
+        blend = clamp((closestEdge - transStart) / (transEnd - transStart), 0.0, 1.0);
+    } else if (chunk.lod == 3) {
+        float transStart = push.fadeParams.y - transWidth; // staticFadeEnd - transWidth
+        float transEnd   = push.fadeParams.y;              // staticFadeEnd
+        blend = clamp((closestEdge - transStart) / (transEnd - transStart), 0.0, 1.0);
+    } else {
+        // LOD 4 (culled or very far) – fully coarse
+        blend = 1.0;
     }
 
-    // --- FIX 3: Revert to 100% reliable standard atomics for AMD compatibility ---
+    // Smoothstep for nicer transition
+    blend = blend * blend * (3.0 - 2.0 * blend);
+
+    // --- Write indirect command ---
     uint drawIdx = atomicAdd(visibleCount, 1);
     commands[drawIdx].indexCount = chunk.indexCount;
     commands[drawIdx].instanceCount = 1;

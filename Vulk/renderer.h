@@ -64,6 +64,12 @@ struct Light {
     }
 };
 
+enum class PipelineVertexType {
+    Terrain,
+    Static,
+    Instanced
+};
+
 class VulkanRenderer {
 private:
     static constexpr uint32_t MAX_SUPPORTED_FRAMES_IN_FLIGHT = 3;

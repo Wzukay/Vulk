@@ -227,10 +227,18 @@ void TerrainRenderer::Cull(VkCommandBuffer commandBuffer, const glm::vec3& camer
 
     ComputePush computePush{};
     computePush.viewProj = viewProj;
+    computePush.fadeParams = glm::vec4(
+        g_Settings.GetStaticFadeStart(),
+        g_Settings.GetStaticFadeEnd(),
+        g_Settings.GetGrassFadeStart(),
+        g_Settings.GetGrassFadeEnd()
+    );
     computePush.cameraPos = cameraPos;
-    computePush.totalChunks = chunkIndex;
+    computePush.chunkSize = m_chunkSize;
     computePush.hzbSize = hzbSize;
     computePush.maxMip = maxMip;
+    computePush.transitionWidth = m_chunkSize * 0.35f;
+    computePush.totalChunks = chunkIndex;
 
     vkCmdPushConstants(commandBuffer, m_computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ComputePush), &computePush);
     vkCmdDispatch(commandBuffer, (chunkIndex + 63) / 64, 1, 1);
@@ -247,9 +255,13 @@ void TerrainRenderer::Draw(VkCommandBuffer commandBuffer, VkPipelineLayout pipel
     vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
     vkCmdBindIndexBuffer(commandBuffer, m_indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
-    PushConstants defaultConstants{};
-    defaultConstants.modelMatrix = glm::mat4(1.0f);
-    vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &defaultConstants);
+    PushConstants pc{};
+    pc.modelMatrix = glm::mat4(1.0f);
+    pc.textureId = 0;
+    pc.normalTextureId = 0;
+    pc.objectId = 0;
+    pc.morphBlend = 0.0f;   // unused but keep safe
+    vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &pc);
 
     vkCmdDrawIndexedIndirect(commandBuffer, m_indirectCommandBuffers[currentFrameIndex], 0, m_cullChunkCount, sizeof(VkDrawIndexedIndirectCommand));
     outDrawCalls++;
@@ -587,7 +599,7 @@ void TerrainRenderer::CreateComputePipeline() {
     VkDescriptorSetLayoutCreateInfo layoutInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, static_cast<uint32_t>(bindings.size()), bindings.data() };
     vkCreateDescriptorSetLayout(m_device, &layoutInfo, nullptr, &m_computeDescriptorSetLayout);
 
-    VkPushConstantRange pushConstantRange{ VK_SHADER_STAGE_COMPUTE_BIT, 0, 128};
+    VkPushConstantRange pushConstantRange{ VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ComputePush) };
 
     VkPipelineLayoutCreateInfo pipelineLayoutInfo{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, nullptr, 0, 1, &m_computeDescriptorSetLayout, 1, &pushConstantRange };
     vkCreatePipelineLayout(m_device, &pipelineLayoutInfo, nullptr, &m_computePipelineLayout);

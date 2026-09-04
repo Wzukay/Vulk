@@ -255,9 +255,7 @@ void StaticMeshRenderer::UpdateScene(const Scene& scene) {
 							alloc.vertexOffset &&
 							batch.textureId == sub.textureId &&
 							batch.normalTextureId ==
-							sub.normalTextureId &&
-							batch.ormTextureId ==
-							sub.ormTextureId;
+							sub.normalTextureId;
 					});
 
 				if (batchIt == m_indirectBatches.end()) {
@@ -278,7 +276,6 @@ void StaticMeshRenderer::UpdateScene(const Scene& scene) {
 					batch.textureId = sub.textureId;
 					batch.normalTextureId =
 						sub.normalTextureId;
-					batch.ormTextureId = sub.ormTextureId;
 
 					m_indirectBatches.push_back(batch);
 					batchIt = std::prev(
@@ -406,7 +403,6 @@ void StaticMeshRenderer::Draw(VkCommandBuffer commandBuffer, VkPipelineLayout pi
 			constants.modelMatrix = obj.modelMatrix;
 			constants.textureId = sub.textureId;
 			constants.normalTextureId = sub.normalTextureId;
-			constants.ormTextureId = sub.ormTextureId;
 
 			vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &constants);
 			vkCmdDrawIndexed(commandBuffer, sub.indexCount, 1, sub.firstIndex, sub.vertexOffset, 0);
@@ -431,7 +427,6 @@ void StaticMeshRenderer::Draw(VkCommandBuffer commandBuffer, VkPipelineLayout pi
 			PushConstants constants{};
 			constants.textureId = batch.textureId;
 			constants.normalTextureId = batch.normalTextureId;
-			constants.ormTextureId = batch.ormTextureId;
 			vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(PushConstants), &constants);
 			vkCmdDrawIndexedIndirect(commandBuffer, m_indirectCommandBuffers[currentFrameIndex],
 				batchIndex * sizeof(VkDrawIndexedIndirectCommand), 1, sizeof(VkDrawIndexedIndirectCommand));

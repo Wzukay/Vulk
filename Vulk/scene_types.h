@@ -27,7 +27,6 @@ struct SubMesh {
     int32_t  vertexOffset = 0;
     uint32_t textureId = 0;
     uint32_t normalTextureId = 0;
-    uint32_t ormTextureId = 0;
 
     glm::vec3 boundingCenterLocal = glm::vec3(0.0f);
     float boundingRadiusLocal = 0.0f;

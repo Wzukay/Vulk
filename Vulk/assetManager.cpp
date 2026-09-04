@@ -842,7 +842,7 @@ static void ComputeTangents(std::vector<ModelVertex>& verts, const std::vector<u
     }
 
     for (size_t i = 0; i < verts.size(); ++i) {
-        glm::vec3 n = verts[i].normal;
+        glm::vec3 n = DecodeNormal(verts[i].normal);
         glm::vec3 t = tanAccum[i];
 
         // Gram-Schmidt orthogonalize against the normal
@@ -861,6 +861,8 @@ static void ComputeTangents(std::vector<ModelVertex>& verts, const std::vector<u
         float handedness = (glm::dot(glm::cross(n, t), bitanAccum[i]) < 0.0f) ? -1.0f : 1.0f;
 
         verts[i].tangent = glm::vec4(t, handedness);
+
+        verts[i].coarseTangent = verts[i].tangent;
     }
 }
 
@@ -988,11 +990,11 @@ void AssetManager::LoadGLTF(const std::string& path) {
                         localVerts[v].pos = glm::vec3(worldPos);
 
                         // Populate coarse data for fallback logic
-                        localVerts[v].coarsePos = localVerts[v].pos;
+                        localVerts[v].coarseY = localVerts[v].pos.y;
                     }
                     else if (attrib->type == cgltf_attribute_type_normal) {
                         glm::vec3 worldNorm = normalMatrix * glm::vec3(values[0], values[1], values[2]);
-                        localVerts[v].normal = glm::normalize(worldNorm);
+                        localVerts[v].normal = EncodeNormal(glm::normalize(worldNorm));
                         localVerts[v].coarseNormal = localVerts[v].normal;
                     }
                     else if (attrib->type == cgltf_attribute_type_texcoord) {
@@ -1000,7 +1002,7 @@ void AssetManager::LoadGLTF(const std::string& path) {
                     }
                     else if (attrib->type == cgltf_attribute_type_tangent) {
                         glm::vec3 worldTan = normalMatrix * glm::vec3(values[0], values[1], values[2]);
-                        localVerts[v].tangent = glm::vec4(glm::normalize(worldTan), values[3]); // w is handedness
+                        localVerts[v].coarseTangent = localVerts[v].tangent;
                     }
                 }
             }

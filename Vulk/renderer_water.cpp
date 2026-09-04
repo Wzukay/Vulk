@@ -67,7 +67,7 @@ void WaterRenderer::CreatePipeline(VkFormat colorFormat, VkFormat depthFormat, V
 
     // Update vertex input to match the standard ModelVertex layout
     auto bindingDescription = ModelVertex::getBindingDescription();
-    auto attributeDescriptions = ModelVertex::getAttributeDescriptions();
+    auto attributeDescriptions = ModelVertex::getStaticAttributeDescriptions();
 
     VkPipelineVertexInputStateCreateInfo vertInput{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
     vertInput.vertexBindingDescriptionCount = 1;

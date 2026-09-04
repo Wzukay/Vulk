@@ -474,8 +474,12 @@ void VulkanRenderer::CreateLogicalDevice() {
 
 	VkPhysicalDeviceVulkan13Features features13{};
 	features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
-	features13.dynamicRendering = VK_TRUE; 
+	features13.dynamicRendering = VK_TRUE;
 	features13.shaderDemoteToHelperInvocation = VK_TRUE;
+
+	VkPhysicalDeviceVulkan11Features features11{};
+	features11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+	features11.shaderDrawParameters = VK_TRUE;
 
 	VkPhysicalDeviceVulkan12Features features12{};
 	features12.sType =
@@ -488,13 +492,15 @@ void VulkanRenderer::CreateLogicalDevice() {
 	features12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
 	features12.pNext = &features13;
 
+	features11.pNext = &features12;
+
 	VkDeviceCreateInfo createInfo{};
 	createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
 	createInfo.queueCreateInfoCount =
 		static_cast<uint32_t>(queueCreateInfos.size());
 	createInfo.pQueueCreateInfos = queueCreateInfos.data();
 	createInfo.pEnabledFeatures = &deviceFeatures;
-	createInfo.pNext = &features12;
+	createInfo.pNext = &features11;
 	createInfo.enabledExtensionCount =
 		static_cast<uint32_t>(deviceExtensions.size());
 	createInfo.ppEnabledExtensionNames = deviceExtensions.data();
@@ -1619,9 +1625,6 @@ void VulkanRenderer::CreateGraphicsPipeline() {
 	auto bindingDescription =
 		ModelVertex::getBindingDescription();
 
-	auto attributeDescriptions =
-		ModelVertex::getAttributeDescriptions();
-
 	VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
 	inputAssembly.sType =
 		VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
@@ -1696,71 +1699,55 @@ void VulkanRenderer::CreateGraphicsPipeline() {
 		[&](
 			const std::string& vertPath,
 			const std::string& fragPath,
-			bool isInstanced) -> VkPipeline
+			PipelineVertexType vertexType) -> VkPipeline
 		{
 			auto vertCode = ReadFile(vertPath);
 			auto fragCode = ReadFile(fragPath);
 
-			VkShaderModule vertModule =
-				CreateShaderModule(logicalDevice, vertCode);
+			VkShaderModule vertModule = CreateShaderModule(logicalDevice, vertCode);
 
-			VkShaderModule fragModule =
-				CreateShaderModule(logicalDevice, fragCode);
-
-			VkPipelineShaderStageCreateInfo vertStage{};
-			vertStage.sType =
-				VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-			vertStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
-			vertStage.module = vertModule;
-			vertStage.pName = "main";
-
-			VkPipelineShaderStageCreateInfo fragStage{};
-			fragStage.sType =
-				VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-			fragStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-			fragStage.module = fragModule;
-			fragStage.pName = "main";
+			VkShaderModule fragModule = CreateShaderModule(logicalDevice, fragCode);
 
 			VkPipelineShaderStageCreateInfo stages[] = {
-				vertStage,
-				fragStage
+				{ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, vertModule, "main" },
+				{ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fragModule, "main" }
 			};
 
 			std::vector<VkVertexInputBindingDescription> bindings = {
 				ModelVertex::getBindingDescription()
 			};
 
-			auto modelAttributes =
-				ModelVertex::getAttributeDescriptions();
+			std::vector<VkVertexInputAttributeDescription> attributes;
 
-			std::vector<VkVertexInputAttributeDescription> attributes(
-				modelAttributes.begin(),
-				modelAttributes.end());
+			switch (vertexType) {
+			case PipelineVertexType::Terrain: {
+				auto terrainAttrs = ModelVertex::getTerrainAttributeDescriptions();
+				attributes.assign(terrainAttrs.begin(), terrainAttrs.end());
+				break;
+			}
+			case PipelineVertexType::Static: {
+				auto staticAttrs = ModelVertex::getStaticAttributeDescriptions();
+				attributes.assign(staticAttrs.begin(), staticAttrs.end());
+				break;
+			}
+			case PipelineVertexType::Instanced: {
+				auto staticAttrs = ModelVertex::getStaticAttributeDescriptions();
+				attributes.assign(staticAttrs.begin(), staticAttrs.end());
 
-			if (isInstanced) {
-				bindings.push_back(
-					InstanceData::getBindingDescription());
-
-				auto instanceAttributes =
-					InstanceData::getAttributeDescriptions();
-
-				attributes.insert(
-					attributes.end(),
-					instanceAttributes.begin(),
-					instanceAttributes.end());
+				// Add instance buffer binding + attributes (starts at location 5)
+				bindings.push_back(InstanceData::getBindingDescription());
+				auto instanceAttributes = InstanceData::getAttributeDescriptions();
+				attributes.insert(attributes.end(), instanceAttributes.begin(), instanceAttributes.end());
+				break;
+			}
 			}
 
 			VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
-			vertexInputInfo.sType =
-				VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-			vertexInputInfo.vertexBindingDescriptionCount =
-				static_cast<uint32_t>(bindings.size());
-			vertexInputInfo.pVertexBindingDescriptions =
-				bindings.data();
-			vertexInputInfo.vertexAttributeDescriptionCount =
-				static_cast<uint32_t>(attributes.size());
-			vertexInputInfo.pVertexAttributeDescriptions =
-				attributes.data();
+			vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+			vertexInputInfo.vertexBindingDescriptionCount = static_cast<uint32_t>(bindings.size());
+			vertexInputInfo.pVertexBindingDescriptions = bindings.data();
+			vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributes.size());
+			vertexInputInfo.pVertexAttributeDescriptions = attributes.data();
 
 			VkFormat colorFormat = swapChainImageFormat;
 			VkFormat depthFormat = FindDepthFormat();
@@ -1810,19 +1797,19 @@ void VulkanRenderer::CreateGraphicsPipeline() {
 		};
 
 	terrainPipeline = compilePipelineHandle(
-		"shaders/terrain_vert.spv",
-		"shaders/terrain_frag.spv",
-		false);
+        "shaders/terrain_vert.spv",
+        "shaders/terrain_frag.spv",
+        PipelineVertexType::Terrain);
 
-	staticPipeline = compilePipelineHandle(
-		"shaders/static_vert.spv",
-		"shaders/static_frag.spv",
-		false);
+    staticPipeline = compilePipelineHandle(
+        "shaders/static_vert.spv",
+        "shaders/static_frag.spv",
+        PipelineVertexType::Static);
 
-	instancedPipeline = compilePipelineHandle(
-		"shaders/instanced_vert.spv",
-		"shaders/instanced_frag.spv",
-		true);
+    instancedPipeline = compilePipelineHandle(
+        "shaders/instanced_vert.spv",
+        "shaders/instanced_frag.spv",
+        PipelineVertexType::Instanced);
 }
 void VulkanRenderer::RecreateGraphicsPipeline() {
 	if (terrainPipeline != VK_NULL_HANDLE) {
