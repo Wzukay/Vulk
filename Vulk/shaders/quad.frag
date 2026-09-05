@@ -5,8 +5,8 @@ layout(location = 0) out vec4 outColor;
 
 layout(binding = 0) uniform sampler2D sceneTexture;
 layout(binding = 1) uniform sampler2D ssaoMap;
+layout(binding = 2) uniform sampler2D waterTexture;
 
-// Must match fsr_frag identically to avoid push constant size mismatch crashes
 layout(push_constant) uniform FSRPushConstants {
     vec4 Const0;
     vec4 Const1;
@@ -19,14 +19,14 @@ layout(push_constant) uniform FSRPushConstants {
 
 void main() {
     vec2 activeUV = fragUV * pc.renderScale;
-    
-    vec4 color = texture(sceneTexture, activeUV);
-    
-    // Multiply the contact shadows into the scene before hitting the swapchain
+
+    vec4 sceneColor = texture(sceneTexture, activeUV);
+    vec4 waterColor = texture(waterTexture, fragUV);
+
     if (pc.enableSSAO == 1) {
-        float ssaoShadow = texture(ssaoMap, activeUV).r;
-        color.rgb *= ssaoShadow;
+        sceneColor.rgb *= texture(ssaoMap, activeUV).r;
     }
-    
-    outColor = color;
+
+    sceneColor.rgb = mix(sceneColor.rgb, waterColor.rgb, waterColor.a);
+    outColor = sceneColor;
 }

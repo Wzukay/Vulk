@@ -150,6 +150,7 @@ private:
 
     // --- Offscreen 3D Targets ---
     RenderTarget offscreenTarget;
+    RenderTarget waterTarget;
 
     // --- Composition Pipeline (Native Res UI) ---
     VkPipeline compositionPipeline = VK_NULL_HANDLE;
@@ -174,15 +175,6 @@ private:
     std::vector<VkSemaphore> renderFinishedSemaphores;
     std::vector<VkFence> inFlightFences;
     std::vector<VkFence> imagesInFlight;
-
-    uint32_t GetInternalWidth() const {
-        uint32_t w = std::max(1u, static_cast<uint32_t>(swapChainExtent.width * g_Settings.renderScale));
-        return w + (w % 2);
-    }
-    uint32_t GetInternalHeight() const {
-        uint32_t h = std::max(1u, static_cast<uint32_t>(swapChainExtent.height * g_Settings.renderScale));
-        return h + (h % 2);
-    }
 
     uint32_t GetSSAOWidth() const { return std::max(1u, GetInternalWidth() / 2); }
     uint32_t GetSSAOHeight() const { return std::max(1u, GetInternalHeight() / 2); }
@@ -225,6 +217,21 @@ private:
 public:
     void DrawFrame();
     void UpdateDRS();
+
+    uint32_t GetInternalWidth() const {
+        uint32_t w = std::max(1u, static_cast<uint32_t>(swapChainExtent.width * g_Settings.renderScale));
+        return w + (w % 2);
+    }
+    uint32_t GetInternalHeight() const {
+        uint32_t h = std::max(1u, static_cast<uint32_t>(swapChainExtent.height * g_Settings.renderScale));
+        return h + (h % 2);
+    }
+    glm::vec2 GetInternalUvScale() const {
+        return glm::vec2(
+            static_cast<float>(GetInternalWidth()) / static_cast<float>(swapChainExtent.width),
+            static_cast<float>(GetInternalHeight()) / static_cast<float>(swapChainExtent.height)
+        );
+    }
 
 private:
     Settings currentSettings;
@@ -400,6 +407,8 @@ public:
 
 private:
     WaterRenderer m_waterRenderer;
+
+    void CreateWaterTarget();
 public:
     void AddWaterChunk(int64_t key, const std::vector<ModelVertex>& vertices, const std::vector<uint32_t>& indices);
     void RemoveWaterChunk(int64_t key);

@@ -126,5 +126,10 @@ void main() {
         ubo.sunColor.a *
         wrappedDiffuse;
 
-    outColor = vec4(fragColor, 1.0);
+    float terrainOcclusion = mix(0.72, 1.0, slope);
+
+    vec3 finalColor = terrainColor * lighting * terrainOcclusion;
+    finalColor = ApplyFog(finalColor, distanceToCamera);
+
+    outColor = vec4(finalColor, 1.0);
 }

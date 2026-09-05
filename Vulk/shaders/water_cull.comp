@@ -1,0 +1,102 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+struct WaterChunk {
+    vec4 centerRadius;
+    uint indexCount;
+    uint firstIndex;
+    int vertexOffset;
+    uint padding;
+};
+
+struct DrawCommand {
+    uint indexCount;
+    uint instanceCount;
+    uint firstIndex;
+    int vertexOffset;
+    uint firstInstance;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer WaterChunks {
+    WaterChunk chunks[];
+};
+
+layout(std430, set = 0, binding = 1) writeonly buffer DrawCommands {
+    DrawCommand commands[];
+};
+
+layout(std430, set = 0, binding = 2) buffer DrawCount {
+    uint visibleCount;
+};
+
+layout(push_constant) uniform CullPushConstants {
+    mat4 viewProj;
+    vec3 cameraPos;
+    float maxDistance;
+    uint chunkCount;
+} push;
+
+bool IsChunkVisible(WaterChunk chunk) {
+    vec3 center = chunk.centerRadius.xyz;
+    float radius = chunk.centerRadius.w;
+
+    if (length(center - push.cameraPos) > push.maxDistance + radius) {
+        return false;
+    }
+
+    vec4 clipCenter = push.viewProj * vec4(center, 1.0);
+
+    float radiusX = radius * length(vec3(push.viewProj[0].x, push.viewProj[1].x, push.viewProj[2].x));
+    float radiusY = radius * length(vec3(push.viewProj[0].y, push.viewProj[1].y, push.viewProj[2].y));
+    float radiusZ = radius * length(vec3(push.viewProj[0].z, push.viewProj[1].z, push.viewProj[2].z));
+    float radiusW = radius * length(vec3(push.viewProj[0].w, push.viewProj[1].w, push.viewProj[2].w));
+
+    if (clipCenter.x + clipCenter.w < -(radiusX + radiusW)) {
+        return false;
+    }
+
+    if (clipCenter.x - clipCenter.w > radiusX + radiusW) {
+        return false;
+    }
+
+    if (clipCenter.y + clipCenter.w < -(radiusY + radiusW)) {
+        return false;
+    }
+
+    if (clipCenter.y - clipCenter.w > radiusY + radiusW) {
+        return false;
+    }
+
+    if (clipCenter.z + radiusZ < 0.0) {
+        return false;
+    }
+
+    if (clipCenter.z - clipCenter.w > radiusZ + radiusW) {
+        return false;
+    }
+
+    return true;
+}
+
+void main() {
+    uint chunkIndex = gl_GlobalInvocationID.x;
+
+    if (chunkIndex >= push.chunkCount) {
+        return;
+    }
+
+    WaterChunk chunk = chunks[chunkIndex];
+
+    if (!IsChunkVisible(chunk)) {
+        return;
+    }
+
+    uint drawIndex = atomicAdd(visibleCount, 1);
+
+    commands[drawIndex].indexCount = chunk.indexCount;
+    commands[drawIndex].instanceCount = 1;
+    commands[drawIndex].firstIndex = chunk.firstIndex;
+    commands[drawIndex].vertexOffset = chunk.vertexOffset;
+    commands[drawIndex].firstInstance = 0;
+}

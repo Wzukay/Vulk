@@ -138,8 +138,14 @@ void main() {
         blend = 1.0;
     }
 
+    float protectedLod0Range = push.chunkSize * 1.75;
+
+    if (chunk.lod == 0 && dist < protectedLod0Range) {
+        blend = 0.0;
+    }
+
     // Smoothstep for nicer transition
-    blend = blend * blend * (3.0 - 2.0 * blend);
+    blend = blend * blend * blend * (blend * (blend * 6.0 - 15.0) + 10.0);
 
     // --- Write indirect command ---
     uint drawIdx = atomicAdd(visibleCount, 1);

@@ -6,6 +6,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <unordered_set>
 #include <optional>
+#include <string>
 
 struct UniformBufferObject {
     alignas(16) glm::mat4 view;              // 64 bytes
@@ -206,4 +207,34 @@ struct InstanceData {
 
         return attributeDescriptions;
     }
+};
+
+struct WaterChunk {
+    glm::vec3 center{ 0.0f };
+    float radius = 0.0f;
+
+    uint32_t vertexOffset = 0;
+    uint32_t indexOffset = 0;
+    uint32_t vertexCount = 0;
+    uint32_t indexCount = 0;
+};
+struct WaterPushConstants {
+    glm::vec3 cameraPos;
+    float time;
+    glm::vec2 renderSize;
+    glm::vec2 sceneUvScale;
+};
+struct WaterCullPush {
+    glm::mat4 viewProj{ 1.0f };
+    glm::vec3 cameraPos{ 0.0f };
+    float maxDistance = 0.0f;
+    uint32_t chunkCount = 0;
+    glm::vec3 padding{ 0.0f };
+};
+struct WaterChunkGPUData {
+    glm::vec4 centerRadius{ 0.0f };
+    uint32_t indexCount = 0;
+    uint32_t firstIndex = 0;
+    int32_t vertexOffset = 0;
+    uint32_t padding = 0;
 };

@@ -29,6 +29,11 @@ struct Settings {
     float grassFadeStartRatio = 0.08f;  // 8% of renderDistance
     float grassFadeEndRatio = 0.12f;    // 12% of renderDistance
 
+    float terrainLod0EndRatio = 0.30f;
+    float terrainLod1EndRatio = 0.50f;
+    float terrainLod2EndRatio = 0.72f;
+    float terrainLod3EndRatio = 0.88f;
+
     // --- Debug ---
     bool showStats = true;
     float timeScale = 1.0f;
@@ -47,6 +52,11 @@ struct Settings {
     float GetStaticFadeEnd() const { return renderDistance * staticFadeEndRatio; }
     float GetGrassFadeStart() const { return renderDistance * grassFadeStartRatio; }
     float GetGrassFadeEnd() const { return renderDistance * grassFadeEndRatio; }
+
+    float GetTerrainLod0End() const { return renderDistance * terrainLod0EndRatio; }
+    float GetTerrainLod1End() const { return renderDistance * terrainLod1EndRatio; }
+    float GetTerrainLod2End() const { return renderDistance * terrainLod2EndRatio; }
+    float GetTerrainLod3End() const { return renderDistance * terrainLod3EndRatio; }
 };
 
 // Global instance (accessible from anywhere)

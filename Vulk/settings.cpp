@@ -29,6 +29,10 @@ void Settings::LoadFromFile(const std::string& path) {
         else if (key == "staticFadeEndRatio") staticFadeEndRatio = std::stof(value);
         else if (key == "grassFadeStartRatio") grassFadeStartRatio = std::stof(value);
         else if (key == "grassFadeEndRatio") grassFadeEndRatio = std::stof(value);
+        else if (key == "terrainLod0EndRatio") terrainLod0EndRatio = std::stof(value);
+        else if (key == "terrainLod1EndRatio") terrainLod1EndRatio = std::stof(value);
+        else if (key == "terrainLod2EndRatio") terrainLod2EndRatio = std::stof(value);
+        else if (key == "terrainLod3EndRatio") terrainLod3EndRatio = std::stof(value);
         else if (key == "maxMipLevels") maxMipLevels = std::stoi(value);
         else if (key == "vsync") vsync = (value == "true" || value == "1");
         else if (key == "frameCap") frameCap = std::stoi(value);
@@ -61,6 +65,10 @@ void Settings::SaveToFile(const std::string& path) const {
     file << "staticFadeEndRatio " << staticFadeEndRatio << "\n";
     file << "grassFadeStartRatio " << grassFadeStartRatio << "\n";
     file << "grassFadeEndRatio " << grassFadeEndRatio << "\n";
+    file << "terrainLod0EndRatio " << terrainLod0EndRatio << "\n";
+    file << "terrainLod1EndRatio " << terrainLod1EndRatio << "\n";
+    file << "terrainLod2EndRatio " << terrainLod2EndRatio << "\n";
+    file << "terrainLod3EndRatio " << terrainLod3EndRatio << "\n";
     file << "maxMipLevels " << maxMipLevels << "\n";
     file << "vsync " << (vsync ? "true" : "false") << "\n";
     file << "frameCap " << frameCap << "\n";

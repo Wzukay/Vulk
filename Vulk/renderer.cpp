@@ -337,6 +337,7 @@ void VulkanRenderer::InitVulkan() {
 	CreateSwapChain();
 	CreateImageViews();
 	CreateOffscreenResolve();
+	CreateWaterTarget();
 	CreateDepthResources();
 	CreateColorResources();
 
@@ -386,6 +387,7 @@ void VulkanRenderer::InitVulkan() {
 	m_terrainRenderer.UpdateHZBDescriptor(hzbTarget.view, hzbTarget.sampler);
 
 	m_waterRenderer.Init(logicalDevice, this, &m_uploader, swapChainImageFormat, depthFormat, descriptorSetLayout, m_currentMsaaSamples);
+	m_waterRenderer.SetSceneDepth(depthTarget.view, depthTarget.sampler);
 
 	m_grassRenderer.Init(logicalDevice, this, &m_uploader, swapChainImageFormat, depthFormat, descriptorSetLayout, m_currentMsaaSamples);
 
@@ -651,6 +653,7 @@ void VulkanRenderer::RecreateSwapChain() {
 	if (compositionDescriptorSetLayout != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(logicalDevice, compositionDescriptorSetLayout, nullptr); compositionDescriptorSetLayout = VK_NULL_HANDLE; }
 
 	offscreenTarget.Destroy(logicalDevice);
+	waterTarget.Destroy(logicalDevice);
 
 	// THE CRITICAL FIX: Destroy the Render Pass before recreating it!
 	if (compositionRenderPass != VK_NULL_HANDLE) {
@@ -662,6 +665,7 @@ void VulkanRenderer::RecreateSwapChain() {
 	CreateSwapChain();
 	CreateImageViews();
 	CreateOffscreenResolve();
+	CreateWaterTarget();
 	CreateColorResources();
 	CreateDepthResources();
 
@@ -1843,16 +1847,22 @@ void VulkanRenderer::CreateCompositionPipeline() {
 	ssaoBinding.descriptorCount = 1;
 	ssaoBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-	VkDescriptorSetLayoutBinding bindings[] = { samplerBinding, ssaoBinding };
+	VkDescriptorSetLayoutBinding waterBinding{};
+	waterBinding.binding = 2;
+	waterBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	waterBinding.descriptorCount = 1;
+	waterBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+	VkDescriptorSetLayoutBinding bindings[] = { samplerBinding, ssaoBinding, waterBinding };
 
 	VkDescriptorSetLayoutCreateInfo layoutInfo{};
 	layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-	layoutInfo.bindingCount = 2;
+	layoutInfo.bindingCount = 3;
 	layoutInfo.pBindings = bindings;
 	vkCreateDescriptorSetLayout(logicalDevice, &layoutInfo, nullptr, &compositionDescriptorSetLayout);
 
 	// 2. Pool size must be 2 to hold both textures
-	VkDescriptorPoolSize poolSize{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 };
+	VkDescriptorPoolSize poolSize{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3 };
 	VkDescriptorPoolCreateInfo poolInfo{};
 	poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 	poolInfo.poolSizeCount = 1;
@@ -1879,7 +1889,12 @@ void VulkanRenderer::CreateCompositionPipeline() {
 	ssaoImageInfo.imageView = ssaoBlurTarget.view;
 	ssaoImageInfo.sampler = ssaoTarget.sampler;
 
-	VkWriteDescriptorSet descriptorWrites[2]{};
+	VkDescriptorImageInfo waterImageInfo{};
+	waterImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	waterImageInfo.imageView = waterTarget.view;
+	waterImageInfo.sampler = waterTarget.sampler;
+
+	VkWriteDescriptorSet descriptorWrites[3]{};
 	descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 	descriptorWrites[0].dstSet = compositionDescriptorSet;
 	descriptorWrites[0].dstBinding = 0;
@@ -1896,7 +1911,14 @@ void VulkanRenderer::CreateCompositionPipeline() {
 	descriptorWrites[1].descriptorCount = 1;
 	descriptorWrites[1].pImageInfo = &ssaoImageInfo;
 
-	vkUpdateDescriptorSets(logicalDevice, 2, descriptorWrites, 0, nullptr);
+	descriptorWrites[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	descriptorWrites[2].dstSet = compositionDescriptorSet;
+	descriptorWrites[2].dstBinding = 2;
+	descriptorWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	descriptorWrites[2].descriptorCount = 1;
+	descriptorWrites[2].pImageInfo = &waterImageInfo;
+
+	vkUpdateDescriptorSets(logicalDevice, 3, descriptorWrites, 0, nullptr);
 
 	// 5. Push Constants (FSR + SSAO Toggle)
 	VkPushConstantRange fsrPushConstantRange{};
@@ -2229,6 +2251,7 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 	if (currentScene != nullptr) {
 		glm::vec2 dynamicHzbSize = glm::vec2((float)GetInternalWidth(), (float)GetInternalHeight());
 		m_terrainRenderer.Cull(commandBuffer, cameraPosition, m_currentViewProj, dynamicHzbSize, (float)(hzbMipLevels - 1), static_cast<uint32_t>(currentFrame), culledCount, sceneTotalVertices, sceneTotalIndices);
+		m_waterRenderer.Cull(commandBuffer, cameraPosition, m_currentViewProj, static_cast<uint32_t>(currentFrame));
 	}
 
 	if (m_currentMsaaSamples != VK_SAMPLE_COUNT_1_BIT) {
@@ -2361,9 +2384,6 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 				// Draw Boids
 				vkCmdBindPipeline(scb, VK_PIPELINE_BIND_POINT_GRAPHICS, m_boidRenderer.m_graphicsPipeline);
 				m_boidRenderer.Draw(scb, descriptorSet, dc3);
-
-				// Draw Transparent Water last
-				m_waterRenderer.Draw(scb, descriptorSet, cameraPosition, static_cast<float>(glfwGetTime()));
 				});
 			});
 
@@ -2380,6 +2400,44 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 		vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 	}
 	vkCmdEndRendering(commandBuffer);
+
+	TransitionImageLayout(commandBuffer, depthTarget.image, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_ASPECT_DEPTH_BIT);
+
+	TransitionImageLayout(commandBuffer, waterTarget.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+
+	uint32_t waterWidth = GetInternalWidth();
+	uint32_t waterHeight = GetInternalHeight();
+
+	VkViewport waterViewport{ 0.0f, 0.0f, static_cast<float>(waterWidth), static_cast<float>(waterHeight), 0.0f, 1.0f };
+	VkRect2D waterScissor{ { 0, 0 }, { waterWidth, waterHeight } };
+
+	VkRenderingAttachmentInfo waterAttachment{};
+	waterAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+	waterAttachment.imageView = waterTarget.view;
+	waterAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+	waterAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+	waterAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+	waterAttachment.clearValue.color = { 0.0f, 0.0f, 0.0f, 0.0f };
+
+	VkRenderingInfo waterRenderingInfo{};
+	waterRenderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+	waterRenderingInfo.renderArea.extent = { waterWidth, waterHeight };
+	waterRenderingInfo.layerCount = 1;
+	waterRenderingInfo.colorAttachmentCount = 1;
+	waterRenderingInfo.pColorAttachments = &waterAttachment;
+
+	vkCmdBeginRendering(commandBuffer, &waterRenderingInfo);
+	vkCmdSetViewport(commandBuffer, 0, 1, &waterViewport);
+	vkCmdSetScissor(commandBuffer, 0, 1, &waterScissor);
+
+	m_waterRenderer.Draw(commandBuffer, descriptorSet, cameraPosition, static_cast<float>(glfwGetTime()), static_cast<uint32_t>(currentFrame));
+
+	vkCmdEndRendering(commandBuffer);
+
+	TransitionImageLayout(commandBuffer, waterTarget.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 
+						VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 
+						VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, 
+						VK_IMAGE_ASPECT_COLOR_BIT);
 
 	glm::vec2 activeScale = glm::vec2(
 		(float)GetInternalWidth() / (float)swapChainExtent.width,
@@ -2601,6 +2659,26 @@ void VulkanRenderer::AddWaterChunk(int64_t key, const std::vector<ModelVertex>& 
 void VulkanRenderer::RemoveWaterChunk(int64_t key) {
 	m_waterRenderer.RemoveWaterChunk(key);
 }
+void VulkanRenderer::CreateWaterTarget() {
+	uint32_t width = GetInternalWidth();
+	uint32_t height = GetInternalHeight();
+
+	CreateImage(width, height, 1, VK_SAMPLE_COUNT_1_BIT, swapChainImageFormat, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, waterTarget.image, waterTarget.memory);
+	waterTarget.view = CreateImageView(waterTarget.image, swapChainImageFormat, VK_IMAGE_ASPECT_COLOR_BIT, 1);
+
+	VkSamplerCreateInfo samplerInfo{};
+	samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+	samplerInfo.magFilter = VK_FILTER_LINEAR;
+	samplerInfo.minFilter = VK_FILTER_LINEAR;
+	samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+	samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+
+	if (vkCreateSampler(logicalDevice, &samplerInfo, nullptr, &waterTarget.sampler) != VK_SUCCESS) {
+		throw std::runtime_error("Failed to create water target sampler.");
+	}
+}
 
 void VulkanRenderer::ApplySettings() {
 	bool needSwapchainRecreate = false;
@@ -2749,6 +2827,7 @@ void VulkanRenderer::DrawFrame() {
 
 	m_terrainRenderer.Tick(m_globalFrameCounter);
 	m_grassRenderer.Tick(m_globalFrameCounter);
+	m_waterRenderer.Tick(m_globalFrameCounter);
 
 	uint32_t imageIndex;
 	VkResult acquireResult = vkAcquireNextImageKHR(logicalDevice, swapChain, UINT64_MAX,
@@ -2984,6 +3063,7 @@ void VulkanRenderer::Cleanup() {
 		if (compositionDescriptorSetLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(logicalDevice, compositionDescriptorSetLayout, nullptr);
 
 		offscreenTarget.Destroy(logicalDevice);
+		waterTarget.Destroy(logicalDevice);
 
 		compositionPipeline = VK_NULL_HANDLE;
 	}

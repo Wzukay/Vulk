@@ -33,26 +33,15 @@ static std::string ChunkName(int cx, int cz) {
     return "terrain_chunk_" + std::to_string(cx) + "_" + std::to_string(cz);
 }
 int Chunk::DesiredLodForDistance(float distToCenter) const {
-    // Adds chunk footprint as a safety buffer
     float chunkRadius = chunkSize * 0.75f;
     float closestEdgeDist = std::max(0.0f, distToCenter - chunkRadius);
 
-    // LOD 5: Complete Cull (Past render distance)
     if (closestEdgeDist > g_Settings.renderDistance) return 5;
+    if (closestEdgeDist > g_Settings.GetTerrainLod3End()) return 4;
+    if (closestEdgeDist > g_Settings.GetTerrainLod2End()) return 3;
+    if (closestEdgeDist > g_Settings.GetTerrainLod1End()) return 2;
+    if (closestEdgeDist > g_Settings.GetTerrainLod0End()) return 1;
 
-    // LOD 4: Terrain only, NO Trees (Past tree fade end)
-    if (closestEdgeDist > g_Settings.GetStaticFadeEnd()) return 4;
-
-    // LOD 3: Terrain + Billboard Trees (Past tree fade start)
-    if (closestEdgeDist > g_Settings.GetStaticFadeStart()) return 3;
-
-    // LOD 2: Terrain + Low Poly Trees, NO Grass (Past grass fade end)
-    if (closestEdgeDist > g_Settings.GetGrassFadeEnd()) return 2;
-
-    // LOD 1: Terrain + Med Trees + Thin Grass (Past grass fade start)
-    if (closestEdgeDist > g_Settings.GetGrassFadeStart()) return 1;
-
-    // LOD 0: High Poly Everything
     return 0;
 }
 void Chunk::PrecomputeChunkOffsets(int viewDistance) {
@@ -70,25 +59,25 @@ void Chunk::PrecomputeChunkOffsets(int viewDistance) {
         });
 }
 float Chunk::GetLodMorph(float closestEdgeDistance, int currentLod) const {
-    float transitionWidth = chunkSize * 0.35f;
+    float transitionWidth = std::min(chunkSize * 0.25f, 128.0f);
 
     float transitionEnd = 0.0f;
 
     switch (currentLod) {
     case 0:
-        transitionEnd = g_Settings.GetGrassFadeStart();
+        transitionEnd = g_Settings.GetTerrainLod0End();
         break;
 
     case 1:
-        transitionEnd = g_Settings.GetGrassFadeEnd();
+        transitionEnd = g_Settings.GetTerrainLod1End();
         break;
 
     case 2:
-        transitionEnd = g_Settings.GetStaticFadeStart();
+        transitionEnd = g_Settings.GetTerrainLod2End();
         break;
 
     case 3:
-        transitionEnd = g_Settings.GetStaticFadeEnd();
+        transitionEnd = g_Settings.GetTerrainLod3End();
         break;
 
     default:
@@ -265,6 +254,7 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
         // No std::sort required!
         for (const auto& offset : s_sortedChunkOffsets) {
             ChunkCoord coord{ camChunkX + offset.first, camChunkZ + offset.second };
+            if (DesiredLodForDistance(glm::distance(ChunkBoundsCenter(coord.cx, coord.cz), camPos)) >= 5) continue;
             int64_t k = coord.Key();
             m_desiredKeys.push_back(k);
             m_desiredKeysLookup.insert(k);
@@ -799,92 +789,235 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
         }
     }
 
-    // --- 4.5 GENERATE FLAT LAKE MESH ---
+    const float terrainSkirtDepth = 48.0f;
+
+    auto addTerrainSkirtSegment = [&](uint32_t topA, uint32_t topB) {
+        ModelVertex skirtA = outResult.vertices[topA];
+        ModelVertex skirtB = outResult.vertices[topB];
+
+        skirtA.pos.y -= terrainSkirtDepth;
+        skirtB.pos.y -= terrainSkirtDepth;
+        skirtA.coarseY -= terrainSkirtDepth;
+        skirtB.coarseY -= terrainSkirtDepth;
+
+        uint32_t skirtIndexA = static_cast<uint32_t>(outResult.vertices.size());
+        outResult.vertices.push_back(skirtA);
+
+        uint32_t skirtIndexB = static_cast<uint32_t>(outResult.vertices.size());
+        outResult.vertices.push_back(skirtB);
+
+        outResult.indices.insert(outResult.indices.end(), {
+            topA,
+            skirtIndexA,
+            topB,
+
+            topB,
+            skirtIndexA,
+            skirtIndexB
+            });
+        };
+
+    for (int x = 0; x < resolution - 1; ++x) {
+        addTerrainSkirtSegment(x, x + 1);
+    }
+
+    for (int z = 0; z < resolution - 1; ++z) {
+        addTerrainSkirtSegment(z * resolution + resolution - 1, (z + 1) * resolution + resolution - 1);
+    }
+
+    for (int x = resolution - 1; x > 0; --x) {
+        addTerrainSkirtSegment((resolution - 1) * resolution + x, (resolution - 1) * resolution + x - 1);
+    }
+
+    for (int z = resolution - 1; z > 0; --z) {
+        addTerrainSkirtSegment(z * resolution, (z - 1) * resolution);
+    }
+
+    // --- 4.5 GENERATE MARCHING-SQUARES LAKE MESH ---
     outResult.waterVertices.clear();
     outResult.waterIndices.clear();
 
-    std::unordered_map<uint32_t, uint32_t> waterVertIndices;
+    std::unordered_map<uint64_t, uint32_t> waterVertIndices;
+    const int waterSubdivisions = outResult.lod == 0 ? 2 : 1;
+    const int waterResolution = (resolution - 1) * waterSubdivisions + 1;
+    const float waterGridScale = 1.0f / static_cast<float>(waterSubdivisions);
+    const int waterStep = outResult.lod <= 1 ? 1 : 2;
 
-    for (int z = 0; z < resolution - 1; ++z) {
+    std::vector<TerrainData> waterSamples(waterResolution* waterResolution);
+
+    for (int z = 0; z < waterResolution; ++z) {
+        for (int x = 0; x < waterResolution; ++x) {
+            float terrainGridX = static_cast<float>(x) * waterGridScale;
+            float terrainGridZ = static_cast<float>(z) * waterGridScale;
+
+            float worldX = originX + terrainGridX * step;
+            float worldZ = originZ + terrainGridZ * step;
+
+            waterSamples[z * waterResolution + x] = CalculateHeightAndColor(worldX, worldZ);
+        }
+    }
+
+    auto getWaterSample = [&](int x, int z) -> const TerrainData& {
+        return waterSamples[z * waterResolution + x];
+        };
+
+    auto addWaterVert = [&](const glm::vec2& gridPos, float waterHeight) {
+        uint32_t xKey = static_cast<uint32_t>(std::lround(gridPos.x * 2.0f));
+        uint32_t zKey = static_cast<uint32_t>(std::lround(gridPos.y * 2.0f));
+        uint64_t key = (static_cast<uint64_t>(xKey) << 32) | zKey;
+
+        auto existing = waterVertIndices.find(key);
+        if (existing != waterVertIndices.end()) {
+            return existing->second;
+        }
+
+        float worldX = originX + gridPos.x * step;
+        float worldZ = originZ + gridPos.y * step;
+        float terrainHeight = CalculateHeightAndColor(worldX, worldZ).height;
+
+        ModelVertex vertex{};
+        vertex.pos = glm::vec3(worldX, waterHeight, worldZ);
+        vertex.normal = EncodeNormal(glm::vec3(0.0f, 1.0f, 0.0f));
+        vertex.tangent = glm::vec4(1.0f, 0.0f, 0.0f, waterHeight - terrainHeight);
+        vertex.color = glm::vec3(0.1f, 0.4f, 0.5f);
+        vertex.coarseY = vertex.pos.y;
+        vertex.coarseNormal = vertex.normal;
+        vertex.coarseTangent = vertex.tangent;
+
+        uint32_t index = static_cast<uint32_t>(outResult.waterVertices.size());
+        outResult.waterVertices.push_back(vertex);
+        waterVertIndices[key] = index;
+
+        return index;
+        };
+
+    auto emitPolygon = [&](std::initializer_list<glm::vec2> points, float waterHeight) {
+        if (points.size() < 3) {
+            return;
+        }
+
+        auto point = points.begin();
+
+        uint32_t first = addWaterVert(*point, waterHeight);
+        uint32_t previous = addWaterVert(*(point + 1), waterHeight);
+
+        for (size_t i = 2; i < points.size(); ++i) {
+            uint32_t current = addWaterVert(*(point + i), waterHeight);
+
+            outResult.waterIndices.insert(outResult.waterIndices.end(), {
+                first,
+                previous,
+                current
+                });
+
+            previous = current;
+        }
+        };
+
+    for (int z = 0; z < waterResolution - 1; z += waterStep) {
         if (isCancelled()) {
             discardCancelledResult();
             return;
         }
 
-        for (int x = 0; x < resolution - 1; ++x) {
-            float w00 = GetCachedWater(x, z);
-            float w10 = GetCachedWater(x + 1, z);
-            float w01 = GetCachedWater(x, z + 1);
-            float w11 = GetCachedWater(x + 1, z + 1);
+        const int z1 = std::min(z + waterStep, waterResolution - 1);
 
-            if (w00 <= 0.0f || w10 <= 0.0f || w01 <= 0.0f || w11 <= 0.0f) {
+        for (int x = 0; x < waterResolution - 1; x += waterStep) {
+            const int x1 = std::min(x + waterStep, waterResolution - 1);
+
+            const float w00 = getWaterSample(x, z).waterLevel;
+            const float w10 = getWaterSample(x1, z).waterLevel;
+            const float w01 = getWaterSample(x, z1).waterLevel;
+            const float w11 = getWaterSample(x1, z1).waterLevel;
+
+            int mask = 0;
+
+            if (w00 > 0.0f) mask |= 1;
+            if (w10 > 0.0f) mask |= 2;
+            if (w11 > 0.0f) mask |= 4;
+            if (w01 > 0.0f) mask |= 8;
+
+            if (mask == 0) {
                 continue;
             }
 
-            float waterHeight = std::max(std::max(w00, w10), std::max(w01, w11));
+            float waterHeight = std::max(std::max(w00, w10), std::max(w11, w01));
 
-            auto addWaterVert = [&](int vx, int vz) -> uint32_t {
-                uint32_t key = vz * resolution + vx;
+            glm::vec2 p00(static_cast<float>(x)* waterGridScale, static_cast<float>(z)* waterGridScale);
+            glm::vec2 p10(static_cast<float>(x1)* waterGridScale, static_cast<float>(z)* waterGridScale);
+            glm::vec2 p11(static_cast<float>(x1)* waterGridScale, static_cast<float>(z1)* waterGridScale);
+            glm::vec2 p01(static_cast<float>(x)* waterGridScale, static_cast<float>(z1)* waterGridScale);
 
-                auto it = waterVertIndices.find(key);
-                if (it != waterVertIndices.end()) {
-                    return it->second;
-                }
+            glm::vec2 e0 = (p00 + p10) * 0.5f;
+            glm::vec2 e1 = (p10 + p11) * 0.5f;
+            glm::vec2 e2 = (p11 + p01) * 0.5f;
+            glm::vec2 e3 = (p01 + p00) * 0.5f;
 
-                ModelVertex v{};
-                v.pos = glm::vec3(originX + vx * step, waterHeight, originZ + vz * step);
+            switch (mask) {
+            case 1:
+                emitPolygon({ p00, e0, e3 }, waterHeight);
+                break;
 
-                // FIX: Encode the upward normal into the 4-byte uint32_t
-                v.normal = EncodeNormal(glm::vec3(0.0f, 1.0f, 0.0f));
+            case 2:
+                emitPolygon({ p10, e1, e0 }, waterHeight);
+                break;
 
-                v.tangent = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f);
-                v.color = glm::vec3(0.1f, 0.4f, 0.5f);
+            case 3:
+                emitPolygon({ p00, p10, e1, e3 }, waterHeight);
+                break;
 
-                // FIX: Initialize coarse fields to match the base fields for water
-                v.coarseY = v.pos.y;
-                v.coarseNormal = v.normal;
-                v.coarseTangent = v.tangent;
+            case 4:
+                emitPolygon({ p11, e2, e1 }, waterHeight);
+                break;
 
-                uint32_t index = static_cast<uint32_t>(outResult.waterVertices.size());
-                outResult.waterVertices.push_back(v);
-                waterVertIndices[key] = index;
+            case 5:
+                emitPolygon({ p00, e0, e3 }, waterHeight);
+                emitPolygon({ p11, e2, e1 }, waterHeight);
+                break;
 
-                return index;
-                };
+            case 6:
+                emitPolygon({ p10, p11, e2, e0 }, waterHeight);
+                break;
 
-            uint32_t i00 = addWaterVert(x, z);
-            uint32_t i10 = addWaterVert(x + 1, z);
-            uint32_t i01 = addWaterVert(x, z + 1);
-            uint32_t i11 = addWaterVert(x + 1, z + 1);
+            case 7:
+                emitPolygon({ p00, p10, p11, e2, e3 }, waterHeight);
+                break;
 
-            outResult.waterIndices.insert(outResult.waterIndices.end(), {
-                i00, i10, i01,
-                i10, i11, i01
-                });
+            case 8:
+                emitPolygon({ p01, e3, e2 }, waterHeight);
+                break;
+
+            case 9:
+                emitPolygon({ p00, e0, e2, p01 }, waterHeight);
+                break;
+
+            case 10:
+                emitPolygon({ p10, e1, e0 }, waterHeight);
+                emitPolygon({ p01, e3, e2 }, waterHeight);
+                break;
+
+            case 11:
+                emitPolygon({ p00, p10, e1, e2, p01 }, waterHeight);
+                break;
+
+            case 12:
+                emitPolygon({ p01, p11, e1, e3 }, waterHeight);
+                break;
+
+            case 13:
+                emitPolygon({ p00, e0, e1, p11, p01 }, waterHeight);
+                break;
+
+            case 14:
+                emitPolygon({ e0, p10, p11, p01, e3 }, waterHeight);
+                break;
+
+            case 15:
+                emitPolygon({ p00, p10, p11, p01 }, waterHeight);
+                break;
+            }
         }
     }
-
-    const float skirtDepth = 20.0f;
-    auto AddSkirtSegment = [&](uint32_t indexA, uint32_t indexB) {
-        uint32_t skirtA = (uint32_t)outResult.vertices.size();
-        ModelVertex vA = outResult.vertices[indexA];
-        vA.pos.y -= skirtDepth;
-        vA.coarseY -= skirtDepth; // FIX: Ensure the skirt morphs down cleanly!
-        outResult.vertices.push_back(vA);
-
-        uint32_t skirtB = (uint32_t)outResult.vertices.size();
-        ModelVertex vB = outResult.vertices[indexB];
-        vB.pos.y -= skirtDepth;
-        vB.coarseY -= skirtDepth; // FIX: Ensure the skirt morphs down cleanly!
-        outResult.vertices.push_back(vB);
-
-        outResult.indices.insert(outResult.indices.end(), { indexA, skirtA, indexB, indexB, skirtA, skirtB });
-        };
-
-    for (int x = 0; x < resolution - 1; ++x) AddSkirtSegment(0 * resolution + x, 0 * resolution + (x + 1));
-    for (int z = 0; z < resolution - 1; ++z) AddSkirtSegment(z * resolution + (resolution - 1), (z + 1) * resolution + (resolution - 1));
-    for (int x = resolution - 1; x > 0; --x) AddSkirtSegment((resolution - 1) * resolution + x, (resolution - 1) * resolution + (x - 1));
-    for (int z = resolution - 1; z > 0; --z) AddSkirtSegment(z * resolution + 0, (z - 1) * resolution + 0);
 
     if (isCancelled()) {
         discardCancelledResult();

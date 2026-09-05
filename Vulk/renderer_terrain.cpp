@@ -228,16 +228,16 @@ void TerrainRenderer::Cull(VkCommandBuffer commandBuffer, const glm::vec3& camer
     ComputePush computePush{};
     computePush.viewProj = viewProj;
     computePush.fadeParams = glm::vec4(
-        g_Settings.GetStaticFadeStart(),
-        g_Settings.GetStaticFadeEnd(),
-        g_Settings.GetGrassFadeStart(),
-        g_Settings.GetGrassFadeEnd()
+        g_Settings.GetTerrainLod2End(),
+        g_Settings.GetTerrainLod3End(),
+        g_Settings.GetTerrainLod0End(),
+        g_Settings.GetTerrainLod1End()
     );
     computePush.cameraPos = cameraPos;
     computePush.chunkSize = m_chunkSize;
     computePush.hzbSize = hzbSize;
     computePush.maxMip = maxMip;
-    computePush.transitionWidth = m_chunkSize * 0.35f;
+    computePush.transitionWidth = std::min(m_chunkSize * 0.25f, 128.0f);
     computePush.totalChunks = chunkIndex;
 
     vkCmdPushConstants(commandBuffer, m_computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ComputePush), &computePush);
