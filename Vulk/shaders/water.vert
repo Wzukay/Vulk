@@ -5,7 +5,6 @@ layout(location = 0) in vec3 inPos;
 layout(location = 1) in vec2 inNormal;
 layout(location = 2) in vec2 inTexCoord;
 layout(location = 3) in vec4 inTangent;
-layout(location = 4) in vec3 inColor;
 
 layout(push_constant) uniform PushConstants {
     vec3 cameraPos;
@@ -33,14 +32,12 @@ vec3 decodeNormal(vec2 f) {
 
 void main() {
     vec4 worldPos = vec4(inPos, 1.0);
-    float wave = sin(worldPos.x * 0.2 + pc.time * 2.0) * cos(worldPos.z * 0.2 + pc.time * 1.5) * 0.15;
-    worldPos.y += wave;
 
     gl_Position = ubo.proj * ubo.view * worldPos;
     
     fragPos = worldPos.xyz;
     fragTexCoord = vec2(worldPos.x, worldPos.z) * 0.05; 
-    fragColor = inColor;
+    fragColor = vec3(0.1, 0.35, 0.5);
     
     fragNormal = decodeNormal(inNormal);
     fragTangent = inTangent; // Pass the full vec4 payload

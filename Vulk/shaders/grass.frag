@@ -1,4 +1,5 @@
 #version 450
+#include "common_structures.glsl"
 
 layout(location = 0) in vec2 fragUV;
 layout(location = 1) in vec3 fragNormal;
@@ -17,24 +18,23 @@ layout(push_constant) uniform PushConstants {
 
 void main() {
     // 1. Procedural Gradient
-    // Define the colors for the root and the tip of the grass
-    vec3 bottomColor = vec3(0.02, 0.15, 0.03); // Darker, earthier green near the dirt
-    vec3 topColor    = vec3(0.35, 0.65, 0.15); // Bright, vibrant green at the tip
+    vec3 bottomColor = vec3(0.02, 0.15, 0.03); 
+    vec3 topColor    = vec3(0.35, 0.65, 0.15); 
     
-    // fragUV.y is 0.0 at the tip and 1.0 at the root. 
-    // We add a slight power curve so the bright tip color pushes further down the blade.
     float gradient = pow(fragUV.y, 0.8);
     vec3 baseColor = mix(topColor, bottomColor, gradient);
     
-    // 2. Fake Lighting
-    // Basic ambient light shading based on a hardcoded sun/sky direction
-    vec3 lightDir = normalize(vec3(0.5, 1.0, 0.3));
-    float diff = max(dot(fragNormal, lightDir), 0.35); // 0.35 represents the ambient shadow floor
+    // 2. Dynamic Lighting
+    // Replace the hardcoded light vector with the engine's sun direction
+    vec3 lightDir = normalize(ubo.sunDirection.xyz);
+    float nDotL = max(dot(fragNormal, lightDir), 0.0); 
     
-    vec3 finalColor = baseColor * diff;
+    // Calculate diffuse lighting multiplied by the sun's color
+    vec3 diffuse = nDotL * ubo.sunColor.rgb;
+    
+    // Combine diffuse with the dynamic ambient floor (which handles the night-time darkness)
+    vec3 finalColor = baseColor * (diffuse + vec3(ubo.ambient));
 
     // 3. Output
-    // Since the geometry physically narrows to a point, we don't need alpha clipping.
-    // We output a solid 1.0 alpha.
     outColor = vec4(finalColor, 1.0);
 }

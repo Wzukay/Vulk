@@ -80,25 +80,6 @@ void main() {
     // We only need the height (.x) for the macro color variation
     float n = valueNoiseGrad(fragWorldPos.xz * 0.02).x;
 
-    float detailFade = clamp(1.0 - (distanceToCamera / 150.0), 0.0, 1.0);
-    
-    if (detailFade > 0.0) {
-        float bumpFreq = 2.5;
-        vec2 p = fragWorldPos.xz * bumpFreq;
-        
-        // --- OPTIMIZATION: 1 lookup instead of 4! ---
-        vec3 noiseData = valueNoiseGrad(p);
-        vec2 gradient = noiseData.yz; // Extract the mathematical slope directly
-        
-        float matBump = 0.05 * blendWeights.r + 0.3 * blendWeights.g + 0.9 * blendWeights.b;
-        float finalBump = matBump * detailFade;
-        
-        // Apply the exact gradient to the normal
-        normal.x -= gradient.x * finalBump;
-        normal.z -= gradient.y * finalBump;
-        normal = normalize(normal);
-    }
-
     // 1. BASE COLOR GENERATION
     float slope = clamp(normal.y, 0.0, 1.0);
     float elevation = clamp(fragWorldPos.y / 150.0, 0.0, 1.0);

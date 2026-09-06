@@ -16,6 +16,7 @@ Chunk::Chunk() : threadPool(std::max(1u, std::thread::hardware_concurrency() - 1
 void Chunk::Init(VulkanRenderer& renderer) {
     chunkSize = std::max(16.0f, g_Settings.chunkSize);
     m_chunkSize = chunkSize;
+    resolution = g_Settings.chunkResolution;
 
     renderer.SetTerrainChunkSize(chunkSize);
     UpdateFogParamsBasedOnData(renderer);
@@ -173,12 +174,11 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
 
                 RenderComponent rComp;
 
-                if (!propData.lodMeshes.empty()) {
-                    int targetLodIndex = std::min(result.lod, static_cast<int>(propData.lodMeshes.size()) - 1);
-                    rComp.meshName = propData.lodMeshes[targetLodIndex];
+                if (!propData.lodGroupName.empty()) {
+                    rComp.meshName = propData.lodGroupName;
                 }
                 else {
-                    rComp.meshName = ""; // Fallback
+                    rComp.meshName = "";
                 }
 
                 rComp.type = MeshType::Static;
@@ -430,7 +430,7 @@ TerrainData Chunk::CalculateHeightAndColor(float worldX, float worldZ) {
     static thread_local FastNoiseLite detailNoise;
     static thread_local FastNoiseLite tempNoise;
     static thread_local FastNoiseLite moistNoise;
-    static thread_local FastNoiseLite riverNoise;
+    static thread_local FastNoiseLite lakeNoise;
     static thread_local bool initialized = false;
 
     if (!initialized) {
@@ -459,10 +459,10 @@ TerrainData Chunk::CalculateHeightAndColor(float worldX, float worldZ) {
         moistNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
         moistNoise.SetFrequency(0.00036f);
 
-        riverNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
-        riverNoise.SetFractalType(FastNoiseLite::FractalType_FBm);
-        riverNoise.SetFractalOctaves(2);
-        riverNoise.SetFrequency(0.002f);
+        lakeNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
+        lakeNoise.SetFractalType(FastNoiseLite::FractalType_FBm);
+        lakeNoise.SetFractalOctaves(2);
+        lakeNoise.SetFrequency(0.002f);
 
         initialized = true;
     }
@@ -473,7 +473,7 @@ TerrainData Chunk::CalculateHeightAndColor(float worldX, float worldZ) {
     detailNoise.SetSeed(seed + 89);
     tempNoise.SetSeed(seed + 101);
     moistNoise.SetSeed(seed + 202);
-    riverNoise.SetSeed(seed + 999);
+    lakeNoise.SetSeed(seed + 999);
 
     auto clamp01 = [](float v) { return std::clamp(v, 0.0f, 1.0f); };
     auto n01 = [](float n) { return (n + 1.0f) * 0.5f; };
@@ -510,67 +510,84 @@ TerrainData Chunk::CalculateHeightAndColor(float worldX, float worldZ) {
     // --- 2. BIOME EVALUATION (2 NOISES) ---
     float t = clamp01(n01(tempNoise.GetNoise(worldX, worldZ)));
     float m = clamp01(n01(moistNoise.GetNoise(worldX, worldZ)));
-    const float BLEND_RANGE = 0.035f;
+    
+    struct BiomeCenter { BiomeType type; float t; float m; };
+    const BiomeCenter centers[] = {
+        {BiomeType::Desert,     0.83f, 0.125f}, {BiomeType::Savanna, 0.83f, 0.375f}, {BiomeType::Jungle,     0.83f, 0.65f}, {BiomeType::Swamp,      0.83f, 0.90f},
+        {BiomeType::Shrubland,  0.50f, 0.125f}, {BiomeType::Plains,  0.50f, 0.375f}, {BiomeType::Forest,     0.50f, 0.65f}, {BiomeType::DeepForest, 0.50f, 0.90f},
+        {BiomeType::Tundra,     0.16f, 0.125f}, {BiomeType::Taiga,   0.16f, 0.375f}, {BiomeType::SnowWastes, 0.16f, 0.65f}, {BiomeType::Alpine,     0.16f, 0.90f}
+    };
 
-    const BiomeDefinition& b0 = GetBiomeDefinition(DetermineBiome(clamp01(t - BLEND_RANGE), clamp01(m - BLEND_RANGE)));
-    const BiomeDefinition& b1 = GetBiomeDefinition(DetermineBiome(clamp01(t + BLEND_RANGE), clamp01(m - BLEND_RANGE)));
-    const BiomeDefinition& b2 = GetBiomeDefinition(DetermineBiome(clamp01(t - BLEND_RANGE), clamp01(m + BLEND_RANGE)));
-    const BiomeDefinition& b3 = GetBiomeDefinition(DetermineBiome(clamp01(t + BLEND_RANGE), clamp01(m + BLEND_RANGE)));
+    glm::vec3 blendedWeights(0.0f);
+    glm::vec3 blendedColor(0.0f);
+    float totalWeight = 0.0f;
 
-    glm::vec3 blendedWeights = (b0.textureWeights + b1.textureWeights + b2.textureWeights + b3.textureWeights) * 0.25f;
-    glm::vec3 blendedColor = (b0.groundColor + b1.groundColor + b2.groundColor + b3.groundColor) * 0.25f;
+    for (int i = 0; i < 12; ++i) {
+        float dt = t - centers[i].t;
+        float dm = m - centers[i].m;
+        float distSq = dt * dt + dm * dm;
 
-    // --- 3. DIRT MASKING (REUSING DETAIL NOISE) ---
-    if (blendedWeights.y > 0.4f && detail < 0.35f) {
-        float blend = glm::smoothstep(0.20f, 0.35f, detail);
-        float grassAmount = blendedWeights.y;
+        // Power of 4 falloff creates smooth but distinct biome regions
+        float weight = 1.0f / (distSq * distSq + 0.0001f);
 
-        blendedWeights.y = std::lerp(0.0f, grassAmount, blend);
-        blendedWeights.z += grassAmount * (1.0f - blend); // Shift grass weight into dirt weight
+        const BiomeDefinition& def = GetBiomeDefinition(centers[i].type);
+        blendedWeights += def.textureWeights * weight;
+        blendedColor += def.groundColor * weight;
+        totalWeight += weight;
     }
 
-    // -- - 4. BIOME - BASED LAKE GENERATION-- -
+    blendedWeights /= totalWeight;
+    blendedColor /= totalWeight;
 
-    float lakeWaterLevel = 12.0f;
-    float lakeMinHeight = 10.0f;
-    float lakeMaxHeight = 80.0f;
+    // --- 4. BIOME-BASED LAKE GENERATION ---
+    float lakeWaterLevel = 28.0f;
+    float lakeMaxMacroHeight = 42.0f;
 
-    float hugeLakeNoise = n01(riverNoise.GetNoise(worldX * 0.25f, worldZ * 0.25f));
-    float mediumLakeNoise = n01(riverNoise.GetNoise(worldX * 0.65f + 1000.0f, worldZ * 0.65f - 2000.0f));
+    // 1. TIGHTEN THE THRESHOLDS
+    const float BASIN_THRESHOLD = 0.25f;      // Increased to require stronger noise to carve
+    const float WATER_MESH_THRESHOLD = 0.25f; // Match closely to basin so puddles don't spawn without deep carving
 
-    float hugeLakeMask = glm::smoothstep(0.64f, 0.82f, hugeLakeNoise);
-    float mediumLakeMask = glm::smoothstep(0.60f, 0.80f, mediumLakeNoise);
+    float lakeMask = 0.0f;
 
-    float lakeMask = std::max(hugeLakeMask, mediumLakeMask);
+    // Lower the noise frequencies to make lakes much wider and less scattered
+    float hugeLakeNoise = n01(lakeNoise.GetNoise(worldX * 0.12f, worldZ * 0.12f));
 
-    float lakeExpand = glm::smoothstep(0.58f, 0.70f, std::max(hugeLakeNoise, mediumLakeNoise));
+    // Stricter cutoffs so only deep/large pockets survive the math
+    float hugeLakeMask = glm::smoothstep(0.68f, 0.85f, hugeLakeNoise);
 
-    lakeMask = std::max(lakeMask, lakeExpand * 0.85f);
+    float rawLakeMask = hugeLakeMask;
 
-    float localDetail = std::abs(detailNoise.GetNoise(worldX, worldZ));
-    float mountainSteepness = mountainMask * 25.0f;
-    float terrainSteepness = mountainSteepness + localDetail * 8.0f;
+    float macroHeight = 25.0f + plainsHeight;
 
-    float slopeMask = 1.0f - glm::smoothstep(8.0f, 20.0f, terrainSteepness);
+    if (rawLakeMask > 0.0f && macroHeight <= lakeMaxMacroHeight) {
+        float heightFade = 1.0f - glm::smoothstep(lakeWaterLevel + 1.0f, lakeMaxMacroHeight, macroHeight);
+        lakeMask = rawLakeMask * heightFade;
 
-    lakeMask *= slopeMask;
+        float localDetail = std::abs(detail * 2.0f - 1.0f);
+        float mountainSteepness = mountainMask * 25.0f;
+        float terrainSteepness = mountainSteepness + localDetail * 8.0f;
 
-    if (height < lakeMinHeight || height > lakeMaxHeight) {
-        lakeMask = 0.0f;
+        // Soften the slope mask so lakes don't fragment into small puddles on bumpy terrain
+        float slopeMask = 1.0f - glm::smoothstep(12.0f, 25.0f, terrainSteepness);
+
+        float basinMask = lakeMask * slopeMask;
+
+        // 2. Carve the basin
+        if (basinMask > BASIN_THRESHOLD) {
+            // Hardcode the depth to the large lake depth since medium lakes are gone
+            float lakeDepth = 14.0f;
+            float lakeBed = lakeWaterLevel - lakeDepth;
+
+            float basinDeformation = glm::smoothstep(BASIN_THRESHOLD, BASIN_THRESHOLD + 0.35f, basinMask);
+
+            height = std::lerp(height, lakeBed, basinDeformation);
+            blendedColor = glm::mix(blendedColor, glm::vec3(0.20f, 0.18f, 0.15f), basinDeformation);
+            blendedWeights = glm::mix(blendedWeights, glm::vec3(1.0f, 0.0f, 0.0f), basinDeformation);
+        }
     }
 
-    if (lakeMask > 0.001f) {
-        float lakeDepth = hugeLakeMask > mediumLakeMask ? 14.0f : 8.0f;
-        float lakeBed = lakeWaterLevel - lakeDepth;
-
-        height = std::lerp(height, lakeBed, lakeMask);
-
-        blendedColor = glm::mix(blendedColor, glm::vec3(0.20f, 0.18f, 0.15f), lakeMask);
-
-        blendedWeights = glm::mix(blendedWeights, glm::vec3(1.0f, 0.0f, 0.0f), lakeMask);
-    }
-
-    return { height, blendedWeights, blendedColor, lakeMask > 0.001f ? lakeWaterLevel : 0.0f };
+    // 3. Use the matching WATER_MESH_THRESHOLD to generate the mesh
+    return { height, blendedWeights, blendedColor, lakeMask > WATER_MESH_THRESHOLD ? lakeWaterLevel : 0.0f };
 }
 float Chunk::GetHeight(float worldX, float worldZ) {
     return CalculateHeightAndColor(worldX, worldZ).height;
@@ -738,10 +755,7 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
 
             ModelVertex v{};
             v.pos = glm::vec3(worldX, h, worldZ);
-            v.texCoord = glm::vec2(worldX * 0.02f, worldZ * 0.02f);
-
-            // Assign the base ground color
-            v.color = GetCachedGroundColor(x, z);
+            v.texCoord = glm::packHalf2x16(glm::vec2(worldX * 0.02f, worldZ * 0.02f));
 
             // Pack the biome weights (dirt, grass, rock) into the tangent for the fragment shader
             glm::vec3 biomeWeights = GetCachedColor(x, z);
@@ -753,7 +767,7 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
             t = glm::normalize(t - calculatedNormal * glm::dot(calculatedNormal, t));
 
             v.normal = EncodeNormal(calculatedNormal);
-            v.tangent = glm::vec4(t, 1.0f); 
+            v.tangent = EncodeTangent(glm::vec4(biomeWeights, 1.0f));
 
             int cx = ((x + 1) / 2) * 2;
             int cz = ((z + 1) / 2) * 2;
@@ -772,7 +786,7 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
             glm::vec3 calculatedCoarseNormal = glm::normalize(glm::cross(coarseTangentZ, coarseTangentX));
 
             v.coarseNormal = EncodeNormal(calculatedCoarseNormal);
-            v.coarseTangent = glm::vec4(coarseBiomeWeights, 1.0f);
+            v.coarseTangent = EncodeTangent(glm::vec4(coarseBiomeWeights, 1.0f));
             v.coarseY = hCoarse;
 
             outResult.vertices.push_back(v);
@@ -838,10 +852,11 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
     outResult.waterIndices.clear();
 
     std::unordered_map<uint64_t, uint32_t> waterVertIndices;
-    const int waterSubdivisions = outResult.lod == 0 ? 2 : 1;
+
+    const int waterSubdivisions = 1;
     const int waterResolution = (resolution - 1) * waterSubdivisions + 1;
     const float waterGridScale = 1.0f / static_cast<float>(waterSubdivisions);
-    const int waterStep = outResult.lod <= 1 ? 1 : 2;
+    const int waterStep = 1;
 
     std::vector<TerrainData> waterSamples(waterResolution* waterResolution);
 
@@ -862,8 +877,12 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
         };
 
     auto addWaterVert = [&](const glm::vec2& gridPos, float waterHeight) {
-        uint32_t xKey = static_cast<uint32_t>(std::lround(gridPos.x * 2.0f));
-        uint32_t zKey = static_cast<uint32_t>(std::lround(gridPos.y * 2.0f));
+        float worldX = originX + gridPos.x * step;
+        float worldZ = originZ + gridPos.y * step;
+
+        const float SNAP_RESOLUTION = 0.5f; 
+        uint32_t xKey = static_cast<uint32_t>(std::round(worldX / SNAP_RESOLUTION));
+        uint32_t zKey = static_cast<uint32_t>(std::round(worldZ / SNAP_RESOLUTION));
         uint64_t key = (static_cast<uint64_t>(xKey) << 32) | zKey;
 
         auto existing = waterVertIndices.find(key);
@@ -871,15 +890,17 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
             return existing->second;
         }
 
-        float worldX = originX + gridPos.x * step;
-        float worldZ = originZ + gridPos.y * step;
-        float terrainHeight = CalculateHeightAndColor(worldX, worldZ).height;
+        TerrainData terrainData = CalculateHeightAndColor(worldX, worldZ);
+        float terrainHeight = terrainData.height;
 
         ModelVertex vertex{};
         vertex.pos = glm::vec3(worldX, waterHeight, worldZ);
         vertex.normal = EncodeNormal(glm::vec3(0.0f, 1.0f, 0.0f));
-        vertex.tangent = glm::vec4(1.0f, 0.0f, 0.0f, waterHeight - terrainHeight);
-        vertex.color = glm::vec3(0.1f, 0.4f, 0.5f);
+
+        float rawDepth = waterHeight - terrainHeight;
+        float normalizedDepth = std::clamp(rawDepth / 30.0f, 0.0f, 1.0f);
+        vertex.tangent = EncodeTangent(glm::vec4(1.0f, 0.0f, 0.0f, normalizedDepth));
+
         vertex.coarseY = vertex.pos.y;
         vertex.coarseNormal = vertex.normal;
         vertex.coarseTangent = vertex.tangent;
@@ -1195,8 +1216,8 @@ void Chunk::GenerateChunkProps(int chunkX, int chunkZ, int lod, ChunkJobResult& 
 
     for (int ix = 0; ix < steps; ++ix) {
         for (int iz = 0; iz < steps; ++iz) {
-            float worldX = chunkX * m_chunkSize + (ix * stepSize);
-            float worldZ = chunkZ * m_chunkSize + (iz * stepSize);
+            float worldX = chunkX * chunkSize + (ix * stepSize);
+            float worldZ = chunkZ * chunkSize + (iz * stepSize);
 
             BiomeType biome = GetDominantBiome(worldX, worldZ);
             const BiomeDefinition& def = GetBiomeDefinition(biome);
@@ -1229,7 +1250,7 @@ void Chunk::GenerateChunkProps(int chunkX, int chunkZ, int lod, ChunkJobResult& 
                     float scaleT = static_cast<float>((coordHash >> 8) % 100) / 100.0f;
                     prop.scale = glm::vec3(std::lerp(rule.minScale, rule.maxScale, scaleT));
                     prop.customPayload = static_cast<float>(coordHash % 100) / 100.0f;
-                    prop.lodMeshes = rule.lodMeshes;
+                    prop.lodGroupName = rule.lodGroupName;
 
                     outResult.props.push_back(prop);
                     break;

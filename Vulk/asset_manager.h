@@ -6,7 +6,7 @@
 #include <fstream>
 #include <glm/glm.hpp>
 
-#include "scene_types.h"
+#include "mesh_types.h"
 #include "texture.h"
 #include "mesh.h"
 #include "settings.h"
@@ -20,6 +20,10 @@ struct MeshAsset {
     std::vector<std::string> materialTextures;
     std::vector<std::string> normalMapTextures;
     std::vector<std::string> ormTextures;
+};
+struct LodGroup {
+    std::string name;
+    std::vector<std::string> meshPaths;
 };
 
 struct DDSHeader {
@@ -68,6 +72,10 @@ private:
     Texture m_defaultNormalTexture;
     Texture m_defaultTexture;
 
+    std::unordered_map<std::string, LodGroup> m_lodGroups;
+
+    bool m_textureDirty = false;
+
 public:
     void Cleanup(VkDevice device);
     void SetRenderer(VulkanRenderer* renderer) { m_renderer = renderer; }
@@ -84,6 +92,9 @@ public:
     );
     void UnregisterMesh(const std::string& name) { m_meshes.erase(name); }
     MeshAsset* GetMesh(const std::string& path);
+
+    void RegisterLodGroup(const std::string& name, const std::vector<std::string>& paths);
+    const LodGroup* GetLodGroup(const std::string& name) const;
 
     void SetDescriptorSet(VkDescriptorSet set) { m_descriptorSet = set; }
 
@@ -131,8 +142,6 @@ public:
     void ClearTextureDirty() { m_textureDirty = false; }
 
 private:
-    bool m_textureDirty = false;
-
     VkDevice GetDevice() const;
     VkPhysicalDevice GetPhysicalDevice() const;
     VkCommandPool GetCommandPool() const;

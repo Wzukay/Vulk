@@ -21,7 +21,7 @@ void StaticMeshRenderer::Init(
 	m_maxIndices = MAX_GLOBAL_INDICES;
 
 	const VkDeviceSize vertexSize = sizeof(ModelVertex) * m_maxVertices;
-	const VkDeviceSize indexSize = sizeof(uint32_t) * m_maxIndices;
+	const VkDeviceSize indexSize = sizeof(uint16_t) * m_maxIndices;
 
 	m_renderer->CreateBuffer(
 		vertexSize,
@@ -64,27 +64,33 @@ void StaticMeshRenderer::Init(
 	for (uint32_t i = 0; i < m_framesInFlight; ++i) {
 		m_renderer->CreateBuffer(
 			visibleInstanceBytes,
-			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-			VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
 			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
 			m_visibleInstanceBuffers[i],
 			m_visibleInstanceMemories[i]);
-
+		
 		m_renderer->CreateBuffer(
-			sizeof(VkDrawIndexedIndirectCommand) *
-			MAX_INDIRECT_BATCHES,
+			sizeof(VkDrawIndexedIndirectCommand) * MAX_INDIRECT_BATCHES,
 			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
 			VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT |
-			VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+			VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+			VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
 			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
 			m_indirectCommandBuffers[i],
 			m_indirectCommandMemories[i]);
+
+		m_renderer->CreateBuffer(
+			sizeof(VkDrawIndexedIndirectCommand) * MAX_INDIRECT_BATCHES,
+			VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			m_indirectReadbackBuffers[i],
+			m_indirectReadbackMemories[i]);
+	
+		vkMapMemory(m_device, m_indirectReadbackMemories[i], 0, VK_WHOLE_SIZE, 0, &m_mappedIndirectReadback[i]);
 	}
 
 	CreateCullPipeline();
 	UpdateCullDescriptors();
-
-	std::cout << "[StaticMeshRenderer] Initialized GPU static culling.\n";
 }
 
 void StaticMeshRenderer::Cleanup() {
@@ -109,6 +115,9 @@ void StaticMeshRenderer::Cleanup() {
 	for (uint32_t i = 0; i < m_framesInFlight; ++i) {
 		m_renderer->DestroyBuffer(m_visibleInstanceBuffers[i], m_visibleInstanceMemories[i]);
 		m_renderer->DestroyBuffer(m_indirectCommandBuffers[i], m_indirectCommandMemories[i]);
+
+		vkUnmapMemory(m_device, m_indirectReadbackMemories[i]);
+		m_renderer->DestroyBuffer(m_indirectReadbackBuffers[i], m_indirectReadbackMemories[i]);
 	}
 	m_renderer->DestroyBuffer(m_cullInputBuffer, m_cullInputMemory);
 }
@@ -123,48 +132,81 @@ void StaticMeshRenderer::ResizeBuffers(uint32_t requiredVertices, uint32_t requi
 
 	m_renderer->CreateBuffer(sizeof(ModelVertex) * m_maxVertices, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
 		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_vertexBuffer, m_vertexMemory);
-	m_renderer->CreateBuffer(sizeof(uint32_t) * m_maxIndices, VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+	m_renderer->CreateBuffer(sizeof(uint16_t) * m_maxIndices, VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
 		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_indexBuffer, m_indexMemory);
 }
 
 void StaticMeshRenderer::UploadUniqueMeshes(const std::unordered_set<std::string>& uniqueMeshNames) {
 	std::vector<ModelVertex> allVerts;
-	std::vector<uint32_t> allIndices;
+	std::vector<uint16_t> allIndices;
 	m_meshAllocations.clear();
 
 	uint32_t vertexOffset = 0;
 	uint32_t indexOffset = 0;
 
 	for (const auto& name : uniqueMeshNames) {
-		MeshAsset* mesh = g_AssetManager.GetMesh(name);
-		if (!mesh) continue;
-
-		allVerts.insert(allVerts.end(), mesh->vertices.begin(), mesh->vertices.end());
-		allIndices.insert(allIndices.end(), mesh->indices.begin(), mesh->indices.end());
-
+		const LodGroup* group = g_AssetManager.GetLodGroup(name);
 		MeshBufferAllocation alloc;
 		alloc.firstIndex = indexOffset;
 		alloc.vertexOffset = vertexOffset;
 		alloc.maxBoundingRadius = 0.0f;
 
-		for (size_t subIdx = 0; subIdx < mesh->subMeshes.size(); ++subIdx) {
-			SubMesh sub = mesh->subMeshes[subIdx];
-			sub.textureId = g_AssetManager.GetTextureId(mesh->materialTextures[subIdx]);
-			sub.normalTextureId = g_AssetManager.GetNormalTextureId(mesh->normalMapTextures[subIdx]);
+		if (group) {
+			alloc.lodCount = static_cast<uint32_t>(group->meshPaths.size());
+			for (const auto& path : group->meshPaths) {
+				MeshAsset* mesh = g_AssetManager.GetMesh(path);
+				if (!mesh || mesh->subMeshes.empty()) continue;
 
-			alloc.maxBoundingRadius = std::max(alloc.maxBoundingRadius, sub.boundingRadiusLocal);
-			alloc.subMeshes.push_back(sub);
+				// Force 1 submesh per LOD to keep indirect batching contiguous
+				SubMesh sub = mesh->subMeshes[0];
+				sub.textureId = g_AssetManager.GetTextureId(mesh->materialTextures[0]);
+				sub.normalTextureId = g_AssetManager.GetNormalTextureId(mesh->normalMapTextures[0]);
+
+				alloc.maxBoundingRadius = std::max(alloc.maxBoundingRadius, sub.boundingRadiusLocal);
+				alloc.subMeshes.push_back(sub);
+
+				allVerts.insert(allVerts.end(), mesh->vertices.begin(), mesh->vertices.end());
+				for (uint32_t idx : mesh->indices) {
+					if (idx > 65535) throw std::runtime_error("Mesh exceeds 16-bit index limit!");
+					allIndices.push_back(static_cast<uint16_t>(idx));
+				}
+				allIndices.insert(allIndices.end(), mesh->indices.begin(), mesh->indices.end());
+
+				vertexOffset += static_cast<uint32_t>(mesh->vertices.size());
+				indexOffset += static_cast<uint32_t>(mesh->indices.size());
+			}
+		}
+		else {
+			MeshAsset* mesh = g_AssetManager.GetMesh(name);
+			if (!mesh) continue;
+
+			alloc.lodCount = 1;
+			for (size_t subIdx = 0; subIdx < mesh->subMeshes.size(); ++subIdx) {
+				SubMesh sub = mesh->subMeshes[subIdx];
+				sub.textureId = g_AssetManager.GetTextureId(mesh->materialTextures[subIdx]);
+				sub.normalTextureId = g_AssetManager.GetNormalTextureId(mesh->normalMapTextures[subIdx]);
+
+				alloc.maxBoundingRadius = std::max(alloc.maxBoundingRadius, sub.boundingRadiusLocal);
+				alloc.subMeshes.push_back(sub);
+			}
+
+			allVerts.insert(allVerts.end(), mesh->vertices.begin(), mesh->vertices.end());
+			for (uint32_t idx : mesh->indices) {
+				if (idx > 65535) throw std::runtime_error("Mesh exceeds 16-bit index limit!");
+				allIndices.push_back(static_cast<uint16_t>(idx));
+			}
+			allIndices.insert(allIndices.end(), mesh->indices.begin(), mesh->indices.end());
+
+			vertexOffset += static_cast<uint32_t>(mesh->vertices.size());
+			indexOffset += static_cast<uint32_t>(mesh->indices.size());
 		}
 
 		m_meshAllocations[name] = alloc;
-		vertexOffset += static_cast<uint32_t>(mesh->vertices.size());
-		indexOffset += static_cast<uint32_t>(mesh->indices.size());
 	}
 
 	if (allVerts.empty() || allIndices.empty()) return;
 
 	if (allVerts.size() > m_maxVertices || allIndices.size() > m_maxIndices) {
-		// CLEANUP FIX: Explicit template and casts for std::max so the compiler doesn't throw C2672
 		uint32_t targetVerts = std::max<uint32_t>(static_cast<uint32_t>(allVerts.size() * 2), static_cast<uint32_t>(m_maxVertices));
 		uint32_t targetIndices = std::max<uint32_t>(static_cast<uint32_t>(allIndices.size() * 2), static_cast<uint32_t>(m_maxIndices));
 		ResizeBuffers(targetVerts, targetIndices);
@@ -174,7 +216,7 @@ void StaticMeshRenderer::UploadUniqueMeshes(const std::unordered_set<std::string
 	VkDeviceMemory stagingVertMem, stagingIndexMem;
 	m_renderer->CreateBuffer(sizeof(ModelVertex) * allVerts.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
 		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingVert, stagingVertMem);
-	m_renderer->CreateBuffer(sizeof(uint32_t) * allIndices.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+	m_renderer->CreateBuffer(sizeof(uint16_t) * allIndices.size(), VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
 		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingIndex, stagingIndexMem);
 
 	void* data;
@@ -182,14 +224,14 @@ void StaticMeshRenderer::UploadUniqueMeshes(const std::unordered_set<std::string
 	memcpy(data, allVerts.data(), sizeof(ModelVertex) * allVerts.size());
 	vkUnmapMemory(m_device, stagingVertMem);
 
-	vkMapMemory(m_device, stagingIndexMem, 0, sizeof(uint32_t) * allIndices.size(), 0, &data);
-	memcpy(data, allIndices.data(), sizeof(uint32_t) * allIndices.size());
+	vkMapMemory(m_device, stagingIndexMem, 0, sizeof(uint16_t) * allIndices.size(), 0, &data);
+	memcpy(data, allIndices.data(), sizeof(uint16_t) * allIndices.size());
 	vkUnmapMemory(m_device, stagingIndexMem);
 
 	VkCommandBuffer cmd = m_renderer->BeginSingleTimeCommands();
 	VkBufferCopy vCopy{ 0, 0, sizeof(ModelVertex) * allVerts.size() };
 	vkCmdCopyBuffer(cmd, stagingVert, m_vertexBuffer, 1, &vCopy);
-	VkBufferCopy iCopy{ 0, 0, sizeof(uint32_t) * allIndices.size() };
+	VkBufferCopy iCopy{ 0, 0, sizeof(uint16_t) * allIndices.size() };
 	vkCmdCopyBuffer(cmd, stagingIndex, m_indexBuffer, 1, &iCopy);
 	m_renderer->EndSingleTimeCommands(cmd);
 
@@ -231,83 +273,68 @@ void StaticMeshRenderer::UpdateScene(const Scene& scene) {
 
 	for (const auto& inst : instances) {
 		if (inst.isInstanced) {
-			const auto allocIt =
-				m_meshAllocations.find(inst.meshName);
-
-			if (allocIt == m_meshAllocations.end()) {
-				continue;
-			}
+			const auto allocIt = m_meshAllocations.find(inst.meshName);
+			if (allocIt == m_meshAllocations.end() || allocIt->second.subMeshes.empty()) continue;
 
 			const MeshBufferAllocation& alloc = allocIt->second;
 
-			for (const SubMesh& sub : alloc.subMeshes) {
-				auto batchIt = std::find_if(
-					m_indirectBatches.begin(),
-					m_indirectBatches.end(),
-					[&](const StaticIndirectBatch& batch) {
-						return
-							batch.command.indexCount ==
-							sub.indexCount &&
-							batch.command.firstIndex ==
-							sub.firstIndex + alloc.firstIndex &&
-							batch.command.vertexOffset ==
-							sub.vertexOffset +
-							alloc.vertexOffset &&
-							batch.textureId == sub.textureId &&
-							batch.normalTextureId ==
-							sub.normalTextureId;
-					});
+			// Find if this LodGroup has already generated its batch array
+			auto batchIt = std::find_if(m_indirectBatches.begin(), m_indirectBatches.end(), [&](const StaticIndirectBatch& batch) {
+				return batch.command.indexCount == alloc.subMeshes[0].indexCount &&
+					batch.command.firstIndex == alloc.subMeshes[0].firstIndex + alloc.firstIndex &&
+					batch.textureId == alloc.subMeshes[0].textureId;
+				});
 
-				if (batchIt == m_indirectBatches.end()) {
-					if (m_indirectBatches.size() >=
-						MAX_INDIRECT_BATCHES) {
-						throw std::runtime_error(
-							"Static indirect batch buffer overflow");
-					}
+			uint32_t baseCommandIndex = 0;
 
+			if (batchIt == m_indirectBatches.end()) {
+				baseCommandIndex = static_cast<uint32_t>(m_indirectBatches.size());
+
+				// Automatically generate sequential indirect commands for every LOD level!
+				for (size_t i = 0; i < alloc.lodCount; ++i) {
+					if (m_indirectBatches.size() >= MAX_INDIRECT_BATCHES) throw std::runtime_error("Static indirect batch buffer overflow");
+
+					const SubMesh& sub = alloc.subMeshes[i];
 					StaticIndirectBatch batch{};
 					batch.command.indexCount = sub.indexCount;
 					batch.command.instanceCount = 0;
-					batch.command.firstIndex =
-						sub.firstIndex + alloc.firstIndex;
-					batch.command.vertexOffset =
-						sub.vertexOffset + alloc.vertexOffset;
+					batch.command.firstIndex = sub.firstIndex + alloc.firstIndex;
+					batch.command.vertexOffset = sub.vertexOffset + alloc.vertexOffset;
 					batch.command.firstInstance = 0;
 					batch.textureId = sub.textureId;
-					batch.normalTextureId =
-						sub.normalTextureId;
+					batch.normalTextureId = sub.normalTextureId;
 
 					m_indirectBatches.push_back(batch);
-					batchIt = std::prev(
-						m_indirectBatches.end());
 				}
-
-				if (m_cullInstances.size() >= m_maxInstances) {
-					throw std::runtime_error(
-						"Static instance buffer overflow");
-				}
-
-				const float maxScale = std::max({
-					glm::length(glm::vec3(inst.transform[0])),
-					glm::length(glm::vec3(inst.transform[1])),
-					glm::length(glm::vec3(inst.transform[2]))
-					});
-
-				StaticInstanceCullData candidate{};
-				candidate.modelMatrix = inst.transform;
-				candidate.worldPositionRadius = glm::vec4(
-					glm::vec3(inst.transform[3]),
-					alloc.maxBoundingRadius * maxScale);
-
-				candidate.drawData.x =
-					static_cast<uint32_t>(std::distance(
-						m_indirectBatches.begin(),
-						batchIt));
-
-				m_cullInstances.push_back(candidate);
-				++batchIt->sourceCount;
+			}
+			else {
+				baseCommandIndex = static_cast<uint32_t>(std::distance(m_indirectBatches.begin(), batchIt));
 			}
 
+			if (m_cullInstances.size() >= m_maxInstances) throw std::runtime_error("Static instance buffer overflow");
+
+			const float maxScale = std::max({
+				glm::length(glm::vec3(inst.transform[0])),
+				glm::length(glm::vec3(inst.transform[1])),
+				glm::length(glm::vec3(inst.transform[2]))
+				});
+
+			glm::vec3 worldCenter = glm::vec3(inst.transform * glm::vec4(alloc.subMeshes[0].boundingCenterLocal, 1.0f));
+
+			StaticInstanceCullData candidate{};
+			candidate.modelMatrix = inst.transform;
+			candidate.worldPositionRadius = glm::vec4(worldCenter, alloc.maxBoundingRadius * maxScale);
+
+			// PACK THE LOD MATH
+			candidate.drawData.x = baseCommandIndex;       // Base Command 
+			candidate.drawData.z = alloc.lodCount - 1;     // Max allowed LOD
+
+			m_cullInstances.push_back(candidate);
+
+			// Reserve space in the visible buffer for every LOD possibility
+			for (size_t i = 0; i < alloc.lodCount; ++i) {
+				m_indirectBatches[baseCommandIndex + i].sourceCount++;
+			}
 			continue;
 		}
 
@@ -353,21 +380,16 @@ void StaticMeshRenderer::UpdateScene(const Scene& scene) {
 	}
 
 	uint32_t outputBase = 0;
-
 	for (StaticIndirectBatch& batch : m_indirectBatches) {
-		if (batch.sourceCount > m_maxInstances - outputBase) {
-			throw std::runtime_error(
-				"Static visible instance buffer overflow");
-		}
-
+		if (batch.sourceCount > m_maxInstances - outputBase) throw std::runtime_error("Static visible instance buffer overflow");
 		batch.outputBase = outputBase;
 		batch.command.firstInstance = outputBase;
 		outputBase += batch.sourceCount;
 	}
 
 	for (StaticInstanceCullData& candidate : m_cullInstances) {
-		candidate.drawData.y =
-			m_indirectBatches[candidate.drawData.x].outputBase;
+		candidate.drawData.y = m_indirectBatches[candidate.drawData.x].outputBase;
+		candidate.drawData.w = m_indirectBatches[candidate.drawData.x].sourceCount;
 	}
 }
 
@@ -379,13 +401,13 @@ void StaticMeshRenderer::Draw(VkCommandBuffer commandBuffer, VkPipelineLayout pi
 	uint32_t& outVertexCount, uint32_t& outIndexCount) {
 
 	// 1. NON-INSTANCED STATIC MESHES
-	if (!m_staticDrawList.empty()) {
+	if (!m_staticDrawList.empty() && staticPipeline != VK_NULL_HANDLE) {
 		vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, staticPipeline);
 
 		VkBuffer vertexBuffers[] = { m_vertexBuffer };
 		VkDeviceSize offsets[] = { 0 };
 		vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
-		vkCmdBindIndexBuffer(commandBuffer, m_indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+		vkCmdBindIndexBuffer(commandBuffer, m_indexBuffer, 0, VK_INDEX_TYPE_UINT16);
 
 		for (const auto& entry : m_staticDrawList) {
 			const auto& obj = m_sceneObjects[entry.objectIndex];
@@ -414,13 +436,13 @@ void StaticMeshRenderer::Draw(VkCommandBuffer commandBuffer, VkPipelineLayout pi
 	}
 
 	// 2. GPU-CULLED INSTANCED MESHES (Trees, Rocks, Foliage)
-	if (!m_indirectBatches.empty()) {
+	if (!m_indirectBatches.empty() && instancedPipeline != VK_NULL_HANDLE) {
 		vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, instancedPipeline);
 
 		VkBuffer vertexBuffers[] = { m_vertexBuffer, m_visibleInstanceBuffers[currentFrameIndex] };
 		VkDeviceSize offsets[] = { 0, 0 };
 		vkCmdBindVertexBuffers(commandBuffer, 0, 2, vertexBuffers, offsets);
-		vkCmdBindIndexBuffer(commandBuffer, m_indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+		vkCmdBindIndexBuffer(commandBuffer, m_indexBuffer, 0, VK_INDEX_TYPE_UINT16);
 
 		for (uint32_t batchIndex = 0; batchIndex < m_indirectBatches.size(); ++batchIndex) {
 			const auto& batch = m_indirectBatches[batchIndex];
@@ -435,13 +457,29 @@ void StaticMeshRenderer::Draw(VkCommandBuffer commandBuffer, VkPipelineLayout pi
 	}
 }
 
-void StaticMeshRenderer::Cull(VkCommandBuffer commandBuffer, const glm::vec3& cameraPos, const std::array<FrustumPlane, 6>& frustumPlanes, 
-	uint32_t currentFrameIndex, uint32_t& outCulledCount, uint32_t& outVertexCount, uint32_t& outIndexCount)
+void StaticMeshRenderer::Cull(VkCommandBuffer commandBuffer, const glm::vec3& cameraPos, const glm::mat4& viewProj, const glm::vec2& hzbSize, 
+    uint32_t currentFrameIndex, uint32_t& outCulledCount, uint32_t& outVertexCount, uint32_t& outIndexCount)
 {
 	if (m_cullInstances.empty() ||
 		m_cullPipeline == VK_NULL_HANDLE) {
 		return;
 	}
+
+	if (m_lastBatchCount[currentFrameIndex] > 0) {
+		uint32_t drawnInstances = 0;
+		auto* readbackCmds = static_cast<VkDrawIndexedIndirectCommand*>(m_mappedIndirectReadback[currentFrameIndex]);
+
+		for (uint32_t i = 0; i < m_lastBatchCount[currentFrameIndex]; ++i) {
+			drawnInstances += readbackCmds[i].instanceCount;
+		}
+
+		if (m_lastSubmittedInstances[currentFrameIndex] >= drawnInstances) {
+			outCulledCount += (m_lastSubmittedInstances[currentFrameIndex] - drawnInstances);
+		}
+	}
+
+	m_lastSubmittedInstances[currentFrameIndex] = static_cast<uint32_t>(m_cullInstances.size());
+	m_lastBatchCount[currentFrameIndex] = static_cast<uint32_t>(m_indirectBatches.size());
 
 	const VkDeviceSize inputOffset =
 		static_cast<VkDeviceSize>(currentFrameIndex) *
@@ -506,14 +544,12 @@ void StaticMeshRenderer::Cull(VkCommandBuffer commandBuffer, const glm::vec3& ca
 		0, nullptr,
 		0, nullptr);
 
-	StaticCullPushConstants push{};
+	StaticCullPush push{};
+	push.viewProj = viewProj;
 	push.cameraPos = cameraPos;
 	push.totalInstances = static_cast<uint32_t>(m_cullInstances.size());
-	push.cullParams.x = g_Settings.GetStaticFadeEnd();
-
-	for (uint32_t i = 0; i < frustumPlanes.size(); ++i) {
-		push.frustumPlanes[i] = glm::vec4(frustumPlanes[i].normal, frustumPlanes[i].distance);
-	}
+	push.maxDistance = g_Settings.GetStaticFadeEnd();
+	push.hzbSize = hzbSize;
 
 	vkCmdBindPipeline(
 		commandBuffer,
@@ -535,7 +571,7 @@ void StaticMeshRenderer::Cull(VkCommandBuffer commandBuffer, const glm::vec3& ca
 		m_cullPipelineLayout,
 		VK_SHADER_STAGE_COMPUTE_BIT,
 		0,
-		sizeof(StaticCullPushConstants),
+		sizeof(StaticCullPush),
 		&push);
 
 	vkCmdDispatch(commandBuffer, (push.totalInstances + 127) / 128, 1, 1);
@@ -548,26 +584,28 @@ void StaticMeshRenderer::Cull(VkCommandBuffer commandBuffer, const glm::vec3& ca
 	vkCmdPipelineBarrier(
 		commandBuffer,
 		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-		VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
-		VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
-		0,
-		1, &drawBarrier,
-		0, nullptr,
-		0, nullptr);
+		// Add TRANSFER_BIT pipeline stage
+		VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+		0, 1, &drawBarrier, 0, nullptr, 0, nullptr);
 
-	(void)outCulledCount;
+	if (!m_indirectBatches.empty()) {
+		VkBufferCopy copyRegion{};
+		copyRegion.size = sizeof(VkDrawIndexedIndirectCommand) * m_indirectBatches.size();
+		vkCmdCopyBuffer(commandBuffer, m_indirectCommandBuffers[currentFrameIndex], m_indirectReadbackBuffers[currentFrameIndex], 1, &copyRegion);
+	}
 }
 
 void StaticMeshRenderer::CreateCullPipeline() {
 	VkDescriptorSetLayoutBinding bindings[] = {
 		{ 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
 		{ 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
-		{ 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr }
+		{ 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr },
+		{ 3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr } 
 	};
-	VkDescriptorSetLayoutCreateInfo layoutInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 3, bindings };
+	VkDescriptorSetLayoutCreateInfo layoutInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 4, bindings };
 	if (vkCreateDescriptorSetLayout(m_device, &layoutInfo, nullptr, &m_cullDescriptorSetLayout) != VK_SUCCESS)
 		throw std::runtime_error("Failed to create static cull descriptor layout");
-	VkPushConstantRange range{ VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(StaticCullPushConstants) };
+	VkPushConstantRange range{ VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(StaticCullPush) };
 	VkPipelineLayoutCreateInfo pipelineLayoutInfo{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, nullptr, 0, 1, &m_cullDescriptorSetLayout, 1, &range };
 	if (vkCreatePipelineLayout(m_device, &pipelineLayoutInfo, nullptr, &m_cullPipelineLayout) != VK_SUCCESS)
 		throw std::runtime_error("Failed to create static cull pipeline layout");
@@ -581,16 +619,17 @@ void StaticMeshRenderer::CreateCullPipeline() {
 }
 
 void StaticMeshRenderer::UpdateCullDescriptors() {
-	VkDescriptorPoolSize poolSize{};
-	poolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	poolSize.descriptorCount = 3 * m_framesInFlight;
+	VkDescriptorPoolSize poolSizes[2]{};
+	poolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	poolSizes[0].descriptorCount = 3 * m_framesInFlight;
+	poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	poolSizes[1].descriptorCount = m_framesInFlight;
 
 	VkDescriptorPoolCreateInfo poolInfo{};
-	poolInfo.sType =
-		VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+	poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 	poolInfo.maxSets = m_framesInFlight;
-	poolInfo.poolSizeCount = 1;
-	poolInfo.pPoolSizes = &poolSize;
+	poolInfo.poolSizeCount = 2;
+	poolInfo.pPoolSizes = poolSizes;
 
 	if (vkCreateDescriptorPool(
 		m_device,
@@ -674,4 +713,28 @@ void StaticMeshRenderer::UpdateCullDescriptors() {
 			0,
 			nullptr);
 	}
+}
+
+void StaticMeshRenderer::UpdateHZBDescriptor(VkImageView hzbView, VkSampler hzbSampler) {
+	if (m_cullDescriptorSets[0] == VK_NULL_HANDLE) return;
+
+	std::vector<VkWriteDescriptorSet> writes;
+	std::vector<VkDescriptorImageInfo> imageInfos(m_framesInFlight);
+
+	for (uint32_t i = 0; i < m_framesInFlight; ++i) {
+		imageInfos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		imageInfos[i].imageView = hzbView;
+		imageInfos[i].sampler = hzbSampler;
+
+		VkWriteDescriptorSet write{};
+		write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		write.dstSet = m_cullDescriptorSets[i];
+		write.dstBinding = 3;
+		write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		write.descriptorCount = 1;
+		write.pImageInfo = &imageInfos[i];
+
+		writes.push_back(write);
+	}
+	vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 }

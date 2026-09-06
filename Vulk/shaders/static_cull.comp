@@ -1,4 +1,6 @@
 #version 450
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_ballot : require
 
 layout(local_size_x = 128) in;
 
@@ -11,33 +13,162 @@ struct InstanceData { mat4 modelMatrix; vec4 customData; };
 struct VkDrawIndexedIndirectCommand {
     uint indexCount; uint instanceCount; uint firstIndex; int vertexOffset; uint firstInstance;
 };
+
 layout(std430, binding = 0) readonly buffer InputInstances { CullInstance inputInstances[]; };
 layout(std430, binding = 1) writeonly buffer VisibleInstances { InstanceData visibleInstances[]; };
 layout(std430, binding = 2) buffer Commands { VkDrawIndexedIndirectCommand commands[]; };
+
+// NEW: The HZB Depth Pyramid
+layout(binding = 3) uniform sampler2D hzb;
+
 layout(push_constant) uniform CullPush {
+    mat4 viewProj;
     vec3 cameraPos;
     uint totalInstances;
-    vec4 frustumPlanes[6];
-    vec4 cullParams;
+    float maxDistance;
+    vec2 hzbSize;
 } push;
+
+uint atomicAddDivergent(bool wantsToWrite, uint cmdIndex) {
+    uint result = 0;
+    bool needsWrite = wantsToWrite;
+    uvec4 activeBallot = subgroupBallot(needsWrite);
+    
+    while (subgroupBallotBitCount(activeBallot) > 0) {
+        // Elect a leader lane and broadcast its target command index to the wave
+        uint leaderLane = subgroupBallotFindLSB(activeBallot);
+        uint leaderCmd = subgroupBroadcast(cmdIndex, leaderLane);
+        
+        // Find all threads that share the exact same target command index
+        uvec4 matchBallot = subgroupBallot(needsWrite && (cmdIndex == leaderCmd));
+        uint matchCount = subgroupBallotBitCount(matchBallot);
+        uint exclusiveCount = subgroupBallotExclusiveBitCount(matchBallot);
+        
+        uint baseIndex = 0;
+        // The leader executes a SINGLE atomic add for the entire group
+        if (gl_SubgroupInvocationID == leaderLane) {
+            baseIndex = atomicAdd(commands[leaderCmd].instanceCount, matchCount);
+        }
+        
+        // Broadcast the memory base offset back to the group
+        baseIndex = subgroupBroadcast(baseIndex, leaderLane);
+        
+        if (needsWrite && (cmdIndex == leaderCmd)) {
+            result = baseIndex + exclusiveCount;
+            needsWrite = false; // This thread is finished!
+        }
+        
+        activeBallot = subgroupBallot(needsWrite);
+    }
+    return result;
+}
 
 void main() {
     uint index = gl_GlobalInvocationID.x;
-
     if (index >= push.totalInstances) return;
 
     CullInstance instance = inputInstances[index];
-    vec3 position = instance.worldPositionRadius.xyz;
+    vec3 center = instance.worldPositionRadius.xyz;
     float radius = instance.worldPositionRadius.w;
 
-    for (uint plane = 0; plane < 6; ++plane) {
-        if (dot(push.frustumPlanes[plane].xyz, position) + push.frustumPlanes[plane].w < -radius) return;
+    // 1. Distance Culling
+    if (distance(center, push.cameraPos) > push.maxDistance + radius) return;
+
+    // 2. Component-wise axis scaling for projection and frustum bounds
+    float radiusX = radius * length(vec3(push.viewProj[0].x, push.viewProj[1].x, push.viewProj[2].x));
+    float radiusY = radius * length(vec3(push.viewProj[0].y, push.viewProj[1].y, push.viewProj[2].y));
+    float radiusZ = radius * length(vec3(push.viewProj[0].z, push.viewProj[1].z, push.viewProj[2].z));
+    float radiusW = radius * length(vec3(push.viewProj[0].w, push.viewProj[1].w, push.viewProj[2].w));
+
+    vec4 clipCenter = push.viewProj * vec4(center, 1.0);
+
+    // Robust clip-space frustum culling using the individual axes
+    if (clipCenter.z < -radiusZ || 
+        clipCenter.x < -clipCenter.w - radiusX || clipCenter.x > clipCenter.w + radiusX ||
+        clipCenter.y < -clipCenter.w - radiusY || clipCenter.y > clipCenter.w + radiusY) {
+        return;
     }
 
-    if (distance(position, push.cameraPos) > push.cullParams.x) return;
+    float lodFloat = 0.0;
 
-    uint commandIndex = instance.drawData.x;
-    uint outputIndex = atomicAdd(commands[commandIndex].instanceCount, 1);
-    visibleInstances[instance.drawData.y + outputIndex].modelMatrix = instance.modelMatrix;
-    visibleInstances[instance.drawData.y + outputIndex].customData = vec4(0.0);
+    // 3. HZB Occlusion Culling (Safe Near-Plane Check)
+    if (clipCenter.w > radiusW + 0.1) {
+        vec3 ndcCenter = clipCenter.xyz / clipCenter.w;
+        vec2 ndcExtents = vec2(radiusX, radiusY) / clipCenter.w;
+        
+        vec2 minUV = clamp((ndcCenter.xy - ndcExtents) * 0.5 + 0.5, 0.0, 1.0);
+        vec2 maxUV = clamp((ndcCenter.xy + ndcExtents) * 0.5 + 0.5, 0.0, 1.0);
+
+        vec2 size = (maxUV - minUV) * push.hzbSize;
+        float mip = floor(log2(max(size.x, size.y)));
+        mip = clamp(mip, 0.0, 15.0);
+
+        float depth1 = textureLod(hzb, vec2(minUV.x, minUV.y), mip).r;
+        float depth2 = textureLod(hzb, vec2(maxUV.x, minUV.y), mip).r;
+        float depth3 = textureLod(hzb, vec2(minUV.x, maxUV.y), mip).r;
+        float depth4 = textureLod(hzb, vec2(maxUV.x, maxUV.y), mip).r;
+
+        float maxDepth = max(max(depth1, depth2), max(depth3, depth4));
+        float instanceDepth = clipCenter.z / clipCenter.w - (radiusZ / clipCenter.w);
+
+        if (instanceDepth > maxDepth) {
+            return; // Occluded behind terrain!
+        }
+        
+        // --- GPU LOD SELECTION ---
+        float maxScreenPercentage = max(size.x, size.y) / push.hzbSize.x;
+        
+        lodFloat = 0.0;
+
+        if (maxScreenPercentage > 0.50) { 
+            lodFloat = 0.0;
+        } else if (maxScreenPercentage > 0.20) { // 20% for LOD 1
+            lodFloat = mix(1.0, 0.0, (maxScreenPercentage - 0.20) / 0.30);
+        } else if (maxScreenPercentage > 0.08) { // 8% for LOD 2
+            lodFloat = mix(2.0, 1.0, (maxScreenPercentage - 0.08) / 0.12);
+        } else {
+            // Anything smaller than 8% is pushed to LOD 3
+            lodFloat = mix(3.0, 2.0, clamp(maxScreenPercentage / 0.08, 0.0, 1.0));
+        }
+    } else {
+        // The camera is inside the bounding sphere! Force LOD 0.
+        lodFloat = 0.0;
+    }
+
+    // 4. Calculate Final Crossfade Math
+    uint maxLod = instance.drawData.z;
+    uint lodA = min(uint(floor(lodFloat)), maxLod);
+    uint lodB = min(lodA + 1, maxLod);
+    float rawFract = fract(lodFloat);
+    float transition = clamp((rawFract - 0.90) / 0.10, 0.0, 1.0);
+
+    if (lodA == lodB) transition = 0.0;
+
+    // 5. Write Dominant/Fading-Out Model (LOD A)
+    float opacityA = 1.0 - transition;
+    bool writeA = opacityA > 0.01;
+    uint cmdIndexA = instance.drawData.x + lodA;
+
+    // Execute the subgroup atomic across the entire wave safely
+    uint outIndexA = atomicAddDivergent(writeA, cmdIndexA);
+
+    if (writeA) { 
+        uint finalPosA = instance.drawData.y + (lodA * instance.drawData.w) + outIndexA;
+        visibleInstances[finalPosA].modelMatrix = instance.modelMatrix;
+        visibleInstances[finalPosA].customData = vec4(opacityA, 0.0, 0.0, 0.0); 
+    }
+
+    // 6. Write Secondary/Fading-In Model (LOD B)
+    float opacityB = transition;
+    bool writeB = (opacityB > 0.01 && lodA != lodB);
+    uint cmdIndexB = instance.drawData.x + lodB;
+
+    // Execute the subgroup atomic across the entire wave safely
+    uint outIndexB = atomicAddDivergent(writeB, cmdIndexB);
+
+    if (writeB) {
+        uint finalPosB = instance.drawData.y + (lodB * instance.drawData.w) + outIndexB;
+        visibleInstances[finalPosB].modelMatrix = instance.modelMatrix;
+        visibleInstances[finalPosB].customData = vec4(-opacityB, 0.0, 0.0, 0.0); 
+    }
 }

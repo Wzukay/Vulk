@@ -1,6 +1,6 @@
 #pragma once
 
-#include "scene.h"
+#include "light.h"
 #include <glm/glm.hpp>
 
 struct DayNightManager {
@@ -33,8 +33,8 @@ struct DayNightManager {
         // Intensity waits until dawn, then ramps up
         float sunIntensity = glm::smoothstep(-0.05f, 0.3f, t) * 1.1f;
 
-        std::vector<SceneLight> lights;
-        lights.push_back(MakeDirectional(sunDir, sunColor, sunIntensity));
+        std::vector<Light> lights;
+        lights.push_back(Light::Directional(sunDir, sunColor, sunIntensity));
 
         // Stylized Cyan Moonlight
         float moonBlend = glm::smoothstep(0.0f, -0.2f, t);
@@ -43,7 +43,7 @@ struct DayNightManager {
             glm::vec3 moonColor = glm::vec3(0.55f, 0.6f, 0.65f); // Grey/Silver light
 
             // Dropped the intensity drastically (e.g., from 0.18f to 0.05f)
-            lights.push_back(MakeDirectional(moonDir, moonColor, moonBlend * 0.05f));
+            lights.push_back(Light::Directional(moonDir, moonColor, moonBlend * 0.05f));
         }
 
         scene.SetLights(lights);

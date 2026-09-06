@@ -9,39 +9,10 @@
 #include <unordered_set>
 
 #include "gpu_instances.h"   
-#include "scene_types.h"
-#include "mesh.h"            
+#include "mesh_types.h"  
 
 class VulkanRenderer;
 class Scene;
-
-struct MeshBufferAllocation {
-    uint32_t firstIndex;
-    int32_t vertexOffset;
-    std::vector<SubMesh> subMeshes;
-    float maxBoundingRadius;
-};
-
-struct alignas(16) StaticInstanceCullData {
-    glm::mat4 modelMatrix;
-    glm::vec4 worldPositionRadius;
-    glm::uvec4 drawData; // x = indirect-command index, y = output range base
-};
-
-struct StaticIndirectBatch {
-    VkDrawIndexedIndirectCommand command{};
-    uint32_t outputBase = 0;
-    uint32_t sourceCount = 0;
-    uint32_t textureId = 0;
-    uint32_t normalTextureId = 0;
-};
-
-struct StaticCullPushConstants {
-    glm::vec3 cameraPos;
-    uint32_t totalInstances;
-    glm::vec4 frustumPlanes[6];
-    glm::vec4 cullParams;   
-};
 
 class StaticMeshRenderer {
 public:
@@ -58,8 +29,9 @@ public:
         uint32_t& outDrawCalls, uint32_t& outCulledCount,
         uint32_t& outVertexCount, uint32_t& outIndexCount);
 
-    void Cull(VkCommandBuffer commandBuffer, const glm::vec3& cameraPos, const std::array<FrustumPlane, 6>& frustumPlanes, 
-                   uint32_t currentFrameIndex, uint32_t& outCulledCount, uint32_t& outVertexCount, uint32_t& outIndexCount);
+    void Cull(VkCommandBuffer commandBuffer, const glm::vec3& cameraPos, const glm::mat4& viewProj, const glm::vec2& hzbSize,
+        uint32_t currentFrameIndex, uint32_t& outCulledCount, uint32_t& outVertexCount, uint32_t& outIndexCount);
+    void UpdateHZBDescriptor(VkImageView hzbView, VkSampler hzbSampler);
 
     void SetChunkSize(float chunkSize) {
         m_chunkSize = chunkSize;
@@ -94,6 +66,16 @@ private:
     std::array<VkDeviceMemory, MAX_FRAMES_IN_FLIGHT_COUNT> m_visibleInstanceMemories = { VK_NULL_HANDLE };
     std::array<VkBuffer, MAX_FRAMES_IN_FLIGHT_COUNT> m_indirectCommandBuffers = { VK_NULL_HANDLE };
     std::array<VkDeviceMemory, MAX_FRAMES_IN_FLIGHT_COUNT> m_indirectCommandMemories = { VK_NULL_HANDLE };
+
+    // GPU to CPU Readback Buffers
+    std::array<VkBuffer, MAX_FRAMES_IN_FLIGHT_COUNT> m_indirectReadbackBuffers = { VK_NULL_HANDLE };
+    std::array<VkDeviceMemory, MAX_FRAMES_IN_FLIGHT_COUNT> m_indirectReadbackMemories = { VK_NULL_HANDLE };
+    std::array<void*, MAX_FRAMES_IN_FLIGHT_COUNT> m_mappedIndirectReadback = { nullptr };
+
+    // Tracking historical data for the 2-frame UI delay
+    std::array<uint32_t, MAX_FRAMES_IN_FLIGHT_COUNT> m_lastSubmittedInstances = { 0 };
+    std::array<uint32_t, MAX_FRAMES_IN_FLIGHT_COUNT> m_lastBatchCount = { 0 };
+
     VkPipeline m_cullPipeline = VK_NULL_HANDLE;
     VkPipelineLayout m_cullPipelineLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_cullDescriptorSetLayout = VK_NULL_HANDLE;

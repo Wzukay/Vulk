@@ -1,5 +1,6 @@
 #include "biome.h"
 #include <algorithm>
+#include "asset_manager.h"
 
 // --- Global Generation Constants ---
 constexpr int NOISE_INDEX_TREES = 0;
@@ -40,7 +41,7 @@ static const BiomeDefinition G_BIOMES[] = {
         .lakeMinHeight = 5.0f,
         .lakeMaxHeight = 45.0f,
         .props = {
-            PropSpawnRule{ ROCK_MESHES, 0.01f, 0.8f, NOISE_INDEX_ROCKS, 2.0f, 150.0f, 0.5f, 1.2f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
+            PropSpawnRule{ "RockGroup", 0.01f, 0.8f, NOISE_INDEX_ROCKS, 2.0f, 150.0f, 0.5f, 1.2f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
         },
         .swarms = {}
     },
@@ -54,8 +55,8 @@ static const BiomeDefinition G_BIOMES[] = {
         .lakeMinHeight = 5.0f,
         .lakeMaxHeight = 55.0f,
         .props = {
-            PropSpawnRule{ TREE_MESHES, 0.02f, 0.4f, NOISE_INDEX_TREES, 2.0f, 60.0f, 0.08f, 0.12f, TREE_GROUND_OFFSET, CULL_LOD_TREES, false },
-            PropSpawnRule{ ROCK_MESHES, 0.02f, 0.6f, NOISE_INDEX_ROCKS, 2.0f, 180.0f, 0.8f, 1.5f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
+            PropSpawnRule{ "TreeGroup", 0.02f, 0.4f, NOISE_INDEX_TREES, 2.0f, 60.0f, 0.08f, 0.12f, TREE_GROUND_OFFSET, CULL_LOD_TREES, false },
+            PropSpawnRule{ "RockGroup", 0.02f, 0.6f, NOISE_INDEX_ROCKS, 2.0f, 180.0f, 0.8f, 1.5f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
         },
         .swarms = { SwarmSpawnRule{ 25, 0.30f, 20.0f, 2.0f, 60.0f, 0.5f, 0.8f, 4.0f } }
     },
@@ -69,7 +70,7 @@ static const BiomeDefinition G_BIOMES[] = {
         .lakeMaxHeight = 70.0f,
         .props = {
         // High density, variable size trees to simulate canopy
-        PropSpawnRule{ TREE_MESHES, 0.30f, 0.0f, NOISE_INDEX_TREES, 2.0f, 90.0f, 0.06f, 0.25f, TREE_GROUND_OFFSET, CULL_LOD_TREES, false }
+        PropSpawnRule{ "TreeGroup", 0.30f, 0.0f, NOISE_INDEX_TREES, 2.0f, 90.0f, 0.06f, 0.25f, TREE_GROUND_OFFSET, CULL_LOD_TREES, false }
     },
     .swarms = { SwarmSpawnRule{ 60, 0.50f, 10.0f, 2.0f, 90.0f, 0.3f, 0.6f, 8.0f } }
 },
@@ -83,8 +84,8 @@ static const BiomeDefinition G_BIOMES[] = {
     .lakeMinHeight = 2.0f,
     .lakeMaxHeight = 35.0f,
     .props = {
-        PropSpawnRule{ TREE_MESHES, 0.10f, 0.3f, NOISE_INDEX_TREES, 2.0f, 30.0f, 0.08f, 0.15f, TREE_GROUND_OFFSET, CULL_LOD_TREES, false },
-        PropSpawnRule{ ROCK_MESHES, 0.05f, 0.4f, NOISE_INDEX_ROCKS, 2.0f, 40.0f, 1.0f, 2.0f, -0.5f, CULL_LOD_ROCKS, true } // Sunken rocks
+        PropSpawnRule{ "TreeGroup", 0.10f, 0.3f, NOISE_INDEX_TREES, 2.0f, 30.0f, 0.08f, 0.15f, TREE_GROUND_OFFSET, CULL_LOD_TREES, false },
+        PropSpawnRule{ "RockGroup", 0.05f, 0.4f, NOISE_INDEX_ROCKS, 2.0f, 40.0f, 1.0f, 2.0f, -0.5f, CULL_LOD_ROCKS, true } // Sunken rocks
     },
     .swarms = { SwarmSpawnRule{ 80, 0.80f, 8.0f, 2.0f, 30.0f, 0.2f, 0.4f, 2.0f } } // Tons of "flies/bugs"
 },
@@ -104,8 +105,8 @@ static const BiomeDefinition G_BIOMES[] = {
     .lakeMaxHeight = 55.0f,
     .props = {
         // Tiny trees acting as bushes
-        PropSpawnRule{ TREE_MESHES, 0.08f, 0.5f, NOISE_INDEX_TREES, 2.0f, 80.0f, 0.03f, 0.05f, -0.5f, CULL_LOD_TREES, true },
-        PropSpawnRule{ ROCK_MESHES, 0.05f, 0.6f, NOISE_INDEX_ROCKS, 2.0f, 150.0f, 0.5f, 1.0f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
+        PropSpawnRule{ "TreeGroup", 0.08f, 0.5f, NOISE_INDEX_TREES, 2.0f, 80.0f, 0.03f, 0.05f, -0.5f, CULL_LOD_TREES, true },
+        PropSpawnRule{ "RockGroup", 0.05f, 0.6f, NOISE_INDEX_ROCKS, 2.0f, 150.0f, 0.5f, 1.0f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
     },
     .swarms = { SwarmSpawnRule{ 30, 0.30f, 15.0f, 2.0f, 80.0f, 0.5f, 1.0f, 4.0f } }
 },
@@ -119,7 +120,7 @@ static const BiomeDefinition G_BIOMES[] = {
     .lakeMinHeight = 5.0f,
     .lakeMaxHeight = 50.0f,
     .props = {
-        PropSpawnRule{ ROCK_MESHES, 0.01f, 0.8f, NOISE_INDEX_ROCKS, 2.0f, 180.0f, 0.8f, 1.2f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
+        PropSpawnRule{ "RockGroup", 0.01f, 0.8f, NOISE_INDEX_ROCKS, 2.0f, 180.0f, 0.8f, 1.2f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
     },
     .swarms = { SwarmSpawnRule{ 46, 0.40f, 15.0f, 2.0f, 80.0f, 0.5f, 1.0f, 4.0f } }
 },
@@ -133,8 +134,8 @@ static const BiomeDefinition G_BIOMES[] = {
     .lakeMinHeight = 5.0f,
     .lakeMaxHeight = 65.0f,
     .props = {
-        PropSpawnRule{ TREE_MESHES, 0.12f, 0.2f, NOISE_INDEX_TREES, 2.0f, 85.0f, 0.08f, 0.14f, TREE_GROUND_OFFSET, CULL_LOD_TREES, false },
-        PropSpawnRule{ ROCK_MESHES, 0.05f, 0.5f, NOISE_INDEX_ROCKS, 2.0f, 180.0f, 1.0f, 1.5f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
+        PropSpawnRule{ "TreeGroup", 0.12f, 0.2f, NOISE_INDEX_TREES, 2.0f, 85.0f, 0.08f, 0.14f, TREE_GROUND_OFFSET, CULL_LOD_TREES, false },
+        PropSpawnRule{ "RockGroup", 0.05f, 0.5f, NOISE_INDEX_ROCKS, 2.0f, 180.0f, 1.0f, 1.5f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
     },
     .swarms = {}
 },
@@ -148,7 +149,7 @@ static const BiomeDefinition G_BIOMES[] = {
     .lakeMinHeight = 5.0f,
     .lakeMaxHeight = 60.0f,
     .props = {
-        PropSpawnRule{ TREE_MESHES, 0.25f, 0.05f, NOISE_INDEX_TREES, 2.0f, 100.0f, 0.10f, 0.18f, TREE_GROUND_OFFSET, CULL_LOD_TREES, false }
+        PropSpawnRule{ "TreeGroup", 0.25f, 0.05f, NOISE_INDEX_TREES, 2.0f, 100.0f, 0.10f, 0.18f, TREE_GROUND_OFFSET, CULL_LOD_TREES, false }
     },
     .swarms = {}
 },
@@ -167,7 +168,7 @@ static const BiomeDefinition G_BIOMES[] = {
     .lakeMinHeight = 5.0f,
     .lakeMaxHeight = 45.0f,
     .props = {
-        PropSpawnRule{ ROCK_MESHES, 0.05f, 0.4f, NOISE_INDEX_ROCKS, 2.0f, 180.0f, 0.5f, 1.0f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
+        PropSpawnRule{ "RockGroup", 0.05f, 0.4f, NOISE_INDEX_ROCKS, 2.0f, 180.0f, 0.5f, 1.0f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
     },
     .swarms = {}
 },
@@ -181,8 +182,8 @@ static const BiomeDefinition G_BIOMES[] = {
     .lakeMinHeight = 5.0f,
     .lakeMaxHeight = 65.0f,
     .props = {
-        PropSpawnRule{ TREE_MESHES, 0.15f, 0.2f, NOISE_INDEX_TREES, 2.0f, 100.0f, 0.06f, 0.12f, TREE_GROUND_OFFSET, CULL_LOD_TREES, false },
-        PropSpawnRule{ ROCK_MESHES, 0.08f, 0.4f, NOISE_INDEX_ROCKS, 2.0f, 180.0f, 1.0f, 1.5f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
+        PropSpawnRule{ "TreeGroup", 0.15f, 0.2f, NOISE_INDEX_TREES, 2.0f, 100.0f, 0.06f, 0.12f, TREE_GROUND_OFFSET, CULL_LOD_TREES, false },
+        PropSpawnRule{ "RockGroup", 0.08f, 0.4f, NOISE_INDEX_ROCKS, 2.0f, 180.0f, 1.0f, 1.5f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
     },
     .swarms = {}
 },
@@ -196,7 +197,7 @@ static const BiomeDefinition G_BIOMES[] = {
     .lakeMinHeight = 5.0f,
     .lakeMaxHeight = 40.0f,
     .props = {
-        PropSpawnRule{ ROCK_MESHES, 0.03f, 0.5f, NOISE_INDEX_ROCKS, 2.0f, 200.0f, 1.0f, 2.0f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
+        PropSpawnRule{ "RockGroup", 0.03f, 0.5f, NOISE_INDEX_ROCKS, 2.0f, 200.0f, 1.0f, 2.0f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
     },
     .swarms = {}
 },
@@ -211,7 +212,7 @@ static const BiomeDefinition G_BIOMES[] = {
     .lakeMaxHeight = 0.0f,
     .props = {
         // Massive boulders bridging the landscape
-        PropSpawnRule{ ROCK_MESHES, 0.12f, 0.2f, NOISE_INDEX_ROCKS, 2.0f, 250.0f, 1.5f, 4.0f, -0.5f, CULL_LOD_ROCKS, true }
+        PropSpawnRule{ "RockGroup", 0.12f, 0.2f, NOISE_INDEX_ROCKS, 2.0f, 250.0f, 1.5f, 4.0f, -0.5f, CULL_LOD_ROCKS, true }
     },
     .swarms = {}
 }
@@ -246,4 +247,9 @@ BiomeType DetermineBiome(float temperature, float moisture) {
         if (moisture < 0.85f) return BiomeType::SnowWastes;
         return BiomeType::Alpine;
     }
+}
+
+void InitBiomes() {
+    g_AssetManager.RegisterLodGroup("TreeGroup", TREE_MESHES);
+    g_AssetManager.RegisterLodGroup("RockGroup", ROCK_MESHES);
 }

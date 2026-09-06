@@ -49,6 +49,12 @@
     <Filter Include="Source Files\Game">
       <UniqueIdentifier>{a3c0b4f8-4fdc-46e1-85cd-f4228bc17c79}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Header Files\Game\Scenes">
+      <UniqueIdentifier>{7040cd84-047f-4fbb-839a-2294da5cc739}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\Game\Scene">
+      <UniqueIdentifier>{8d9f2990-3a04-4c7e-be5a-597a51986409}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp">
@@ -99,9 +105,6 @@
     <ClCompile Include="include\imgui\imgui_widgets.cpp">
       <Filter>Source Files\External</Filter>
     </ClCompile>
-    <ClCompile Include="ecs.cpp">
-      <Filter>Source Files\Game</Filter>
-    </ClCompile>
     <ClCompile Include="player.cpp">
       <Filter>Source Files\Player</Filter>
     </ClCompile>
@@ -117,20 +120,20 @@
     <ClCompile Include="assetManager.cpp">
       <Filter>Source Files\Rendering</Filter>
     </ClCompile>
-    <ClCompile Include="networkManager.cpp">
-      <Filter>Source Files\Game</Filter>
-    </ClCompile>
     <ClCompile Include="settings.cpp">
       <Filter>Source Files\Player</Filter>
-    </ClCompile>
-    <ClCompile Include="logger.cpp">
-      <Filter>Source Files\Game</Filter>
     </ClCompile>
     <ClCompile Include="biome.cpp">
       <Filter>Source Files\Game</Filter>
     </ClCompile>
     <ClCompile Include="renderer_water.cpp">
       <Filter>Source Files\Rendering</Filter>
+    </ClCompile>
+    <ClCompile Include="scene_manager.cpp">
+      <Filter>Source Files\Game</Filter>
+    </ClCompile>
+    <ClCompile Include="game_scene.cpp">
+      <Filter>Source Files\Game\Scene</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
@@ -191,9 +194,6 @@
     <ClInclude Include="scene.h">
       <Filter>Header Files\Game</Filter>
     </ClInclude>
-    <ClInclude Include="network_manager.h">
-      <Filter>Header Files\Game</Filter>
-    </ClInclude>
     <ClInclude Include="game.h">
       <Filter>Header Files\Game</Filter>
     </ClInclude>
@@ -209,12 +209,6 @@
     <ClInclude Include="asset_manager.h">
       <Filter>Header Files\Rendering</Filter>
     </ClInclude>
-    <ClInclude Include="logger.h">
-      <Filter>Header Files\Game</Filter>
-    </ClInclude>
-    <ClInclude Include="scene_types.h">
-      <Filter>Header Files\Game</Filter>
-    </ClInclude>
     <ClInclude Include="thread_pool.h">
       <Filter>Header Files\Rendering</Filter>
     </ClInclude>
@@ -225,6 +219,24 @@
       <Filter>Header Files\Game</Filter>
     </ClInclude>
     <ClInclude Include="renderer_water.h">
+      <Filter>Header Files\Rendering</Filter>
+    </ClInclude>
+    <ClInclude Include="scene_interface.h">
+      <Filter>Header Files\Game</Filter>
+    </ClInclude>
+    <ClInclude Include="scene_manager.h">
+      <Filter>Header Files\Game</Filter>
+    </ClInclude>
+    <ClInclude Include="main_menu_scene.h">
+      <Filter>Header Files\Game\Scenes</Filter>
+    </ClInclude>
+    <ClInclude Include="game_scene.h">
+      <Filter>Header Files\Game\Scenes</Filter>
+    </ClInclude>
+    <ClInclude Include="light.h">
+      <Filter>Header Files\Rendering</Filter>
+    </ClInclude>
+    <ClInclude Include="mesh_types.h">
       <Filter>Header Files\Rendering</Filter>
     </ClInclude>
   </ItemGroup>
@@ -306,6 +318,9 @@
     </None>
     <None Include="shaders\water_cull.comp">
       <Filter>Shaders\Compute</Filter>
+    </None>
+    <None Include="shaders\fxaa.frag">
+      <Filter>Shaders\Fragment</Filter>
     </None>
   </ItemGroup>
 </Project>

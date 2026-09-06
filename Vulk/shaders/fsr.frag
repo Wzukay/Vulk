@@ -37,11 +37,14 @@ void main() {
         vec3 minimumColor = min(min(min(bottom, left), right), top);
         vec3 maximumColor = max(max(max(bottom, left), right), top);
 
-        float safeSharpness = clamp(pc.sharpness, 0.0, 1.0) * 0.2;
-        vec3 weight = clamp(min(minimumColor, 2.0 - maximumColor) / max(maximumColor, 0.00001), 0.0, 1.0);
-        weight = inversesqrt(weight) * -safeSharpness;
+        vec3 minSafe = min(minimumColor, 1.0 - maximumColor);
+        vec3 maxSafe = max(maximumColor, 0.00001);
+        vec3 amp = clamp(minSafe / maxSafe, 0.0, 1.0);
 
-        finalColor = clamp((2.0 * center + bottom * weight + left * weight + right * weight + top * weight) / (1.0 + 4.0 * weight), 0.0, 1.0);
+        float safeSharpness = clamp(pc.sharpness, 0.0, 1.0) * 0.16;
+        vec3 weight = sqrt(amp) * -safeSharpness;
+
+        finalColor = clamp((center + (bottom + left + right + top) * weight) / (1.0 + 4.0 * weight), 0.0, 1.0);
     }
 
     if (pc.enableSSAO == 1) {

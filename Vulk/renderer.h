@@ -21,7 +21,8 @@
 #include "gpu_async.h"
 
 #include "scene.h"
-#include "scene_types.h"
+#include "mesh_types.h"
+#include "light.h"
 
 #include "settings.h"
 #include "asset_manager.h"
@@ -41,28 +42,6 @@
 
 struct CameraData;
 class Scene;
-
-struct Light {
-    alignas(16) glm::vec4 positionOrDir; // w: 0 = directional, 1 = point
-    alignas(16) glm::vec4 color;         // rgb = color, a = intensity
-    alignas(16) glm::vec4 params;        // x = range (point lights)
-
-    static Light Directional(const glm::vec3& direction, const glm::vec3& color, float intensity = 1.0f) {
-        Light l{};
-        l.positionOrDir = glm::vec4(glm::normalize(direction), 0.0f);
-        l.color = glm::vec4(color, intensity);
-        l.params = glm::vec4(0.0f);
-        return l;
-    }
-
-    static Light Point(const glm::vec3& position, const glm::vec3& color, float intensity = 1.0f, float range = 10.0f) {
-        Light l{};
-        l.positionOrDir = glm::vec4(position, 1.0f);
-        l.color = glm::vec4(color, intensity);
-        l.params = glm::vec4(range, 0.0f, 0.0f, 0.0f);
-        return l;
-    }
-};
 
 enum class PipelineVertexType {
     Terrain,
@@ -124,6 +103,8 @@ public:
     bool ShouldClose();
     void PollEvents();
     void UpdateScene(const Scene& scene);
+    void BeginUI();
+    void EndUI();
 
     QueueFamilyIndices FindQueueFamilies(VkPhysicalDevice device);
     VkDevice GetLogicalDevice() const { return logicalDevice; }
@@ -339,7 +320,6 @@ private:
 
     void CreateImGuiDescriptorPool();
     void CreateImGui();
-    void DrawGUI();
 
 public:
     VkCommandBuffer BeginSingleTimeCommands();

@@ -4,8 +4,9 @@
 #include <string>
 #include <memory>
 #include <algorithm>
-#include "scene_types.h"
+#include "mesh_types.h"
 #include "ecs.h"
+#include "light.h"
 
 struct ChunkPropComponent {
     int64_t chunkKey = -1;
@@ -14,7 +15,7 @@ struct ChunkPropComponent {
 class Scene {
 private:
     Registry m_registry;
-    std::vector<SceneLight> lights;
+    std::vector<Light> lights;
     mutable bool hasModifiedLights = false;
 
     // Caching mechanism to stop CPU melting
@@ -100,14 +101,14 @@ public:
         return m_cachedInstances;
     }
 
-    void AddLight(const SceneLight& light) { lights.push_back(light); hasModifiedLights = true; }
-    void SetLights(const std::vector<SceneLight>& newLights) {
+    void AddLight(const Light& light) { lights.push_back(light); hasModifiedLights = true; }
+    void SetLights(const std::vector<Light>& newLights) {
         lights = newLights;
         hasModifiedLights = true; // Flags the VulkanRenderer to upload the new buffer
     }
     bool HasModifiedLights() const { return hasModifiedLights; }
     void ClearModifiedLightsFlag() const { hasModifiedLights = false; }
-    const std::vector<SceneLight>& GetLights() const { return lights; }
+    const std::vector<Light>& GetLights() const { return lights; }
 
     void Clear() {
         m_registry.Clear();

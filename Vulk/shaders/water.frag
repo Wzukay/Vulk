@@ -19,24 +19,6 @@ layout(set = 1, binding = 0) uniform sampler2D sceneDepth;
 
 layout(location = 0) out vec4 outColor;
 
-float WaveHeight(vec2 position, float time) {
-    float broadSwellA = sin(dot(position, vec2(0.010, 0.006)) + time * 0.28);
-    float broadSwellB = sin(dot(position, vec2(-0.007, 0.012)) - time * 0.21);
-
-    float windRippleA = sin(dot(position, vec2(0.085, 0.041)) + time * 1.05);
-    float windRippleB = sin(dot(position, vec2(-0.054, 0.097)) - time * 0.82);
-
-    float smallRippleA = sin(dot(position, vec2(0.34, 0.19)) + time * 2.10);
-    float smallRippleB = sin(dot(position, vec2(-0.21, 0.37)) - time * 1.75);
-
-    return broadSwellA * 0.80 +
-           broadSwellB * 0.55 +
-           windRippleA * 0.16 +
-           windRippleB * 0.12 +
-           smallRippleA * 0.035 +
-           smallRippleB * 0.025;
-}
-
 vec3 CalculateWaterNormal(vec2 position, float time, float detailFade) {
     vec2 slope = vec2(0.0);
 
@@ -68,18 +50,6 @@ vec3 CalculateWaterNormal(vec2 position, float time, float detailFade) {
     ));
 }
 
-float CalculateShorelineFoam(vec2 position, float waterDepth, float time) {
-    float shoreline = 1.0 - smoothstep(0.10, 2.25, waterDepth);
-
-    float broadNoise = sin(dot(position, vec2(0.10, 0.07)) + time * 0.35);
-    float fineNoise = sin(dot(position, vec2(-0.33, 0.25)) - time * 0.70);
-    float foamNoise = broadNoise * 0.65 + fineNoise * 0.35;
-
-    float brokenBand = smoothstep(-0.45, 0.40, foamNoise);
-
-    return shoreline * mix(0.30, 1.0, brokenBand);
-}
-
 void main() {
     ivec2 pixelCoord = ivec2(gl_FragCoord.xy);
     float opaqueDepth = texelFetch(sceneDepth, pixelCoord, 0).r;
@@ -91,34 +61,56 @@ void main() {
     vec4 worldPosOpaque = ubo.inverseViewProj * clipPos;
     worldPosOpaque /= worldPosOpaque.w;
 
-    // 2. Calculate linear distances to bypass non-linear Z-buffer precision entirely
-    float distOpaque = length(worldPosOpaque.xyz - ubo.cameraPos);
-    float distWater = length(fragPos - ubo.cameraPos);
-    float depthDiff = distOpaque - distWater;
-
-    // 3. Hard discard ONLY if terrain is clearly in front of the water (e.g., rocks blocking the view)
-    if (opaqueDepth < 0.99999 && depthDiff < -0.15) {
-        discard;
-    }
-
-    // 4. Create a "Soft Particle" depth blend (0.0 to 1.0) for the physical intersection edge
-    // This transitions the 35 centimeters right where the meshes collide into a smooth fade.
-    float intersectionFade = clamp((depthDiff + 0.15) / 0.35, 0.0, 1.0);
-
-    // 5. Get the stable vertex depth
-    float waterDepth = fragTangent.w;
-
+    // 2. Calculate linear distances
     vec3 cameraToWater = ubo.cameraPos - fragPos;
     float distanceToCamera = length(cameraToWater);
+    float distOpaque = length(worldPosOpaque.xyz - ubo.cameraPos);
+    float depthDiff = distOpaque - distanceToCamera;
 
+    // 3. FIXED: Use fragPos.y directly without wave offset (wave removed from vertex shader)
+    // This prevents the wave displacement mismatch that caused the jitter
+    float stableVerticalDepth = (opaqueDepth >= 0.99999) ? 10.0 : max(fragPos.y - worldPosOpaque.y, 0.01);
+
+    // 4. Create a "Soft Particle" depth blend with wider transition to reduce sensitivity
+    float intersectionFade = clamp((depthDiff + 0.5) / 1.0, 0.0, 1.0);
+
+    // 5. FIXED: Shore Stability Zone
+    // This creates a stable region at the shore where depth calculations are reliable
+    float shoreStabilityZone = smoothstep(2.0, 0.1, stableVerticalDepth);
+    float stableBaseDepth = 0.5;
+    
+    // 6. FIXED: Hybrid Depth with Shore Clamping
+    // Use only vertex depth near camera (shore), transition to pixel depth farther away
+    float pixelVerticalDepth = (opaqueDepth < 0.99999) ? max(fragPos.y - worldPosOpaque.y, 0.0) : 10.0;
+    float vertexDepth = fragTangent.w * 30.0;
+    
+    // Blend transition: shore (close) uses more vertex depth, far uses pixel depth
+    // BUT clamp ranges to prevent extreme values
+    pixelVerticalDepth = clamp(pixelVerticalDepth, 0.01, 50.0);
+    vertexDepth = clamp(vertexDepth, 0.1, 50.0);
+    
+    float depthBlendFactor = smoothstep(20.0, 100.0, distanceToCamera);
+    float visualWaterDepth = mix(pixelVerticalDepth, vertexDepth, depthBlendFactor);
+
+    // 7. FIXED: Apply shore stability smoothing
+    // At the shore, blend toward a stable baseline to eliminate flicker
+    visualWaterDepth = mix(visualWaterDepth, stableBaseDepth, shoreStabilityZone * 0.6);
+    
+    // Final clamp to safe range
+    visualWaterDepth = clamp(visualWaterDepth, 0.1, 50.0);
+
+    // 8. Ripple detail fade
     float rippleFade = 1.0 - smoothstep(350.0, 1400.0, distanceToCamera);
 
+    // 9. Normal calculation
     vec3 waterNormal = CalculateWaterNormal(fragPos.xz, pc.time, rippleFade);
     vec3 viewDirection = normalize(cameraToWater);
     vec3 lightDirection = normalize(ubo.sunDirection.xyz);
     vec3 halfDirection = normalize(viewDirection + lightDirection);
 
-    float depthFactor = smoothstep(0.0, 1.0, clamp(waterDepth / 8.0, 0.0, 1.0));
+    // 10. Depth-based coloring with wider smoothstep ranges (less sensitive to jitter)
+    float depthFactor = smoothstep(0.0, 8.0, visualWaterDepth);
+    
     vec3 reflectedVec = reflect(-viewDirection, waterNormal);
     float skyGradient = clamp(reflectedVec.y, 0.0, 1.0);
     float horizonFactor = pow(1.0 - skyGradient, 2.0);
@@ -127,8 +119,9 @@ void main() {
     vec3 normalBlue = vec3(0.045, 0.31, 0.43);
     vec3 deepBlue = vec3(0.006, 0.050, 0.120);
 
-    float shallowBlend = 1.0 - smoothstep(0.20, 5.50, waterDepth);
-    float deepBlend = smoothstep(3.50, 11.00, waterDepth);
+    // FIXED: Wider smoothstep ranges to reduce sensitivity at shore
+    float shallowBlend = 1.0 - smoothstep(0.10, 3.0, visualWaterDepth);
+    float deepBlend = smoothstep(2.0, 8.0, visualWaterDepth);
 
     vec3 waterColor = mix(normalBlue, shallowBlue, shallowBlend);
     waterColor = mix(waterColor, deepBlue, deepBlend);
@@ -137,7 +130,7 @@ void main() {
     vec3 overheadReflection = vec3(0.11, 0.23, 0.37);
     vec3 skyReflection = mix(overheadReflection, horizonReflection, horizonFactor);
 
-    // Clamp the Fresnel effect so the water retains its base color at grazing angles
+    // Fresnel effect with clamping
     float fresnel = pow(1.0 - max(dot(viewDirection, waterNormal), 0.0), 5.0);
     fresnel = mix(0.05, 0.40, fresnel);
 
@@ -145,41 +138,52 @@ void main() {
     float specular = pow(max(dot(waterNormal, halfDirection), 0.0), 150.0);
     specular *= 0.32 * rippleFade;
 
+    // Wind bands
     float windBands = sin(dot(fragPos.xz, vec2(0.018, -0.024)) + pc.time * 0.16);
     float windTint = smoothstep(-0.45, 0.75, windBands) * rippleFade;
 
-    vec3 finalColor = mix(waterColor, skyReflection, fresnel);
-    finalColor *= mix(0.96, 1.04, windTint * 0.35);
-    finalColor += waterColor * diffuse * 0.12;
+    vec3 baseSurfaceColor = mix(waterColor, skyReflection, fresnel);
+    baseSurfaceColor *= mix(0.96, 1.04, windTint * 0.35);
+
+    vec3 diffuseLight = diffuse * ubo.sunColor.rgb;
+    vec3 ambientLight = vec3(ubo.ambient) * 3.5;
+
+    vec3 finalColor = baseSurfaceColor * (diffuseLight * 0.2 + ambientLight);
     finalColor += ubo.sunColor.rgb * specular;
 
-    float shorelineBand = 1.0 - smoothstep(0.05, 1.25, waterDepth);
+    // 11. FIXED: Shore foam with reduced sensitivity
+    // Wider transition band and reduced near shore
+    float shorelineBand = 1.0 - smoothstep(0.05, 2.5, visualWaterDepth);
 
     float foamNoiseA = sin(dot(fragPos.xz, vec2(0.105, 0.075)) + pc.time * 0.32);
     float foamNoiseB = sin(dot(fragPos.xz, vec2(-0.180, 0.130)) - pc.time * 0.48);
     float foamPattern = 0.5 + 0.5 * (foamNoiseA * 0.65 + foamNoiseB * 0.35);
 
+    // FIXED: Reduce foam at shore where it flickers most
     float foam = shorelineBand * mix(0.22, 0.70, foamPattern);
     foam *= 1.0 - smoothstep(220.0, 650.0, distanceToCamera);
+    foam *= (1.0 - shoreStabilityZone * 0.5);  // Less foam at shore
 
-    finalColor = mix(finalColor, vec3(0.88, 0.96, 0.98), foam * 0.60);
+    // Lit foam color
+    vec3 litFoamColor = vec3(0.88, 0.96, 0.98) * (diffuseLight * 0.2 + ambientLight);
+    finalColor = mix(finalColor, litFoamColor, foam * 0.60);
 
+    // --- FOG ---
     float fogRange = max(ubo.fogEnd - ubo.fogStart, 0.001);
     float fogFactor = clamp((distanceToCamera - ubo.fogStart) / fogRange, 0.0, 1.0);
 
-    finalColor = mix(finalColor, vec3(0.55, 0.65, 0.75), fogFactor);
+    vec3 litFogColor = vec3(0.55, 0.65, 0.75) * (ambientLight * 0.8);
+    finalColor = mix(finalColor, litFogColor, fogFactor);
 
-    float shallowAlpha = 0.58;
-    float deepAlpha = 0.88;
+    // --- ALPHA & DEPTH DISCARD ---
+    float shallowAlpha = 0.15;
+    float deepAlpha = 0.95;
 
     float alpha = mix(shallowAlpha, deepAlpha, depthFactor);
     alpha = mix(alpha, 0.90, foam);
 
-    // Smooth shore fade: Offset deeper underground to hide geometry gaps
-    float shoreFade = smoothstep(-0.60, -0.05, waterDepth);
-    alpha *= shoreFade;
-
-    alpha *= (opaqueDepth < 0.99999) ? intersectionFade : 1.0;
+    // FIXED: Use intersection fade with wider transition to prevent alpha jitter
+    alpha *= intersectionFade;
 
     outColor = vec4(finalColor, alpha);
 }

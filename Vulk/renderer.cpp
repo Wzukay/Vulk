@@ -1,5 +1,7 @@
 #include "renderer.h"
 #include "input.h"
+#include "light.h"
+#include "biome.h"
 
 #include <iostream>
 #include <cstring>
@@ -11,8 +13,6 @@
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtx/hash.hpp>
 #include <glm/gtx/norm.hpp>
-
-#include "tiny_obj_loader.h"
 
 static VkResult CreateDebugUtilsMessengerEXT(VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkDebugUtilsMessengerEXT* pDebugMessenger) {
 	auto func = (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT");
@@ -282,13 +282,9 @@ void VulkanRenderer::Initialize(
 	int height,
 	const std::string& title)
 {
-	m_framesInFlight = std::clamp(
-		static_cast<uint32_t>(g_Settings.framesInFlight),
-		2u,
-		MAX_SUPPORTED_FRAMES_IN_FLIGHT);
+	m_framesInFlight = std::clamp(static_cast<uint32_t>(g_Settings.framesInFlight), 2u, MAX_SUPPORTED_FRAMES_IN_FLIGHT);
 
-	g_Settings.framesInFlight =
-		static_cast<int>(m_framesInFlight);
+	g_Settings.framesInFlight = static_cast<int>(m_framesInFlight);
 
 	InitWindow(width, height, title);
 	InitVulkan();
@@ -322,16 +318,16 @@ void VulkanRenderer::InitVulkan() {
 	PickPhysicalDevice();
 	CreateLogicalDevice();
 
-	if (g_Settings.msaaSamples == 0) {
-		m_currentMsaaSamples = GetMaxUsableSampleCount();
-	}
-	else {
+	if (g_Settings.antiAliasingMode == 1) { // MSAA Enabled
 		m_currentMsaaSamples = IntToSampleCount(g_Settings.msaaSamples);
 		VkSampleCountFlagBits maxSupported = GetMaxUsableSampleCount();
 		if (static_cast<int>(m_currentMsaaSamples) > static_cast<int>(maxSupported)) {
 			m_currentMsaaSamples = maxSupported;
 			g_Settings.msaaSamples = static_cast<int>(m_currentMsaaSamples);
 		}
+	}
+	else { // None or FXAA
+		m_currentMsaaSamples = VK_SAMPLE_COUNT_1_BIT;
 	}
 
 	CreateSwapChain();
@@ -370,6 +366,7 @@ void VulkanRenderer::InitVulkan() {
 	g_AssetManager.CreateDefaultTexture();
 	g_AssetManager.CreateDefaultNormalTexture();
 	g_AssetManager.CreateDefaultOrmTexture();
+	InitBiomes();
 
 	CreateGraphicsPipeline();
 	CreateCompositionPipeline();
@@ -385,6 +382,7 @@ void VulkanRenderer::InitVulkan() {
 
 	m_terrainRenderer.Init(logicalDevice, this, &m_uploader, 5'000'000, 10'000'000);
 	m_terrainRenderer.UpdateHZBDescriptor(hzbTarget.view, hzbTarget.sampler);
+	m_staticMeshRenderer.UpdateHZBDescriptor(hzbTarget.view, hzbTarget.sampler);
 
 	m_waterRenderer.Init(logicalDevice, this, &m_uploader, swapChainImageFormat, depthFormat, descriptorSetLayout, m_currentMsaaSamples);
 	m_waterRenderer.SetSceneDepth(depthTarget.view, depthTarget.sampler);
@@ -1023,7 +1021,6 @@ void VulkanRenderer::DestroyBuffer(VkBuffer& buffer, VkDeviceMemory& memory) {
 void VulkanRenderer::CreateUniformBuffer() {
 	VkDeviceSize bufferSize = sizeof(UniformBufferObject);
 
-	// Create the buffer
 	CreateBuffer(bufferSize, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
 		VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
 		uniformBuffer, uniformBufferMemory);
@@ -1600,8 +1597,6 @@ void VulkanRenderer::GenerateHZB(VkCommandBuffer commandBuffer) {
 }
 
 void VulkanRenderer::CreateGraphicsPipeline() {
-	std::cout << "[Renderer] Compiling Multi-Pipeline Architecture...\n";
-
 	VkPushConstantRange pushConstantRange{};
 	pushConstantRange.stageFlags =
 		VK_SHADER_STAGE_VERTEX_BIT |
@@ -1666,7 +1661,7 @@ void VulkanRenderer::CreateGraphicsPipeline() {
 	multisampling.sType =
 		VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
 	multisampling.rasterizationSamples = m_currentMsaaSamples;
-	multisampling.alphaToCoverageEnable = VK_TRUE;
+	multisampling.alphaToCoverageEnable = VK_FALSE;
 
 	VkPipelineColorBlendAttachmentState colorBlendAttachment{};
 	colorBlendAttachment.colorWriteMask =
@@ -1738,7 +1733,6 @@ void VulkanRenderer::CreateGraphicsPipeline() {
 				auto staticAttrs = ModelVertex::getStaticAttributeDescriptions();
 				attributes.assign(staticAttrs.begin(), staticAttrs.end());
 
-				// Add instance buffer binding + attributes (starts at location 5)
 				bindings.push_back(InstanceData::getBindingDescription());
 				auto instanceAttributes = InstanceData::getAttributeDescriptions();
 				attributes.insert(attributes.end(), instanceAttributes.begin(), instanceAttributes.end());
@@ -1757,8 +1751,7 @@ void VulkanRenderer::CreateGraphicsPipeline() {
 			VkFormat depthFormat = FindDepthFormat();
 
 			VkPipelineRenderingCreateInfo renderingInfo{};
-			renderingInfo.sType =
-				VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+			renderingInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
 			renderingInfo.colorAttachmentCount = 1;
 			renderingInfo.pColorAttachmentFormats = &colorFormat;
 			renderingInfo.depthAttachmentFormat = depthFormat;
@@ -1935,7 +1928,13 @@ void VulkanRenderer::CreateCompositionPipeline() {
 	vkCreatePipelineLayout(logicalDevice, &pipelineLayoutInfo, nullptr, &compositionPipelineLayout);
 
 	// 6. Shaders & Pipeline state
-	std::string fragPath = g_Settings.enableFSR ? "shaders/fsr_frag.spv" : "shaders/quad_frag.spv";
+	std::string fragPath = "shaders/quad_frag.spv";
+	if (g_Settings.enableFSR) {
+		fragPath = "shaders/fsr_frag.spv";
+	}
+	else if (g_Settings.antiAliasingMode == 2) {
+		fragPath = "shaders/fxaa_frag.spv";
+	}
 	auto vertCode = ReadFile("shaders/quad_vert.spv");
 	auto fragCode = ReadFile(fragPath);
 	VkShaderModule vMod = CreateShaderModule(logicalDevice, vertCode);
@@ -2245,7 +2244,9 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 	m_grassRenderer.Cull(commandBuffer, static_cast<uint32_t>(currentFrame));
 
 	if (currentScene != nullptr) {
-		m_staticMeshRenderer.Cull(commandBuffer, cameraPosition, frustumPlanes, static_cast<uint32_t>(currentFrame), culledCount, sceneTotalVertices, sceneTotalIndices);
+		glm::vec2 dynamicHzbSize = glm::vec2((float)GetInternalWidth(), (float)GetInternalHeight());
+
+		m_staticMeshRenderer.Cull(commandBuffer, cameraPosition, m_currentViewProj, dynamicHzbSize, static_cast<uint32_t>(currentFrame), culledCount, sceneTotalVertices, sceneTotalIndices);
 	}
 
 	if (currentScene != nullptr) {
@@ -2387,7 +2388,7 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 				});
 			});
 
-		VkCommandBuffer scbs[] = { f0.get(), f1.get(), f2.get(), f3.get() };
+		VkCommandBuffer scbs[] = { f1.get(), f0.get(), f2.get(), f3.get() };
 		vkCmdExecuteCommands(commandBuffer, 4, scbs);
 
 		drawCallCount += (dc0 + dc1 + dc2 + dc3);
@@ -2444,20 +2445,14 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 		(float)GetInternalHeight() / (float)swapChainExtent.height
 	);
 
+	GenerateHZB(commandBuffer);
+
 	if (g_Settings.enableSSAO) {
 		uint32_t ssaoWidth = std::max(1u, GetInternalWidth() / 2);
 		uint32_t ssaoHeight = std::max(1u, GetInternalHeight() / 2);
 
 		VkViewport ssaoViewport{ 0.0f, 0.0f, (float)ssaoWidth, (float)ssaoHeight, 0.0f, 1.0f };
 		VkRect2D ssaoScissor{ {0, 0}, {ssaoWidth, ssaoHeight} };
-
-		TransitionImageLayout(commandBuffer, depthTarget.image,
-			VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-			VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-			VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-			VK_IMAGE_ASPECT_DEPTH_BIT);
-
-		GenerateHZB(commandBuffer);
 
 		TransitionImageLayout(commandBuffer, ssaoTarget.image,
 			VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -2476,8 +2471,8 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 
 		SSAOPushConstants ssaoPC{};
 		ssaoPC.screenSize = glm::vec2(ssaoWidth, ssaoHeight);
-		ssaoPC.radius = 0.75f;
-		ssaoPC.bias = 0.025f;
+		ssaoPC.radius = 1.6f;
+		ssaoPC.bias = 0.2f;
 		ssaoPC.renderScale = activeScale;
 		vkCmdPushConstants(commandBuffer, ssaoPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SSAOPushConstants), &ssaoPC);
 		vkCmdDraw(commandBuffer, 3, 1, 0, 0);
@@ -2502,7 +2497,7 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 		vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, ssaoBlurPipeline);
 		vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, ssaoBlurPipelineLayout, 0, 1, &ssaoBlurDescriptorSetHorizontal, 0, nullptr);
 
-		SSAOBlurPushConstants blurHPC{ glm::vec2(ssaoWidth, ssaoHeight), glm::vec2(1.0f, 0.0f), 0.20f, 1.0f, activeScale };
+		SSAOBlurPushConstants blurHPC{ glm::vec2(ssaoWidth, ssaoHeight), glm::vec2(1.0f, 0.0f), 0.10f, 2.0f, activeScale };
 		vkCmdPushConstants(commandBuffer, ssaoBlurPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SSAOBlurPushConstants), &blurHPC);
 		vkCmdDraw(commandBuffer, 3, 1, 0, 0);
 		vkCmdEndRendering(commandBuffer);
@@ -2526,7 +2521,7 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 		vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, ssaoBlurPipeline);
 		vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, ssaoBlurPipelineLayout, 0, 1, &ssaoBlurDescriptorSetVertical, 0, nullptr);
 
-		SSAOBlurPushConstants blurVPC{ glm::vec2(ssaoWidth, ssaoHeight), glm::vec2(0.0f, 1.0f), 0.2f, 1.0f, activeScale };
+		SSAOBlurPushConstants blurVPC{ glm::vec2(ssaoWidth, ssaoHeight), glm::vec2(0.0f, 1.0f), 0.1f, 2.0f, activeScale };
 		vkCmdPushConstants(commandBuffer, ssaoBlurPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SSAOBlurPushConstants), &blurVPC);
 		vkCmdDraw(commandBuffer, 3, 1, 0, 0);
 		vkCmdEndRendering(commandBuffer);
@@ -2577,12 +2572,27 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 		vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, compositionPipeline);
 		vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, compositionPipelineLayout, 0, 1, &compositionDescriptorSet, 0, nullptr);
 
-		FSRConstants fc{};
-		fc.sharpness = g_Settings.enableFSR ? 0.2f : 0.0f;
-		fc.enableSSAO = g_Settings.enableSSAO ? 1 : 0;
-		fc.renderScale = activeScale;
+		if (g_Settings.enableFSR) {
+			FSRConstants fc{};
+			fc.sharpness = 0.35f;
+			fc.enableSSAO = g_Settings.enableSSAO ? 1 : 0;
+			fc.renderScale = activeScale;
+			vkCmdPushConstants(commandBuffer, compositionPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(FSRConstants), &fc);
+		}
+		else if (g_Settings.antiAliasingMode == 2) {
+			// FXAA expects inverse screen dimensions
+			glm::vec2 invScreenSize = glm::vec2(1.0f / swapChainExtent.width, 1.0f / swapChainExtent.height);
+			vkCmdPushConstants(commandBuffer, compositionPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(glm::vec2), &invScreenSize);
+		}
+		else {
+			// Default pass (no FSR, no FXAA)
+			FSRConstants fc{};
+			fc.sharpness = 0.0f;
+			fc.enableSSAO = g_Settings.enableSSAO ? 1 : 0;
+			fc.renderScale = activeScale;
+			vkCmdPushConstants(commandBuffer, compositionPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(FSRConstants), &fc);
+		}
 
-		vkCmdPushConstants(commandBuffer, compositionPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(FSRConstants), &fc);
 		vkCmdDraw(commandBuffer, 3, 1, 0, 0);
 	}
 
@@ -2698,18 +2708,24 @@ void VulkanRenderer::ApplySettings() {
 		needSwapchainRecreate = true;
 	}
 
-	if (g_Settings.msaaSamples != currentSettings.msaaSamples) {
-		// Clamp and convert
-		VkSampleCountFlagBits newSamples = IntToSampleCount(g_Settings.msaaSamples);
-		VkSampleCountFlagBits maxSupported = GetMaxUsableSampleCount();
-		if (static_cast<int>(newSamples) > static_cast<int>(maxSupported))
-			newSamples = maxSupported;
+	if (g_Settings.antiAliasingMode != currentSettings.antiAliasingMode) {
+		currentSettings.antiAliasingMode = g_Settings.antiAliasingMode;
+		needSwapchainRecreate = true;
+	}
 
-		if (newSamples != m_currentMsaaSamples) {
-			m_currentMsaaSamples = newSamples;
-			currentSettings.msaaSamples = g_Settings.msaaSamples;
-			needSwapchainRecreate = true;
+	VkSampleCountFlagBits newSamples = VK_SAMPLE_COUNT_1_BIT;
+	if (g_Settings.antiAliasingMode == 1) {
+		newSamples = IntToSampleCount(g_Settings.msaaSamples);
+		VkSampleCountFlagBits maxSupported = GetMaxUsableSampleCount();
+		if (static_cast<int>(newSamples) > static_cast<int>(maxSupported)) {
+			newSamples = maxSupported;
 		}
+	}
+
+	if (newSamples != m_currentMsaaSamples) {
+		m_currentMsaaSamples = newSamples;
+		currentSettings.msaaSamples = g_Settings.msaaSamples;
+		needSwapchainRecreate = true;
 	}
 
 	if (!g_Settings.fullscreen) {
@@ -2806,8 +2822,6 @@ void VulkanRenderer::DrawFrame() {
 
 	ApplySettings();
 
-	DrawGUI();
-
 	drawCallCount = 0;
 	sceneTotalVertices = 0;
 	sceneTotalIndices = 0;
@@ -2892,11 +2906,13 @@ void VulkanRenderer::DrawFrame() {
 	// Advance to next frame
 	currentFrame = (currentFrame + 1) % m_framesInFlight;
 }
-void VulkanRenderer::DrawGUI() {
+void VulkanRenderer::BeginUI() {
 	ImGui_ImplVulkan_NewFrame();
 	ImGui_ImplGlfw_NewFrame();
 	ImGui::NewFrame();
-
+}
+void VulkanRenderer::EndUI() {
+	// We keep your awesome stats overlay here so it draws over every scene!
 	uint32_t triangleCount = sceneTotalIndices / 3;
 	uint32_t texturesLoaded = static_cast<uint32_t>(g_AssetManager.GetTextureRegistry().size());
 
@@ -2912,7 +2928,6 @@ void VulkanRenderer::DrawGUI() {
 
 	ImGui::Begin("Stats", nullptr, windowFlags);
 
-	// PERFORMANCE SECTION
 	ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "PERFORMANCE");
 	ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
 	ImGui::Text("Ms/Frame: %.3f ms", 1000.0f / ImGui::GetIO().Framerate);
@@ -2938,7 +2953,6 @@ void VulkanRenderer::DrawGUI() {
 
 	ImGui::Separator();
 
-	// GEOMETRY SECTION
 	ImGui::TextColored(ImVec4(0.0f, 0.7f, 1.0f, 1.0f), "GEOMETRY");
 	ImGui::Text("Triangles: %u", triangleCount);
 	ImGui::Text("Vertices:  %u", sceneTotalVertices);
@@ -2946,7 +2960,6 @@ void VulkanRenderer::DrawGUI() {
 
 	ImGui::Separator();
 
-	// PIPELINE SECTION
 	ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "PIPELINE");
 	ImGui::Text("Draw Calls: %-8u", drawCallCount);
 	ImGui::Text("Culled:     %-8u", culledCount);
@@ -2954,6 +2967,7 @@ void VulkanRenderer::DrawGUI() {
 
 	ImGui::End();
 
+	// Finalize the ImGui frame
 	ImGui::Render();
 }
 void VulkanRenderer::UpdateScene(const Scene& scene) {
@@ -2968,16 +2982,7 @@ void VulkanRenderer::UpdateScene(const Scene& scene) {
 	}
 
 	if (scene.HasModifiedLights()) {
-		std::vector<Light> lights;
-		lights.reserve(scene.GetLights().size());
-
-		for (const auto& sl : scene.GetLights()) {
-			lights.push_back(sl.isPoint
-				? Light::Point(sl.position, sl.color, sl.intensity, sl.range)
-				: Light::Directional(sl.direction, sl.color, sl.intensity));
-		}
-
-		SetLights(lights);
+		SetLights(scene.GetLights());
 		scene.ClearModifiedLightsFlag();
 	}
 

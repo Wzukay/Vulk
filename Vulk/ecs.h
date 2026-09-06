@@ -12,7 +12,7 @@
 #include <array>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
-#include "scene_types.h"
+#include "mesh_types.h"
 
 // Forward declarations for templated view interactions
 class Registry;

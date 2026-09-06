@@ -18,6 +18,7 @@ void Settings::LoadFromFile(const std::string& path) {
 
         if (key == "renderDistance") renderDistance = std::stof(value);
         else if (key == "chunkSize") chunkSize = std::stof(value);
+        else if (key == "chunkResolution") chunkResolution = std::stof(value);
         else if (key == "enableDRS") enableDRS = (value == "true" || value == "1");
         else if (key == "targetFPS") targetFPS = std::stof(value);
         else if (key == "renderScale") renderScale = std::stof(value);
@@ -38,6 +39,7 @@ void Settings::LoadFromFile(const std::string& path) {
         else if (key == "frameCap") frameCap = std::stoi(value);
         else if (key == "anisotropicFiltering") anisotropicFiltering = (value == "true" || value == "1");
         else if (key == "maxAnisotropy") maxAnisotropy = std::stof(value);
+        else if (key == "antiAliasingMode") antiAliasingMode = std::stoi(value);
         else if (key == "msaaSamples") msaaSamples = std::stoi(value);
         else if (key == "framesInFlight") framesInFlight = std::stoi(value);
         else if (key == "showStats") showStats = (value == "true" || value == "1");
@@ -51,14 +53,28 @@ void Settings::LoadFromFile(const std::string& path) {
 void Settings::SaveToFile(const std::string& path) const {
     std::ofstream file(path);
     if (!file) return;
-    file << "# Settings file\n";
+
+    file << "# Settings file\n\n";
+
+    file << "# --- Rendering ---\n";
     file << "renderDistance " << renderDistance << "\n";
     file << "chunkSize " << chunkSize << "\n";
+    file << "chunkResolution " << chunkResolution << "\n";
     file << "enableDRS " << (enableDRS ? "true" : "false") << "\n";
     file << "targetFPS " << targetFPS << "\n";
     file << "renderScale " << renderScale << "\n";
     file << "enableFSR " << (enableFSR ? "true" : "false") << "\n";
     file << "enableSSAO " << (enableSSAO ? "true" : "false") << "\n";
+    file << "maxMipLevels " << maxMipLevels << "\n";
+    file << "vsync " << (vsync ? "true" : "false") << "\n";
+    file << "frameCap " << frameCap << "\n";
+    file << "anisotropicFiltering " << (anisotropicFiltering ? "true" : "false") << "\n";
+    file << "maxAnisotropy " << maxAnisotropy << "\n";
+    file << "antiAliasingMode " << antiAliasingMode << "\n";
+    file << "msaaSamples " << msaaSamples << "\n";
+    file << "framesInFlight " << framesInFlight << "\n\n";
+
+    file << "# --- World & LOD Distances ---\n";
     file << "fogStartRatio " << fogStartRatio << "\n";
     file << "fogEndRatio " << fogEndRatio << "\n";
     file << "staticFadeStartRatio " << staticFadeStartRatio << "\n";
@@ -68,16 +84,13 @@ void Settings::SaveToFile(const std::string& path) const {
     file << "terrainLod0EndRatio " << terrainLod0EndRatio << "\n";
     file << "terrainLod1EndRatio " << terrainLod1EndRatio << "\n";
     file << "terrainLod2EndRatio " << terrainLod2EndRatio << "\n";
-    file << "terrainLod3EndRatio " << terrainLod3EndRatio << "\n";
-    file << "maxMipLevels " << maxMipLevels << "\n";
-    file << "vsync " << (vsync ? "true" : "false") << "\n";
-    file << "frameCap " << frameCap << "\n";
-    file << "anisotropicFiltering " << (anisotropicFiltering ? "true" : "false") << "\n";
-    file << "maxAnisotropy " << maxAnisotropy << "\n";
-    file << "msaaSamples " << msaaSamples << "\n";
-    file << "framesInFlight " << framesInFlight << "\n";
+    file << "terrainLod3EndRatio " << terrainLod3EndRatio << "\n\n";
+
+    file << "# --- Debug ---\n";
     file << "showStats " << (showStats ? "true" : "false") << "\n";
-    file << "timeScale " << timeScale << "\n";
+    file << "timeScale " << timeScale << "\n\n";
+
+    file << "# --- Window ---\n";
     file << "windowWidth " << windowWidth << "\n";
     file << "windowHeight " << windowHeight << "\n";
     file << "fullscreen " << (fullscreen ? "true" : "false") << "\n";

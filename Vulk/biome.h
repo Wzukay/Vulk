@@ -27,7 +27,7 @@ enum class BiomeType {
 };
 
 struct PropSpawnRule {
-    std::vector<std::string> lodMeshes;
+    std::string lodGroupName;
     float spawnChance;
     float noiseThreshold;    // Matches against spatial noise to form natural clumps
     int noiseIndex;          // 0 = Forest Noise, 1 = Stone Noise
@@ -75,3 +75,5 @@ BiomeType DetermineBiome(float temperature, float moisture);
 inline const BiomeDefinition& GetBiomeProperties(BiomeType type) {
     return GetBiomeDefinition(type);
 }
+
+void InitBiomes();

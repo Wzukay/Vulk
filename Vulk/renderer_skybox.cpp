@@ -41,8 +41,6 @@ namespace {
 } // namespace
 
 void SkyboxRenderer::Init(VkDevice device, VkFormat colorFormat, VkFormat depthFormat, VkDescriptorSetLayout sharedSetLayout, VkSampleCountFlagBits msaaSamples) {
-    std::cout << "[DEBUG] Creating Skybox Pipeline...\n";
-
     skyboxVertModule = LoadShaderModule(device, "shaders/skybox_vert.spv");
     skyboxFragModule = LoadShaderModule(device, "shaders/skybox_frag.spv");
 

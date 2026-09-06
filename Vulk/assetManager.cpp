@@ -14,6 +14,8 @@
 #define CGLTF_IMPLEMENTATION
 #include "cgltf.h"
 
+#include "meshoptimizer.h"
+
 AssetManager g_AssetManager;
 
 void AssetManager::CreateDefaultTexture() {
@@ -105,8 +107,8 @@ void AssetManager::CreateDefaultTexture() {
     samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    samplerInfo.anisotropyEnable = VK_TRUE;
-    samplerInfo.maxAnisotropy = g_Settings.maxAnisotropy;
+    samplerInfo.anisotropyEnable = g_Settings.anisotropicFiltering ? VK_TRUE : VK_FALSE;
+    samplerInfo.maxAnisotropy = g_Settings.anisotropicFiltering ? g_Settings.maxAnisotropy : 1.0f;
     samplerInfo.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
     samplerInfo.unnormalizedCoordinates = VK_FALSE;
     samplerInfo.compareEnable = VK_FALSE;
@@ -428,7 +430,6 @@ uint32_t AssetManager::LoadTextureFromMemory(const std::string& virtualName, con
     map[virtualName] = newId;
     m_textureDirty = true;
 
-    std::cout << "[AssetManager] Decoded Embedded GLB Texture: " << virtualName << " -> ID " << newId << "\n";
     return newId;
 }
 uint32_t AssetManager::LoadTextureFromFile(const std::string& filePath) {
@@ -460,7 +461,6 @@ uint32_t AssetManager::LoadTextureFromFile(const std::string& filePath) {
     m_textureToId[filePath] = newId;
 
     m_textureDirty = true;
-    std::cout << "[AssetManager] Loaded albedo: " << filePath << " -> ID " << newId << "\n";
 
     return newId;
 }
@@ -525,7 +525,6 @@ uint32_t AssetManager::LoadNormalTextureFromFile(const std::string& filePath) {
     m_normalTextureToId[filePath] = newId;
 
     m_textureDirty = true;
-    std::cout << "[AssetManager] Loaded normal: " << filePath << " -> ID " << newId << "\n";
 
     return newId;
 }
@@ -815,57 +814,6 @@ void AssetManager::TransitionImageLayout(VkImage image, VkFormat format, VkImage
     EndSingleTimeCommands(commandBuffer);
 }
 
-static void ComputeTangents(std::vector<ModelVertex>& verts, const std::vector<uint32_t>& idxs) {
-    std::vector<glm::vec3> tanAccum(verts.size(), glm::vec3(0.0f));
-    std::vector<glm::vec3> bitanAccum(verts.size(), glm::vec3(0.0f));
-
-    for (size_t i = 0; i + 2 < idxs.size(); i += 3) {
-        uint32_t i0 = idxs[i], i1 = idxs[i + 1], i2 = idxs[i + 2];
-        ModelVertex& v0 = verts[i0];
-        ModelVertex& v1 = verts[i1];
-        ModelVertex& v2 = verts[i2];
-
-        glm::vec3 edge1 = v1.pos - v0.pos;
-        glm::vec3 edge2 = v2.pos - v0.pos;
-        glm::vec2 deltaUV1 = v1.texCoord - v0.texCoord;
-        glm::vec2 deltaUV2 = v2.texCoord - v0.texCoord;
-
-        float denom = (deltaUV1.x * deltaUV2.y - deltaUV2.x * deltaUV1.y);
-        if (std::abs(denom) < 1e-8f) continue; // degenerate UVs, skip this triangle
-        float f = 1.0f / denom;
-
-        glm::vec3 tangent = f * (deltaUV2.y * edge1 - deltaUV1.y * edge2);
-        glm::vec3 bitangent = f * (deltaUV1.x * edge2 - deltaUV2.x * edge1);
-
-        tanAccum[i0] += tangent; tanAccum[i1] += tangent; tanAccum[i2] += tangent;
-        bitanAccum[i0] += bitangent; bitanAccum[i1] += bitangent; bitanAccum[i2] += bitangent;
-    }
-
-    for (size_t i = 0; i < verts.size(); ++i) {
-        glm::vec3 n = DecodeNormal(verts[i].normal);
-        glm::vec3 t = tanAccum[i];
-
-        // Gram-Schmidt orthogonalize against the normal
-        t = t - n * glm::dot(n, t);
-        float len = glm::length(t);
-        if (len < 1e-8f) {
-            // Degenerate/no UV data - pick an arbitrary perpendicular vector
-            glm::vec3 fallback = std::abs(n.x) < 0.9f ? glm::vec3(1, 0, 0) : glm::vec3(0, 1, 0);
-            t = glm::normalize(glm::cross(n, fallback));
-        }
-        else {
-            t /= len;
-        }
-
-        // Handedness: does bitangent point the "expected" way relative to n x t?
-        float handedness = (glm::dot(glm::cross(n, t), bitanAccum[i]) < 0.0f) ? -1.0f : 1.0f;
-
-        verts[i].tangent = glm::vec4(t, handedness);
-
-        verts[i].coarseTangent = verts[i].tangent;
-    }
-}
-
 void AssetManager::LoadMesh(const std::string& path) {
     // 1. Prevent duplicate loading
     if (m_meshes.find(path) != m_meshes.end()) return;
@@ -998,18 +946,96 @@ void AssetManager::LoadGLTF(const std::string& path) {
                         localVerts[v].coarseNormal = localVerts[v].normal;
                     }
                     else if (attrib->type == cgltf_attribute_type_texcoord) {
-                        localVerts[v].texCoord = glm::vec2(values[0], values[1]);
+                        // FIX: Safely construct a vec2 first, then pack it!
+                        glm::vec2 rawUV = glm::vec2(values[0], values[1]);
+                        localVerts[v].texCoord = glm::packHalf2x16(rawUV);
                     }
                     else if (attrib->type == cgltf_attribute_type_tangent) {
                         glm::vec3 worldTan = normalMatrix * glm::vec3(values[0], values[1], values[2]);
+
+                        // Because tangents from GLTF don't come through our ComputeTangents helper yet,
+                        // we encode them here so they are ready for the shader. Handedness is stored in values[3].
+                        glm::vec4 fullTangent = glm::vec4(glm::normalize(worldTan), values[3]);
+                        localVerts[v].tangent = EncodeTangent(fullTangent);
                         localVerts[v].coarseTangent = localVerts[v].tangent;
                     }
                 }
             }
 
             // If the GLB didn't provide tangents, we compute them using your existing helper
-            if (localVerts.size() > 0 && localVerts[0].tangent == glm::vec4(0.0f)) {
-                ComputeTangents(localVerts, localIndices);
+            if (localVerts.size() > 0 && localVerts[0].tangent == 0) {
+                // ComputeTangents will now fail because ModelVertex doesn't store a vec4 tangent anymore!
+                // We need to unpack, compute, and repack.
+                std::vector<glm::vec4> rawTangents(localVerts.size(), glm::vec4(0.0f));
+
+                // --- INLINE TANGENT COMPUTATION FOR PACKED VERTS ---
+                std::vector<glm::vec3> tanAccum(localVerts.size(), glm::vec3(0.0f));
+                std::vector<glm::vec3> bitanAccum(localVerts.size(), glm::vec3(0.0f));
+
+                for (size_t i = 0; i + 2 < localIndices.size(); i += 3) {
+                    uint32_t i0 = localIndices[i], i1 = localIndices[i + 1], i2 = localIndices[i + 2];
+
+                    glm::vec3 edge1 = localVerts[i1].pos - localVerts[i0].pos;
+                    glm::vec3 edge2 = localVerts[i2].pos - localVerts[i0].pos;
+
+                    glm::vec2 uv0 = glm::unpackHalf2x16(localVerts[i0].texCoord);
+                    glm::vec2 uv1 = glm::unpackHalf2x16(localVerts[i1].texCoord);
+                    glm::vec2 uv2 = glm::unpackHalf2x16(localVerts[i2].texCoord);
+
+                    glm::vec2 deltaUV1 = uv1 - uv0;
+                    glm::vec2 deltaUV2 = uv2 - uv0;
+
+                    float denom = (deltaUV1.x * deltaUV2.y - deltaUV2.x * deltaUV1.y);
+                    if (std::abs(denom) < 1e-8f) continue;
+                    float f = 1.0f / denom;
+
+                    glm::vec3 tangent = f * (deltaUV2.y * edge1 - deltaUV1.y * edge2);
+                    glm::vec3 bitangent = f * (deltaUV1.x * edge2 - deltaUV2.x * edge1);
+
+                    tanAccum[i0] += tangent; tanAccum[i1] += tangent; tanAccum[i2] += tangent;
+                    bitanAccum[i0] += bitangent; bitanAccum[i1] += bitangent; bitanAccum[i2] += bitangent;
+                }
+
+                for (size_t i = 0; i < localVerts.size(); ++i) {
+                    glm::vec3 n = DecodeNormal(localVerts[i].normal);
+                    glm::vec3 t = tanAccum[i];
+
+                    t = t - n * glm::dot(n, t);
+                    float len = glm::length(t);
+                    if (len < 1e-8f) {
+                        glm::vec3 fallback = std::abs(n.x) < 0.9f ? glm::vec3(1, 0, 0) : glm::vec3(0, 1, 0);
+                        t = glm::normalize(glm::cross(n, fallback));
+                    }
+                    else {
+                        t /= len;
+                    }
+
+                    float handedness = (glm::dot(glm::cross(n, t), bitanAccum[i]) < 0.0f) ? -1.0f : 1.0f;
+
+                    // Repack it directly into the struct!
+                    localVerts[i].tangent = EncodeTangent(glm::vec4(t, handedness));
+                    localVerts[i].coarseTangent = localVerts[i].tangent;
+                }
+            }
+
+            if (!localIndices.empty() && !localVerts.empty()) {
+                meshopt_optimizeVertexCache(
+                    localIndices.data(),
+                    localIndices.data(),
+                    localIndices.size(),
+                    localVerts.size()
+                );
+
+                std::vector<ModelVertex> optimizedVerts(localVerts.size());
+                meshopt_optimizeVertexFetch(
+                    optimizedVerts.data(),
+                    localIndices.data(),
+                    localIndices.size(),
+                    localVerts.data(),
+                    localVerts.size(),
+                    sizeof(ModelVertex)
+                );
+                localVerts = std::move(optimizedVerts);
             }
 
             // 4. CALCULATE BOUNDS
@@ -1067,15 +1093,12 @@ void AssetManager::LoadGLTF(const std::string& path) {
 
             globalVertexOffset += static_cast<uint32_t>(localVerts.size());
             globalIndexOffset += static_cast<uint32_t>(localIndices.size());
-
-            std::cout << "[GLTF Debug] Submesh " << p << " -> Albedo: " << (albedoPath.empty() ? "EMPTY (Defaults to Dirt)" : albedoPath) << "\n";
         }
     }
 
     cgltf_free(data);
 
     m_meshes[path] = std::move(mesh);
-    std::cout << "[Asset Manager] Loaded GLTF: " << path << " with " << m_meshes[path].subMeshes.size() << " submeshes\n";
 }
 
 void AssetManager::RegisterMesh(
@@ -1142,6 +1165,20 @@ MeshAsset* AssetManager::GetMesh(const std::string& path) {
     // LoadMesh now automatically routes to the right parser
     LoadMesh(path);
     return &m_meshes[path];
+}
+
+void AssetManager::RegisterLodGroup(const std::string& name, const std::vector<std::string>& paths) {
+    m_lodGroups[name] = { name, paths };
+
+    for (const auto& path : paths) {
+        LoadMesh(path);
+    }
+    std::cout << "[AssetManager] Registered LOD Group: " << name << " with " << paths.size() << " levels.\n";
+}
+
+const LodGroup* AssetManager::GetLodGroup(const std::string& name) const {
+    auto it = m_lodGroups.find(name);
+    return it != m_lodGroups.end() ? &it->second : nullptr;
 }
 
 uint32_t AssetManager::FindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {

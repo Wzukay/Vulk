@@ -1,7 +1,5 @@
 #pragma once
 
-#include "network_manager.h"
-#include "logger.h"
 #include "renderer.h"
 #include "input.h"
 #include "chunk.h"
@@ -9,6 +7,7 @@
 #include "asset_manager.h"
 #include "player_system.h"
 #include "day_night.h"
+#include "scene_manager.h"
 
 #include <chrono>
 #include <thread>
@@ -30,17 +29,9 @@ class Game
 {
 private:
 	bool isRunning = false;
-	bool isReadyToDraw = false;
-	bool isHost = false;
-	bool isMultiplayerGame = false;
-
-	Entity localPlayerEntity = INVALID_ENTITY;
 
 	GLFWwindow* window;
-	Scene scene;
-	AssetManager assetManager;
-	NetworkManager netManager;
-	Chunk chunk;
+	SceneManager sceneManager;
 	VulkanRenderer renderer;
 	Input input;
 

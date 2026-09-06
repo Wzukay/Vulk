@@ -13,7 +13,6 @@ layout(location = 0) in vec3 inPosition;
 layout(location = 1) in vec2 inNormal; // Unpacked from VK_FORMAT_R16G16_SNORM
 layout(location = 2) in vec2 inTexCoord;
 layout(location = 3) in vec4 inTangent;
-layout(location = 4) in vec3 inColor;
 
 // Instance attributes from InstanceData (Locations 5-9)
 layout(location = 5) in vec4 instModelCol0;
@@ -29,6 +28,7 @@ layout(location = 3) out vec3 fragWorldPos;
 layout(location = 4) out vec3 fragTangent;
 layout(location = 5) out float fragTangentHandedness;
 layout(location = 6) flat out uint fragNormalTextureId;
+layout(location = 7) out float fragOpacity;
 
 // --- Octahedral Decoding ---
 vec2 octWrap(vec2 v) {
@@ -61,4 +61,5 @@ void main() {
     fragTextureId = push.textureId; 
     fragNormalTextureId = push.normalTextureId;
     fragWorldPos = worldPos.xyz;
+    fragOpacity = instCustomData.x;
 }

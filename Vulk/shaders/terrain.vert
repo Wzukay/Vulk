@@ -15,7 +15,6 @@ layout(location = 0) in vec3 inPosition;
 layout(location = 1) in vec2 inNormal;             // SNORM vec2
 layout(location = 2) in vec2 inTexCoord;
 layout(location = 3) in vec4 inTangent;
-layout(location = 4) in vec3 inColor;
 layout(location = 5) in float inCoarseY;           // Replaced inCoarsePos
 layout(location = 6) in vec2 inCoarseNormal;       // SNORM vec2
 layout(location = 7) in vec4 inCoarseTangent;
@@ -73,8 +72,15 @@ void main() {
     blendedWeights.b = max(blendedWeights.b, 1.0 - cliffWeight);
     float totalWeight = blendedWeights.r + blendedWeights.g + blendedWeights.b;
     
+    vec3 weights = blendedWeights / max(totalWeight, 0.0001); // <--- Define weights properly here
+    fragTangent = weights;
+
+    vec3 dirtColor = vec3(0.35, 0.25, 0.15);
+    vec3 grassColor = vec3(0.2, 0.45, 0.15);
+    vec3 rockColor = vec3(0.4, 0.4, 0.4);
+
+    fragColor = (dirtColor * weights.x) + (grassColor * weights.y) + (rockColor * weights.z);
     fragTangent = blendedWeights / max(totalWeight, 0.0001);
-    fragColor = inColor;
     fragNormal = normalMatrix * finalNormal;
     fragTangentHandedness = inTangent.w; 
     fragTexCoord = inTexCoord;

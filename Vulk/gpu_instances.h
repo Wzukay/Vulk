@@ -8,6 +8,8 @@
 #include <optional>
 #include <string>
 
+#include "mesh_types.h"
+
 struct UniformBufferObject {
     alignas(16) glm::mat4 view;              // 64 bytes
     alignas(16) glm::mat4 proj;              // 64 bytes
@@ -146,8 +148,7 @@ struct TerrainChunkGPUData {
     uint32_t vertexOffset;
     uint32_t lod;
 };
-
-struct ComputePush {
+struct TerrainCullPush {
     glm::mat4 viewProj;         // 64 bytes
     glm::vec4 fadeParams;       // 16 bytes
     glm::vec3 cameraPos;        // 12 bytes
@@ -158,7 +159,6 @@ struct ComputePush {
     uint32_t totalChunks;       // 4 bytes
     // Total: 116 bytes
 };
-static_assert(sizeof(ComputePush) == 116, "ComputePush size must be 116 bytes");
 
 struct GrassChunkMetadata {
     glm::vec3 center;
@@ -174,7 +174,7 @@ struct PropInstance {
     glm::vec3 scale;
     float customPayload;
 
-    std::vector<std::string> lodMeshes;
+    std::string lodGroupName;
 };
 struct InstanceData {
     alignas(16) glm::mat4 modelMatrix;
@@ -237,4 +237,32 @@ struct WaterChunkGPUData {
     uint32_t firstIndex = 0;
     int32_t vertexOffset = 0;
     uint32_t padding = 0;
+};
+
+struct StaticCullPush {
+    glm::mat4 viewProj;
+    glm::vec3 cameraPos;
+    uint32_t totalInstances;
+    float maxDistance;
+    float _padding;
+    glm::vec2 hzbSize;
+};
+struct MeshBufferAllocation {
+    uint32_t firstIndex;
+    int32_t vertexOffset;
+    std::vector<SubMesh> subMeshes;
+    float maxBoundingRadius;
+    uint32_t lodCount;
+};
+struct alignas(16) StaticInstanceCullData {
+    glm::mat4 modelMatrix;
+    glm::vec4 worldPositionRadius;
+    glm::uvec4 drawData; // x = indirect-command index, y = output range base
+};
+struct StaticIndirectBatch {
+    VkDrawIndexedIndirectCommand command{};
+    uint32_t outputBase = 0;
+    uint32_t sourceCount = 0;
+    uint32_t textureId = 0;
+    uint32_t normalTextureId = 0;
 };

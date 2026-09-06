@@ -1,6 +1,8 @@
 #version 450
 #extension GL_EXT_nonuniform_qualifier : require
 
+layout(early_fragment_tests) in;
+
 #include "common_structures.glsl"
 
 struct Light {

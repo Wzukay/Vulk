@@ -7,6 +7,7 @@
 #include <array>
 #include <glm/glm.hpp>
 #include <glm/gtx/hash.hpp>
+#include <glm/gtc/packing.hpp>
 #include <functional>
 #include <algorithm>
 #include <limits>
@@ -46,15 +47,29 @@ inline glm::vec3 DecodeNormal(uint32_t packed) {
     return glm::normalize(n);
 }
 
+inline uint32_t EncodeTangent(glm::vec4 t) {
+    int8_t x = static_cast<int8_t>(std::round(std::clamp(t.x, -1.0f, 1.0f) * 127.0f));
+    int8_t y = static_cast<int8_t>(std::round(std::clamp(t.y, -1.0f, 1.0f) * 127.0f));
+    int8_t z = static_cast<int8_t>(std::round(std::clamp(t.z, -1.0f, 1.0f) * 127.0f));
+    int8_t w = static_cast<int8_t>(std::round(std::clamp(t.w, -1.0f, 1.0f) * 127.0f));
+
+    uint32_t packed = 0;
+    packed |= (static_cast<uint32_t>(static_cast<uint8_t>(x)));
+    packed |= (static_cast<uint32_t>(static_cast<uint8_t>(y)) << 8);
+    packed |= (static_cast<uint32_t>(static_cast<uint8_t>(z)) << 16);
+    packed |= (static_cast<uint32_t>(static_cast<uint8_t>(w)) << 24);
+    return packed;
+}
+
 struct ModelVertex {
-    glm::vec3 pos;
-    uint32_t normal;
-    glm::vec2 texCoord;
-    glm::vec4 tangent;
-    glm::vec3 color;
-    float coarseY;
-    uint32_t coarseNormal;
-    glm::vec4 coarseTangent;
+    glm::vec3 pos;              // 12 bytes
+    uint32_t normal;            // 4 bytes
+    uint32_t texCoord;          // 4 bytes (Packed R16G16_SFLOAT)
+    uint32_t tangent;           // 4 bytes (Packed R8G8B8A8_SNORM)
+    float coarseY;              // 4 bytes
+    uint32_t coarseNormal;      // 4 bytes
+    uint32_t coarseTangent;     // 4 bytes
+    // Total: 36 bytes (Down from 76!)
 
     static VkVertexInputBindingDescription getBindingDescription() {
         VkVertexInputBindingDescription bindingDescription{};
@@ -64,32 +79,26 @@ struct ModelVertex {
         return bindingDescription;
     }
 
-    // Static & Instanced meshes only care about locations 0 to 4
-    static std::array<VkVertexInputAttributeDescription, 5> getStaticAttributeDescriptions() {
-        std::array<VkVertexInputAttributeDescription, 5> attrs{};
-
+    static std::array<VkVertexInputAttributeDescription, 4> getStaticAttributeDescriptions() {
+        std::array<VkVertexInputAttributeDescription, 4> attrs{};
         attrs[0] = { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(ModelVertex, pos) };
         attrs[1] = { 1, 0, VK_FORMAT_R16G16_SNORM,     offsetof(ModelVertex, normal) };
-        attrs[2] = { 2, 0, VK_FORMAT_R32G32_SFLOAT,    offsetof(ModelVertex, texCoord) };
-        attrs[3] = { 3, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(ModelVertex, tangent) };
-        attrs[4] = { 4, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(ModelVertex, color) };
-
+        // Vulkan automatically unpacks these into vec2 and vec4!
+        attrs[2] = { 2, 0, VK_FORMAT_R16G16_SFLOAT,    offsetof(ModelVertex, texCoord) };
+        attrs[3] = { 3, 0, VK_FORMAT_R8G8B8A8_SNORM,   offsetof(ModelVertex, tangent) };
         return attrs;
     }
 
-    // Terrain consumes all 8 attributes (locations 0 to 7)
-    static std::array<VkVertexInputAttributeDescription, 8> getTerrainAttributeDescriptions() {
-        std::array<VkVertexInputAttributeDescription, 8> attrs{};
-
+    static std::array<VkVertexInputAttributeDescription, 7> getTerrainAttributeDescriptions() {
+        std::array<VkVertexInputAttributeDescription, 7> attrs{};
         attrs[0] = { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(ModelVertex, pos) };
         attrs[1] = { 1, 0, VK_FORMAT_R16G16_SNORM,     offsetof(ModelVertex, normal) };
-        attrs[2] = { 2, 0, VK_FORMAT_R32G32_SFLOAT,    offsetof(ModelVertex, texCoord) };
-        attrs[3] = { 3, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(ModelVertex, tangent) };
-        attrs[4] = { 4, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(ModelVertex, color) };
-        attrs[5] = { 5, 0, VK_FORMAT_R32_SFLOAT,       offsetof(ModelVertex, coarseY) };
-        attrs[6] = { 6, 0, VK_FORMAT_R16G16_SNORM,     offsetof(ModelVertex, coarseNormal) };
-        attrs[7] = { 7, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(ModelVertex, coarseTangent) };
-
+        attrs[2] = { 2, 0, VK_FORMAT_R16G16_SFLOAT,    offsetof(ModelVertex, texCoord) };
+        attrs[3] = { 3, 0, VK_FORMAT_R8G8B8A8_SNORM,   offsetof(ModelVertex, tangent) };
+        // We keep the locations at 5, 6, 7 so you don't have to rewrite terrain.vert!
+        attrs[4] = { 5, 0, VK_FORMAT_R32_SFLOAT,       offsetof(ModelVertex, coarseY) };
+        attrs[5] = { 6, 0, VK_FORMAT_R16G16_SNORM,     offsetof(ModelVertex, coarseNormal) };
+        attrs[6] = { 7, 0, VK_FORMAT_R8G8B8A8_SNORM,   offsetof(ModelVertex, coarseTangent) };
         return attrs;
     }
 };
@@ -131,9 +140,8 @@ namespace std {
         size_t operator()(ModelVertex const& vertex) const {
             size_t h = ((hash<glm::vec3>()(vertex.pos) ^
                 (hash<uint32_t>()(vertex.normal) << 1)) >> 1) ^
-                (hash<glm::vec2>()(vertex.texCoord) << 1);
-            h ^= hash<float>()(vertex.tangent.x) + 0x9e3779b9 + (h << 6) + (h >> 2);
-            h ^= hash<glm::vec3>()(vertex.color) + 0x9e3779b9 + (h << 6) + (h >> 2);
+                (hash<uint32_t>()(vertex.texCoord) << 1);
+            h ^= hash<uint32_t>()(vertex.tangent) + 0x9e3779b9 + (h << 6) + (h >> 2);
             return h;
         }
     };

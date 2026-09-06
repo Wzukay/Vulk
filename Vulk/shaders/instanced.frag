@@ -13,6 +13,7 @@ layout(location = 3) in vec3 fragWorldPos;
 layout(location = 4) in vec3 fragTangent;
 layout(location = 5) in float fragTangentHandedness;
 layout(location = 6) flat in uint fragNormalTextureId;
+layout(location = 7) in float fragOpacity;
 
 layout(location = 0) out vec4 outColor;
 
@@ -30,6 +31,28 @@ vec3 ApplyFog(vec3 color, float distanceToCamera) {
 }
 
 void main() {
+    float actualOpacity = abs(fragOpacity);
+
+    if (actualOpacity < 0.99) {
+        int x = int(mod(gl_FragCoord.x, 4.0));
+        int y = int(mod(gl_FragCoord.y, 4.0));
+        
+        const float bayer[16] = float[](
+             0.0/16.0,  8.0/16.0,  2.0/16.0, 10.0/16.0,
+            12.0/16.0,  4.0/16.0, 14.0/16.0,  6.0/16.0,
+             3.0/16.0, 11.0/16.0,  1.0/16.0,  9.0/16.0,
+            15.0/16.0,  7.0/16.0, 13.0/16.0,  5.0/16.0
+        );
+        
+        float ditherThreshold = bayer[y * 4 + x];
+        
+        if (fragOpacity >= 0.0) {
+            if (actualOpacity < ditherThreshold) discard;
+        } else {
+            if (ditherThreshold <= 1.0 - actualOpacity) discard;
+        }
+    }
+
     vec4 albedo = texture(
         globalTextures[nonuniformEXT(fragTextureId)],
         fragTexCoord);
@@ -80,4 +103,8 @@ void main() {
     outColor = vec4(
         ApplyFog(albedo.rgb * lighting, distanceToCamera),
         albedo.a);
+
+    if (fragNormalTextureId == 999999) {
+        outColor.a += fragTangentHandedness;
+    }
 }
