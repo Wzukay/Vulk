@@ -1076,13 +1076,17 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
             return CalculateHeightAndColor(wX, wZ);
         }
 
-        float gridX = (localX / m_chunkSize) * (resolution - 1);
-        float gridZ = (localZ / m_chunkSize) * (resolution - 1);
+        float gridMax = static_cast<float>(std::max(1, resolution - 1));
+        float gridX = (localX / m_chunkSize) * gridMax;
+        float gridZ = (localZ / m_chunkSize) * gridMax;
 
-        int x0 = std::clamp(static_cast<int>(gridX), 0, resolution - 2);
-        int z0 = std::clamp(static_cast<int>(gridZ), 0, resolution - 2);
-        int x1 = x0 + 1;
-        int z1 = z0 + 1;
+        int maxIndex0 = std::max(0, resolution - 2);
+        int maxIndex1 = std::max(0, resolution - 1);
+
+        int x0 = std::clamp(static_cast<int>(gridX), 0, maxIndex0);
+        int z0 = std::clamp(static_cast<int>(gridZ), 0, maxIndex0);
+        int x1 = std::min(x0 + 1, maxIndex1);
+        int z1 = std::min(z0 + 1, maxIndex1);
 
         float tx = gridX - x0;
         float tz = gridZ - z0;

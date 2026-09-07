@@ -152,7 +152,6 @@ void StaticMeshRenderer::UploadUniqueMeshes(const std::unordered_set<std::string
 		alloc.maxBoundingRadius = 0.0f;
 
 		if (group) {
-			alloc.lodCount = static_cast<uint32_t>(group->meshPaths.size());
 			for (const auto& path : group->meshPaths) {
 				MeshAsset* mesh = g_AssetManager.GetMesh(path);
 				if (!mesh || mesh->subMeshes.empty()) continue;
@@ -175,6 +174,8 @@ void StaticMeshRenderer::UploadUniqueMeshes(const std::unordered_set<std::string
 				vertexOffset += static_cast<uint32_t>(mesh->vertices.size());
 				indexOffset += static_cast<uint32_t>(mesh->indices.size());
 			}
+
+			alloc.lodCount = std::max(1u, static_cast<uint32_t>(alloc.subMeshes.size()));
 		}
 		else {
 			MeshAsset* mesh = g_AssetManager.GetMesh(name);

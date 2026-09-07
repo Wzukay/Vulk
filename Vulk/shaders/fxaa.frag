@@ -4,9 +4,13 @@ layout(location = 0) in vec2 fragUV;
 layout(location = 0) out vec4 outColor;
 
 layout(binding = 0) uniform sampler2D sceneTexture;
+layout(binding = 1) uniform sampler2D ssaoMap;
+layout(binding = 2) uniform sampler2D waterTexture;
 
-layout(push_constant) uniform FXAAPushConstants {
-    vec2 invScreenSize;
+layout(push_constant) uniform FSRConstants {
+    float sharpness;
+    int enableSSAO;
+    vec2 renderScale;
 } pc;
 
 float rgb2luma(vec3 rgb) {
@@ -14,8 +18,13 @@ float rgb2luma(vec3 rgb) {
 }
 
 void main() {
-    vec3 colorCenter = texture(sceneTexture, fragUV).rgb;
-    float alphaCenter = texture(sceneTexture, fragUV).a;
+    vec2 activeUV = fragUV * pc.renderScale;
+    
+    // FIXED: Changed sceneColor to sceneTexture
+    vec2 invScreenSize = 1.0 / vec2(textureSize(sceneTexture, 0));
+
+    vec3 colorCenter = texture(sceneTexture, activeUV).rgb;
+    float alphaCenter = texture(sceneTexture, activeUV).a;
 
     // FXAA parameters
     float FXAA_SPAN_MAX = 8.0;
@@ -23,10 +32,10 @@ void main() {
     float FXAA_REDUCE_MIN = 1.0 / 128.0;
 
     // Sample surrounding pixels
-    vec3 lumaN = texture(sceneTexture, fragUV + vec2(0.0, -pc.invScreenSize.y)).rgb;
-    vec3 lumaS = texture(sceneTexture, fragUV + vec2(0.0, pc.invScreenSize.y)).rgb;
-    vec3 lumaW = texture(sceneTexture, fragUV + vec2(-pc.invScreenSize.x, 0.0)).rgb;
-    vec3 lumaE = texture(sceneTexture, fragUV + vec2(pc.invScreenSize.x, 0.0)).rgb;
+    vec3 lumaN = texture(sceneTexture, activeUV + vec2(0.0, -invScreenSize.y)).rgb;
+    vec3 lumaS = texture(sceneTexture, activeUV + vec2(0.0, invScreenSize.y)).rgb;
+    vec3 lumaW = texture(sceneTexture, activeUV + vec2(-invScreenSize.x, 0.0)).rgb;
+    vec3 lumaE = texture(sceneTexture, activeUV + vec2(invScreenSize.x, 0.0)).rgb;
 
     float lumaCenter = rgb2luma(colorCenter);
     float lumaN_val = rgb2luma(lumaN);
@@ -44,21 +53,33 @@ void main() {
     float dirReduce = max((lumaN_val + lumaS_val + lumaW_val + lumaE_val) * (0.25 * FXAA_REDUCE_MUL), FXAA_REDUCE_MIN);
     float rcpDirMin = 1.0 / (min(abs(dir.x), abs(dir.y)) + dirReduce);
 
-    dir = min(vec2(FXAA_SPAN_MAX), max(vec2(-FXAA_SPAN_MAX), dir * rcpDirMin)) * pc.invScreenSize;
+    dir = min(vec2(FXAA_SPAN_MAX), max(vec2(-FXAA_SPAN_MAX), dir * rcpDirMin)) * invScreenSize;
 
     vec3 rgbA = 0.5 * (
-        texture(sceneTexture, fragUV + dir * (1.0/3.0 - 0.5)).rgb +
-        texture(sceneTexture, fragUV + dir * (2.0/3.0 - 0.5)).rgb);
+        texture(sceneTexture, activeUV + dir * (1.0/3.0 - 0.5)).rgb +
+        texture(sceneTexture, activeUV + dir * (2.0/3.0 - 0.5)).rgb);
 
     vec3 rgbB = rgbA * 0.5 + 0.25 * (
-        texture(sceneTexture, fragUV + dir * -0.5).rgb +
-        texture(sceneTexture, fragUV + dir * 0.5).rgb);
+        texture(sceneTexture, activeUV + dir * -0.5).rgb +
+        texture(sceneTexture, activeUV + dir * 0.5).rgb);
 
     float lumaB = rgb2luma(rgbB);
-
+    
+    vec3 finalColor;
     if (lumaB < lumaMin || lumaB > lumaMax) {
-        outColor = vec4(colorCenter, alphaCenter);
+        finalColor = rgbA; // Standard FXAA fallback uses rgbA instead of colorCenter
     } else {
-        outColor = vec4(rgbB, alphaCenter);
+        finalColor = rgbB;
     }
+
+    // Apply SSAO
+    if (pc.enableSSAO == 1) {
+        finalColor *= texture(ssaoMap, activeUV).r;
+    }
+
+    // Apply Water
+    vec4 waterColor = texture(waterTexture, fragUV);
+    finalColor = mix(finalColor, waterColor.rgb, waterColor.a);
+
+    outColor = vec4(finalColor, alphaCenter);
 }

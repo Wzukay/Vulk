@@ -193,8 +193,6 @@ private:
     VkPresentModeKHR ChooseSwapPresentMode(const std::vector<VkPresentModeKHR>& availablePresentModes);
     VkExtent2D ChooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities);
 
-    void GenerateSSAOResources();
-
 public:
     void DrawFrame();
     void UpdateDRS();
@@ -356,6 +354,7 @@ private:
     RenderTarget ssaoTarget;         // .sampler is reused for reading ssaoBlurTarget/ssaoPingPongTarget too
     RenderTarget ssaoPingPongTarget; // no dedicated sampler — sampled via ssaoTarget.sampler
     RenderTarget ssaoBlurTarget;     // no dedicated sampler — sampled via ssaoTarget.sampler
+    RenderTarget ssaoNoiseTarget;
 
     VkPipeline ssaoPipeline = VK_NULL_HANDLE;
     VkPipelineLayout ssaoPipelineLayout = VK_NULL_HANDLE;

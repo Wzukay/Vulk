@@ -337,6 +337,8 @@ void VulkanRenderer::InitVulkan() {
 	CreateDepthResources();
 	CreateColorResources();
 
+	CreateCommandPool();
+
 	CreateSSAOResources();
 	CreateSSAOPipeline();
 	CreateSSAOBlurResources();
@@ -344,7 +346,6 @@ void VulkanRenderer::InitVulkan() {
 
 	CreateCompositionPass();
 	CreateFrameBuffers();
-	CreateCommandPool();
 	CreateCommandBuffers();
 	CreateSyncObjects();
 
@@ -621,6 +622,7 @@ void VulkanRenderer::RecreateSwapChain() {
 	if (ssaoDescriptorSetLayout != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(logicalDevice, ssaoDescriptorSetLayout, nullptr); ssaoDescriptorSetLayout = VK_NULL_HANDLE; }
 	if (ssaoDescriptorPool != VK_NULL_HANDLE) { vkDestroyDescriptorPool(logicalDevice, ssaoDescriptorPool, nullptr); ssaoDescriptorPool = VK_NULL_HANDLE; }
 	ssaoTarget.Destroy(logicalDevice);
+	ssaoNoiseTarget.Destroy(logicalDevice);
 
 	ssaoPingPongTarget.Destroy(logicalDevice);
 	ssaoBlurTarget.Destroy(logicalDevice);
@@ -671,6 +673,8 @@ void VulkanRenderer::RecreateSwapChain() {
 	CreateHZBPipeline();
 
 	m_terrainRenderer.UpdateHZBDescriptor(hzbTarget.view, hzbTarget.sampler);
+	m_staticMeshRenderer.UpdateHZBDescriptor(hzbTarget.view, hzbTarget.sampler); 
+	m_waterRenderer.SetSceneDepth(depthTarget.view, depthTarget.sampler);
 
 	CreateSSAOResources();
 	CreateSSAOPipeline();
@@ -1364,10 +1368,56 @@ void VulkanRenderer::CreateSSAOResources() {
 		sample *= glm::mix(0.1f, 1.0f, scale * scale);
 		uboData.samples[i] = glm::vec4(sample, 0.0f);
 	}
-	for (int i = 0; i < 16; i++) {
-		uboData.noise[i] = glm::vec4(randomFloats(generator) * 2.0f - 1.0f, randomFloats(generator) * 2.0f - 1.0f, 0.0f, 0.0f);
-	}
+
 	memcpy(ssaoUBOMapped, &uboData, sizeof(SSAOUBO));
+
+	std::vector<glm::vec4> ssaoNoise(16);
+	for (int i = 0; i < 16; i++) {
+		ssaoNoise[i] = glm::vec4(
+			randomFloats(generator) * 2.0f - 1.0f,
+			randomFloats(generator) * 2.0f - 1.0f,
+			0.0f, 0.0f);
+	}
+
+	// 2. Create Staging Buffer
+	VkDeviceSize noiseSize = ssaoNoise.size() * sizeof(glm::vec4);
+	VkBuffer stagingBuffer;
+	VkDeviceMemory stagingBufferMemory;
+	CreateBuffer(noiseSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+
+	void* data;
+	vkMapMemory(logicalDevice, stagingBufferMemory, 0, noiseSize, 0, &data);
+	memcpy(data, ssaoNoise.data(), (size_t)noiseSize);
+	vkUnmapMemory(logicalDevice, stagingBufferMemory);
+
+	// 3. Create 4x4 Noise Image
+	CreateImage(4, 4, 1, VK_SAMPLE_COUNT_1_BIT, VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, ssaoNoiseTarget.image, ssaoNoiseTarget.memory);
+	ssaoNoiseTarget.view = CreateImageView(ssaoNoiseTarget.image, VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_ASPECT_COLOR_BIT, 1);
+
+	VkSamplerCreateInfo noiseSamplerInfo{};
+	noiseSamplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+	noiseSamplerInfo.magFilter = VK_FILTER_NEAREST; // Must be nearest for raw noise
+	noiseSamplerInfo.minFilter = VK_FILTER_NEAREST;
+	noiseSamplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+	noiseSamplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT; // TILE THE TEXTURE
+	noiseSamplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+	noiseSamplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+	vkCreateSampler(logicalDevice, &noiseSamplerInfo, nullptr, &ssaoNoiseTarget.sampler);
+
+	// 4. Copy Buffer to Image
+	VkCommandBuffer cmd = BeginSingleTimeCommands();
+	TransitionImageLayout(cmd, ssaoNoiseTarget.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+
+	VkBufferImageCopy region{};
+	region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	region.imageSubresource.layerCount = 1;
+	region.imageExtent = { 4, 4, 1 };
+	vkCmdCopyBufferToImage(cmd, stagingBuffer, ssaoNoiseTarget.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+	TransitionImageLayout(cmd, ssaoNoiseTarget.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+	EndSingleTimeCommands(cmd);
+
+	DestroyBuffer(stagingBuffer, stagingBufferMemory);
 }
 void VulkanRenderer::CreateSSAOBlurResources() {
 	uint32_t width = std::max(1u, swapChainExtent.width / 2);
@@ -1384,44 +1434,6 @@ void VulkanRenderer::CreateSSAOBlurResources() {
 		VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
 		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, ssaoBlurTarget.image, ssaoBlurTarget.memory);
 	ssaoBlurTarget.view = CreateImageView(ssaoBlurTarget.image, VK_FORMAT_R8_UNORM, VK_IMAGE_ASPECT_COLOR_BIT, 1);
-}
-void VulkanRenderer::GenerateSSAOResources() {
-	std::uniform_real_distribution<float> randomFloats(0.0, 1.0);
-	std::default_random_engine generator;
-
-	// 1. Generate 32 Hemisphere Kernel Samples
-	std::vector<glm::vec4> ssaoKernel;
-	for (int i = 0; i < 24; ++i) {
-		glm::vec3 sample(
-			randomFloats(generator) * 2.0f - 1.0f, // x: -1 to 1
-			randomFloats(generator) * 2.0f - 1.0f, // y: -1 to 1
-			randomFloats(generator)                // z:  0 to 1 (hemisphere pointing outwards)
-		);
-		sample = glm::normalize(sample);
-		sample *= randomFloats(generator);
-
-		// Accelerate interpolation: pack more samples closer to the origin
-		float scale = (float)i / 24.0f;
-		scale = glm::mix(0.1f, 1.0f, scale * scale);
-		sample *= scale;
-
-		ssaoKernel.push_back(glm::vec4(sample, 0.0f)); // vec4 for std140 alignment in UBO
-	}
-
-	// 2. Generate 4x4 Noise Texture (Random Rotation Vectors)
-	std::vector<glm::vec4> ssaoNoise;
-	for (int i = 0; i < 16; i++) {
-		glm::vec3 noise(
-			randomFloats(generator) * 2.0f - 1.0f,
-			randomFloats(generator) * 2.0f - 1.0f,
-			0.0f // Rotate around Z axis
-		);
-		ssaoNoise.push_back(glm::vec4(noise, 0.0f));
-	}
-
-	// TODO in Phase 2: 
-	// - Upload ssaoKernel to a new SSAOUBO Vulkan Buffer
-	// - Upload ssaoNoise to a 4x4 VK_FORMAT_R16G16B16A16_SFLOAT Vulkan Texture
 }
 void VulkanRenderer::CreateHZBResources() {
 	uint32_t width = swapChainExtent.width;
@@ -1994,12 +2006,13 @@ void VulkanRenderer::CreateCompositionPipeline() {
 void VulkanRenderer::CreateSSAOPipeline() {
 	VkDescriptorSetLayoutBinding depthBinding{ 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr };
 	VkDescriptorSetLayoutBinding uboBinding{ 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr };
-	VkDescriptorSetLayoutBinding bindings[] = { depthBinding, uboBinding };
+	VkDescriptorSetLayoutBinding noiseBinding{ 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr };
+	VkDescriptorSetLayoutBinding bindings[] = { depthBinding, uboBinding, noiseBinding };
 
-	VkDescriptorSetLayoutCreateInfo layoutInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 2, bindings };
+	VkDescriptorSetLayoutCreateInfo layoutInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 3, bindings };
 	vkCreateDescriptorSetLayout(logicalDevice, &layoutInfo, nullptr, &ssaoDescriptorSetLayout);
 
-	VkDescriptorPoolSize poolSizes[] = { {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1}, {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1} };
+	VkDescriptorPoolSize poolSizes[] = { {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2}, {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1} };
 	VkDescriptorPoolCreateInfo poolInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, nullptr, 0, 1, 2, poolSizes };
 	vkCreateDescriptorPool(logicalDevice, &poolInfo, nullptr, &ssaoDescriptorPool);
 
@@ -2008,11 +2021,13 @@ void VulkanRenderer::CreateSSAOPipeline() {
 
 	VkDescriptorImageInfo depthInfo{ depthTarget.sampler, depthTarget.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
 	VkDescriptorBufferInfo uboInfo{ ssaoUBO, 0, sizeof(SSAOUBO) };
+	VkDescriptorImageInfo noiseInfo{ ssaoNoiseTarget.sampler, ssaoNoiseTarget.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL }; 
 
-	VkWriteDescriptorSet writes[2]{};
+	VkWriteDescriptorSet writes[3]{};
 	writes[0] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, ssaoDescriptorSet, 0, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &depthInfo, nullptr, nullptr };
 	writes[1] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, ssaoDescriptorSet, 1, 0, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &uboInfo, nullptr };
-	vkUpdateDescriptorSets(logicalDevice, 2, writes, 0, nullptr);
+	writes[2] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, ssaoDescriptorSet, 2, 0, 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &noiseInfo, nullptr, nullptr }; // NEW
+	vkUpdateDescriptorSets(logicalDevice, 3, writes, 0, nullptr);
 
 	VkPushConstantRange pcRange{ VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SSAOPushConstants) };
 	VkPipelineLayoutCreateInfo pLayoutInfo{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, nullptr, 0, 1, &ssaoDescriptorSetLayout, 1, &pcRange };
@@ -2572,26 +2587,11 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 		vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, compositionPipeline);
 		vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, compositionPipelineLayout, 0, 1, &compositionDescriptorSet, 0, nullptr);
 
-		if (g_Settings.enableFSR) {
-			FSRConstants fc{};
-			fc.sharpness = 0.35f;
-			fc.enableSSAO = g_Settings.enableSSAO ? 1 : 0;
-			fc.renderScale = activeScale;
-			vkCmdPushConstants(commandBuffer, compositionPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(FSRConstants), &fc);
-		}
-		else if (g_Settings.antiAliasingMode == 2) {
-			// FXAA expects inverse screen dimensions
-			glm::vec2 invScreenSize = glm::vec2(1.0f / swapChainExtent.width, 1.0f / swapChainExtent.height);
-			vkCmdPushConstants(commandBuffer, compositionPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(glm::vec2), &invScreenSize);
-		}
-		else {
-			// Default pass (no FSR, no FXAA)
-			FSRConstants fc{};
-			fc.sharpness = 0.0f;
-			fc.enableSSAO = g_Settings.enableSSAO ? 1 : 0;
-			fc.renderScale = activeScale;
-			vkCmdPushConstants(commandBuffer, compositionPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(FSRConstants), &fc);
-		}
+		FSRConstants fc{};
+		fc.sharpness = g_Settings.enableFSR ? 0.35f : 0.0f;
+		fc.enableSSAO = g_Settings.enableSSAO ? 1 : 0;
+		fc.renderScale = activeScale;
+		vkCmdPushConstants(commandBuffer, compositionPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(FSRConstants), &fc);
 
 		vkCmdDraw(commandBuffer, 3, 1, 0, 0);
 	}
@@ -3051,6 +3051,7 @@ void VulkanRenderer::Cleanup() {
 		if (ssaoDescriptorSetLayout != VK_NULL_HANDLE) { vkDestroyDescriptorSetLayout(logicalDevice, ssaoDescriptorSetLayout, nullptr); ssaoDescriptorSetLayout = VK_NULL_HANDLE; }
 		if (ssaoDescriptorPool != VK_NULL_HANDLE) { vkDestroyDescriptorPool(logicalDevice, ssaoDescriptorPool, nullptr); ssaoDescriptorPool = VK_NULL_HANDLE; }
 		ssaoTarget.Destroy(logicalDevice);
+		ssaoNoiseTarget.Destroy(logicalDevice);
 
 		ssaoPingPongTarget.Destroy(logicalDevice);
 		ssaoBlurTarget.Destroy(logicalDevice);
