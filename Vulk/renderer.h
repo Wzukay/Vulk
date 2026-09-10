@@ -326,6 +326,7 @@ public:
 private:
     glm::vec3 cameraPosition = glm::vec3(0.0f);
     glm::mat4 m_currentViewProj = glm::mat4(1.0f);
+    glm::mat4 m_previousViewProj = glm::mat4(1.0f);
     std::array<FrustumPlane, 6> frustumPlanes;
     void UpdateFrustumPlanes(const glm::mat4& viewProj);
 
@@ -381,8 +382,8 @@ private:
 private:
     BoidRenderer m_boidRenderer;
 public:
-    void AddBoid(int64_t chunkKey, const std::vector<BoidInstance>& initialBoids, uint32_t textureId);
-    void RemoveBoid(int64_t chunkKey);
+    void AddSwarms(int64_t chunkKey, const std::vector<SwarmData>& swarms);
+    void RemoveSwarms(int64_t chunkKey);
 
 private:
     WaterRenderer m_waterRenderer;
@@ -391,6 +392,37 @@ private:
 public:
     void AddWaterChunk(int64_t key, const std::vector<ModelVertex>& vertices, const std::vector<uint32_t>& indices);
     void RemoveWaterChunk(int64_t key);
+
+private:
+    static constexpr uint32_t CLUSTER_GRID_X = 16;
+    static constexpr uint32_t CLUSTER_GRID_Y = 9;
+    static constexpr uint32_t CLUSTER_GRID_Z = 24;
+    static constexpr uint32_t TOTAL_CLUSTERS = CLUSTER_GRID_X * CLUSTER_GRID_Y * CLUSTER_GRID_Z;
+    static constexpr uint32_t MAX_LIGHTS_PER_CLUSTER = 64;
+
+    struct ClusterAABB { glm::vec4 minPoint; glm::vec4 maxPoint; };
+    struct ClusterRecord { uint32_t offset; uint32_t count; };
+
+    VkBuffer m_clusterAABBBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory m_clusterAABBMemory = VK_NULL_HANDLE;
+
+    std::vector<VkBuffer> m_clusterDataBuffers;
+    std::vector<VkDeviceMemory> m_clusterDataMemories;
+    std::vector<void*> m_clusterDataMapped;
+
+    VkDescriptorSetLayout m_clusterSetLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout m_clusterForwardSetLayout = VK_NULL_HANDLE;
+    VkDescriptorPool m_clusterDescriptorPool = VK_NULL_HANDLE;
+
+    VkPipelineLayout m_clusterPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline m_clusterPipeline = VK_NULL_HANDLE;
+
+    std::vector<VkDescriptorSet> m_clusterDescriptorSets;
+    std::vector<VkDescriptorSet> m_clusterForwardSets;
+
+    void CreateClusterResources();
+    void CreateClusterPipelines();
+    void GenerateClusterAABBs();
 
 #ifdef NDEBUG
     const bool enableValidationLayers = false;

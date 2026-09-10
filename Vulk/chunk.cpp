@@ -208,8 +208,11 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
                 renderer.RemoveGrass(resultKey);
             }
 
-            if (!result.boids.empty()) {
-                renderer.AddBoid(resultKey, result.boids, 3);
+            if (!result.swarms.empty()) {
+                renderer.AddSwarms(resultKey, result.swarms);
+            }
+            else {
+                renderer.RemoveSwarms(resultKey);
             }
 
             if (!result.waterVertices.empty()) {
@@ -271,7 +274,7 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
                 RemoveGridCache(it->first);
                 renderer.RemoveTerrainChunk(it->first);
                 renderer.RemoveGrass(it->first);
-                renderer.RemoveBoid(it->first);
+                renderer.RemoveSwarms(it->first);
                 renderer.RemoveWaterChunk(it->first);
                 scene.RemoveChunk(it->first);
                 it = loadedChunks.erase(it);
@@ -657,7 +660,7 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
         outResult.indices.clear();
         outResult.grassInstances.clear();
         outResult.props.clear();
-        outResult.boids.clear();
+        outResult.swarms.clear();
         outResult.physicsGrid = {};
         };
 
@@ -665,7 +668,7 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
     outResult.indices.clear();
     outResult.grassInstances.clear();
     outResult.props.clear();
-    outResult.boids.clear();
+    outResult.swarms.clear();
 
     outResult.vertices.reserve(resolution * resolution + (resolution - 1) * 8);
     outResult.indices.reserve(((resolution - 1) * (resolution - 1) * 6) + ((resolution - 1) * 4 * 6));
@@ -1276,7 +1279,6 @@ void Chunk::GenerateChunkSwarms(int chunkX, int chunkZ, int lod, ChunkJobResult&
     if (def.swarms.empty()) return;
 
     TerrainData data = heightColorFunc(centerWorldX, centerWorldZ);
-
     if (data.waterLevel > 0.0f) return;
 
     uint32_t coordHash = Hash2D(chunkX, chunkZ, s_globalSeed);
@@ -1286,7 +1288,10 @@ void Chunk::GenerateChunkSwarms(int chunkX, int chunkZ, int lod, ChunkJobResult&
         if (data.height < rule.minHeight || data.height > rule.maxHeight) continue;
 
         if (spawnChance < rule.spawnChance) {
-            outResult.boids.reserve(outResult.boids.size() + rule.boidCount);
+            SwarmData swarmData;
+            swarmData.behavior = rule.behavior;
+            swarmData.instances.reserve(rule.boidCount);
+
             for (int i = 0; i < rule.boidCount; i++) {
                 BoidInstance b{};
                 float jitterX = ((coordHash * (i + 1) % 100) / 100.0f) * (rule.spreadRadius * 2) - rule.spreadRadius;
@@ -1296,20 +1301,18 @@ void Chunk::GenerateChunkSwarms(int chunkX, int chunkZ, int lod, ChunkJobResult&
                 float boidZ = centerWorldZ + jitterZ;
 
                 TerrainData boidData = heightColorFunc(boidX, boidZ);
-
                 if (boidData.waterLevel > 0.0f) continue;
 
                 float scaleT = ((coordHash * (i + 7) % 100) / 100.0f);
                 float randomScale = std::lerp(rule.minScale, rule.maxScale, scaleT);
 
                 b.position = glm::vec4(boidX, boidData.height + rule.verticalOffset + (i % 4), boidZ, randomScale);
-
                 float randomTimeOffset = static_cast<float>((coordHash * i) % 1000);
                 b.velocity = glm::vec4(1.0f, 0.0f, 0.0f, randomTimeOffset);
 
-                outResult.boids.push_back(b);
+                swarmData.instances.push_back(b);
             }
-            break;
+            if (!swarmData.instances.empty()) outResult.swarms.push_back(swarmData);
         }
     }
 }

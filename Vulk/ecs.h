@@ -43,6 +43,12 @@ struct TransformComponent {
     void UpdateMatrix(Registry& registry);
 };
 
+struct LightComponent {
+    glm::vec3 color = glm::vec3(1.0f);
+    float intensity = 1.0f;
+    float range = 10.0f;
+};
+
 struct RenderComponent {
     std::string meshName;
     uint32_t albedoTextureId = 0;

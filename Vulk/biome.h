@@ -4,6 +4,8 @@
 #include <vector>
 #include <glm/glm.hpp>
 
+#include "gpu_instances.h"
+
 enum class BiomeType {
     // Hot
     Desert,
@@ -49,6 +51,7 @@ struct SwarmSpawnRule {
     float minScale;
     float maxScale;
     float verticalOffset;
+    BoidBehavior behavior; // <-- Added this
 };
 
 struct BiomeDefinition {

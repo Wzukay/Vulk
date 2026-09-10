@@ -7,39 +7,35 @@
 #include <unordered_set>
 #include <optional>
 #include <string>
+#include <array>
 
 #include "mesh_types.h"
 
 struct UniformBufferObject {
-    alignas(16) glm::mat4 view;              // 64 bytes
-    alignas(16) glm::mat4 proj;              // 64 bytes
+    alignas(16) glm::mat4 view;
+    alignas(16) glm::mat4 proj;
 
-    // Chunk 1: 16 bytes
-    alignas(16) glm::vec3 cameraPos;         // 12 bytes
-    float ambient;                           // 4 bytes
+    alignas(16) glm::vec3 cameraPos;
+    float ambient;
 
-    // Chunk 2: 16 bytes
-    alignas(16) glm::vec4 fadeParams;        // 16 bytes
+    alignas(16) glm::vec4 fadeParams;
 
-    // Chunk 3: 16 bytes
-    alignas(8)  glm::vec2 screenSize;        // 8 bytes
-    float specularPower;                     // 4 bytes
-    uint32_t lightCount;                     // 4 bytes
+    alignas(8)  glm::vec2 screenSize;
+    float specularPower;
+    uint32_t lightCount;
 
-    // Chunk 4: 16 bytes (Explicitly padded to prevent C++ from crushing the struct)
-    float fogStart;                          // 4 bytes
-    float fogEnd;                            // 4 bytes
-    float _pad2[2];                          // 8 bytes of padding
+    float fogStart;
+    float fogEnd;
+    float _pad2[2];
 
-    // Sun Data for Procedural Sky
     alignas(16) glm::vec4 sunDirection;
     alignas(16) glm::vec4 sunColor;
 
-    // Matrices (64 bytes each, alignas(16) guarantees std140 matrix boundaries)
     alignas(16) glm::mat4 inverseViewProj;
     alignas(16) glm::mat4 inverseProj;
     alignas(16) glm::mat4 inverseView;
 };
+
 struct SSAOUBO {
     glm::mat4 projection;
     glm::mat4 inverseProjection;
@@ -48,10 +44,10 @@ struct SSAOUBO {
 };
 
 struct PushConstants {
-    glm::mat4 modelMatrix;      // 64 bytes
-    uint32_t textureId;         // 4 bytes
-    uint32_t normalTextureId;   // 4 bytes
-    uint32_t objectId;          // 4 bytes
+    glm::mat4 modelMatrix;
+    uint32_t textureId;
+    uint32_t normalTextureId;
+    uint32_t objectId;
     float morphBlend;
 };
 
@@ -61,6 +57,7 @@ struct SSAOPushConstants {
     float bias;
     glm::vec2 renderScale;
 };
+
 struct SSAOBlurPushConstants {
     glm::vec2 screenSize;
     glm::vec2 blurDirection;
@@ -68,6 +65,7 @@ struct SSAOBlurPushConstants {
     float spatialSigma;
     glm::vec2 renderScale;
 };
+
 struct FSRConstants {
     glm::vec4 const0;
     glm::vec4 const1;
@@ -82,7 +80,7 @@ struct RenderTarget {
     VkImage image = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkImageView view = VK_NULL_HANDLE;
-    VkSampler sampler = VK_NULL_HANDLE; // leave VK_NULL_HANDLE if this target has no dedicated sampler
+    VkSampler sampler = VK_NULL_HANDLE;
 
     void Destroy(VkDevice device) {
         if (device == VK_NULL_HANDLE) return;
@@ -92,13 +90,15 @@ struct RenderTarget {
         if (memory != VK_NULL_HANDLE) { vkFreeMemory(device, memory, nullptr);      memory = VK_NULL_HANDLE; }
     }
 };
+
 struct DrawEntry {
     uint32_t objectIndex;
-    uint32_t subMeshIndex; // index into globalSubMeshes
+    uint32_t subMeshIndex;
     float distSq;
     int64_t chunkKey = -1;
     float cachedMaxScale = 1.0f;
 };
+
 struct IndirectCommand {
     uint32_t vertexCount;
     uint32_t instanceCount;
@@ -114,6 +114,7 @@ struct QueueFamilyIndices {
         return graphicsFamily.has_value() && presentFamily.has_value();
     }
 };
+
 struct SwapChainSupportDetails {
     VkSurfaceCapabilitiesKHR capabilities = {};
     std::vector<VkSurfaceFormatKHR> formats;
@@ -127,6 +128,7 @@ struct FrustumPlane {
 
 struct FreeSpan { uint32_t offset; uint32_t count; };
 struct SpanReturn { FreeSpan vertexSpan; FreeSpan indexSpan; };
+
 struct TerrainChunkGPU {
     int64_t key = 0;
     glm::vec3 center{ 0.0f };
@@ -141,6 +143,7 @@ struct TerrainChunkGPU {
 
     bool cachedOccluded = false;
 };
+
 struct TerrainChunkGPUData {
     glm::vec4 bounds;
     uint32_t indexCount;
@@ -148,16 +151,16 @@ struct TerrainChunkGPUData {
     uint32_t vertexOffset;
     uint32_t lod;
 };
+
 struct TerrainCullPush {
-    glm::mat4 viewProj;         // 64 bytes
-    glm::vec4 fadeParams;       // 16 bytes
-    glm::vec3 cameraPos;        // 12 bytes
-    float chunkSize;            // 4 bytes
-    glm::vec2 hzbSize;          // 8 bytes
-    float maxMip;               // 4 bytes
-    float transitionWidth;      // 4 bytes
-    uint32_t totalChunks;       // 4 bytes
-    // Total: 116 bytes
+    glm::mat4 viewProj;
+    glm::vec4 fadeParams;
+    glm::vec3 cameraPos;
+    float chunkSize;
+    glm::vec2 hzbSize;
+    float maxMip;
+    float transitionWidth;
+    uint32_t totalChunks;
 };
 
 struct GrassChunkMetadata {
@@ -165,7 +168,7 @@ struct GrassChunkMetadata {
     float radius;
     uint32_t firstInstance;
     uint32_t instanceCount;
-    uint32_t pad[2]; // align to 16 bytes
+    uint32_t pad[2];
 };
 
 struct PropInstance {
@@ -176,6 +179,7 @@ struct PropInstance {
 
     std::string lodGroupName;
 };
+
 struct InstanceData {
     alignas(16) glm::mat4 modelMatrix;
     alignas(16) glm::vec4 customData;
@@ -191,7 +195,6 @@ struct InstanceData {
     static std::array<VkVertexInputAttributeDescription, 5> getAttributeDescriptions() {
         std::array<VkVertexInputAttributeDescription, 5> attributeDescriptions{};
 
-        // Locations 5, 6, 7, 8 for mat4 columns
         for (int i = 0; i < 4; i++) {
             attributeDescriptions[i].binding = 1;
             attributeDescriptions[i].location = 5 + i;
@@ -199,7 +202,6 @@ struct InstanceData {
             attributeDescriptions[i].offset = offsetof(InstanceData, modelMatrix) + sizeof(glm::vec4) * i;
         }
 
-        // Location 9 for customData
         attributeDescriptions[4].binding = 1;
         attributeDescriptions[4].location = 9;
         attributeDescriptions[4].format = VK_FORMAT_R32G32B32A32_SFLOAT;
@@ -218,12 +220,14 @@ struct WaterChunk {
     uint32_t vertexCount = 0;
     uint32_t indexCount = 0;
 };
+
 struct WaterPushConstants {
     glm::vec3 cameraPos;
     float time;
     glm::vec2 renderSize;
     glm::vec2 sceneUvScale;
 };
+
 struct WaterCullPush {
     glm::mat4 viewProj{ 1.0f };
     glm::vec3 cameraPos{ 0.0f };
@@ -231,6 +235,7 @@ struct WaterCullPush {
     uint32_t chunkCount = 0;
     glm::vec3 padding{ 0.0f };
 };
+
 struct WaterChunkGPUData {
     glm::vec4 centerRadius{ 0.0f };
     uint32_t indexCount = 0;
@@ -247,6 +252,7 @@ struct StaticCullPush {
     float _padding;
     glm::vec2 hzbSize;
 };
+
 struct MeshBufferAllocation {
     uint32_t firstIndex;
     int32_t vertexOffset;
@@ -254,15 +260,80 @@ struct MeshBufferAllocation {
     float maxBoundingRadius;
     uint32_t lodCount;
 };
+
 struct alignas(16) StaticInstanceCullData {
     glm::mat4 modelMatrix;
     glm::vec4 worldPositionRadius;
-    glm::uvec4 drawData; // x = indirect-command index, y = output range base
+    glm::uvec4 drawData;
 };
+
 struct StaticIndirectBatch {
     VkDrawIndexedIndirectCommand command{};
     uint32_t outputBase = 0;
     uint32_t sourceCount = 0;
     uint32_t textureId = 0;
     uint32_t normalTextureId = 0;
+};
+
+struct ClusterAABB {
+    glm::vec4 minPoint;
+    glm::vec4 maxPoint;
+};
+
+struct ClusterRecord {
+    uint32_t offset;
+    uint32_t count;
+};
+
+// --- BOID DATA STRUCTURES ---
+
+struct BoidBehavior {
+    float separationRadius = 12.0f;
+    float alignmentRadius = 0.0f;
+    float cohesionRadius = 20.0f;
+    float maxSpeed = 15.0f;
+    float minSpeed = 6.0f;
+    float turnSpeed = 5.0f;
+    float wanderStrength = 2.5f;
+    float driftSpeed = 0.8f;
+    float driftRadius = 150.0f;
+    uint32_t animationType = 0;
+    uint32_t textureId = 0;
+    glm::vec4 color1 = glm::vec4(1.0f);
+    glm::vec4 color2 = glm::vec4(1.0f);
+};
+
+struct BoidInstance {
+    alignas(16) glm::vec4 position;
+    alignas(16) glm::vec4 velocity;
+};
+
+struct SwarmData {
+    std::vector<BoidInstance> instances;
+    BoidBehavior behavior;
+};
+
+struct alignas(16) BoidComputeParams {
+    float deltaTime;
+    uint32_t boidCount;
+    float separationRadius;
+    float alignmentRadius;
+
+    float cohesionRadius;
+    float maxSpeed;
+    float minSpeed;
+    float turnSpeed;
+
+    glm::vec4 centerAndRadius;
+
+    float wanderStrength;
+    uint32_t padding[3];
+};
+
+struct BoidDrawPushConstants {
+    uint32_t textureId;
+    uint32_t animationType;
+    float pad[2];
+    glm::vec4 color1;
+    glm::vec4 color2;
 };

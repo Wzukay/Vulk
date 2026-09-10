@@ -1,33 +1,20 @@
 #version 450
-
-// We use 16x16 thread groups (256 threads per group)
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
-// Binding 0: The previous mip level (or the main depth buffer for mip 0)
-// Because we bind our MAX reduction sampler here, `texture()` automatically returns the maximum of the 2x2 footprint!
 layout(set = 0, binding = 0) uniform sampler2D inDepthMip;
-
-// Binding 1: The current mip level we are writing to
 layout(set = 0, binding = 1, r32f) uniform writeonly image2D outDepthMip;
 
 layout(push_constant) uniform PushConstants {
-    vec2 outSize; // The dimensions of the mip level we are writing to
+    vec2 outSize;
 } push;
 
 void main() {
     ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
-    
-    // Bounds check to prevent writing past the edge of the mip level
-    if (pos.x >= uint(push.outSize.x) || pos.y >= uint(push.outSize.y)) {
-        return;
-    }
+    if (pos.x >= uint(push.outSize.x) || pos.y >= uint(push.outSize.y)) return;
 
-    // Calculate normalized UV coordinates perfectly centered between the 4 source pixels
-    vec2 uv = (vec2(pos) + 0.5) / push.outSize;
+    // Mathematically perfect 2x2 boundary lookup that respects the physical underlying texture size
+    vec2 uv = (vec2(pos) * 2.0 + 1.0) / vec2(textureSize(inDepthMip, 0));
 
-    // Single instruction hardware max reduction!
     float maxDepth = texture(inDepthMip, uv).r;
-
-    // Store the maximum depth into this pixel of the current mip level
     imageStore(outDepthMip, pos, vec4(maxDepth, 0.0, 0.0, 0.0));
 }

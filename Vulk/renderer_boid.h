@@ -5,42 +5,24 @@
 #include <atomic>
 #include <mutex>
 #include <glm/glm.hpp>
+#include "gpu_instances.h"
 
 class VulkanRenderer;
 class RingBufferUploader;
 
-struct BoidInstance {
-    alignas(16) glm::vec4 position; // xyz: position, w: scale
-    alignas(16) glm::vec4 velocity; // xyz: velocity, w: animation time
-};
+static constexpr uint32_t MAX_FRAMES_IN_FLIGHT = 3;
 
 struct BoidGarbage {
-    VkDescriptorSet sets[2];
+    std::vector<VkDescriptorSet> sets;
     uint64_t safeFrame;
-};
-
-struct BoidComputeParams {
-    float deltaTime;
-    uint32_t boidCount;
-    float separationRadius;
-    float alignmentRadius;
-    float cohesionRadius;
-    float maxSpeed;
-    float minSpeed;
-    float turnSpeed;
-    glm::vec4 centerAndRadius;
-    float wanderStrength;
-    float pad[3];
 };
 
 struct BoidSwarmGPU {
     uint32_t boidOffset = 0;
     uint32_t boidCount = 0;
-    uint32_t textureId = 0;
+    BoidBehavior behavior;
     int pingPongIndex = 0;
-
-    VkDescriptorSet computeSets[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
-
+    VkDescriptorSet computeSets[MAX_FRAMES_IN_FLIGHT] = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
     glm::vec3 baseCenter = glm::vec3(0.0f);
     glm::vec3 currentCenter = glm::vec3(0.0f);
     float lifeTime = 0.0f;
@@ -55,14 +37,16 @@ public:
         VkSampleCountFlagBits msaaSamples);
     void Cleanup();
 
-    void AddSwarm(int64_t chunkKey, const std::vector<BoidInstance>& initialBoids, uint32_t textureId);
-    void RemoveSwarm(int64_t chunkKey);
+    void AddSwarms(int64_t chunkKey, const std::vector<SwarmData>& swarms);
+    void RemoveSwarms(int64_t chunkKey);
     void TickCompute(VkCommandBuffer computeCmd, float deltaTime);
     void Draw(VkCommandBuffer drawCmd, VkDescriptorSet sharedDescriptorSet, uint32_t& outDrawCalls);
 
     VkPipeline m_graphicsPipeline = VK_NULL_HANDLE;
 
 private:
+    std::unordered_map<int64_t, std::vector<BoidSwarmGPU>> m_swarms;
+
     RingBufferUploader* m_uploader = nullptr;
     std::unordered_map<int64_t, std::shared_ptr<std::atomic_bool>> m_pendingUploads;
 
@@ -75,14 +59,14 @@ private:
 
     uint32_t AllocateSpace(uint32_t boidCount);
 
+    uint32_t m_framesInFlight = 3;
     uint32_t m_maxBoids = 100000;
-    VkBuffer m_boidBuffers[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
-    VkDeviceMemory m_boidMemories[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE };
+
+    VkBuffer m_boidBuffers[MAX_FRAMES_IN_FLIGHT] = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
+    VkDeviceMemory m_boidMemories[MAX_FRAMES_IN_FLIGHT] = { VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
 
     VkDevice m_device = VK_NULL_HANDLE;
     VulkanRenderer* m_renderer = nullptr;
-
-    std::unordered_map<int64_t, BoidSwarmGPU> m_swarms;
 
     VkPipeline m_computePipeline = VK_NULL_HANDLE;
     VkPipelineLayout m_computePipelineLayout = VK_NULL_HANDLE;

@@ -74,7 +74,7 @@ struct ChunkJobResult {
 
     std::vector<GrassInstance> grassInstances;
     std::vector<PropInstance> props;
-    std::vector<BoidInstance> boids;
+    std::vector<SwarmData> swarms;
 };
 struct ChunkSortItem {
     ChunkCoord coord;

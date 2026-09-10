@@ -10,22 +10,18 @@ extern ControlMode g_CurrentMode;
 
 void GameplayScene::OnEnter() {
     std::cout << "[GameplayScene] Entering scene. Freezing to load assets...\n";
-    // 1. Capture cursor for FPS controls
     glfwSetInputMode(m_ctx.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
-    // 2. Load scene-specific assets
-    g_AssetManager.LoadTextureFromFile("assets/textures/dirt_albedo.dds");
-    g_AssetManager.LoadTextureFromFile("assets/textures/grass_albedo.dds");
-    g_AssetManager.LoadTextureFromFile("assets/textures/rock_albedo.dds");
-    g_AssetManager.LoadTextureFromFile("assets/textures/butterfly_albedo.dds");
+    g_AssetManager.LoadTextureFromFile("assets/textures/butterfly_albedo.dds", "butterfly");
 
     g_AssetManager.LoadMesh("assets/models/tree/tree_lod0.glb");
     g_AssetManager.LoadMesh("assets/models/tree/tree_lod1.glb");
     g_AssetManager.LoadMesh("assets/models/tree/tree_lod2.glb");
     g_AssetManager.LoadMesh("assets/models/tree/tree_lod3.glb");
     g_AssetManager.LoadMesh("assets/models/rock/rock.glb");
+    
+    InitBiomes();
 
-    // 3. Initialize world generation
     m_chunk.Init(*m_ctx.renderer);
     m_chunk.SetRandomSeed();
 
@@ -37,7 +33,6 @@ void GameplayScene::OnEnter() {
     m_ctx.renderer->UpdateUniformBuffer(initialCam);
     m_chunk.Update(initialCam.pos, m_scene, *m_ctx.renderer);
 
-    // 4. Spawn local player entity
     m_playerEntity = m_scene.GetRegistry().CreateEntity();
 
     TransformComponent pTransform;
@@ -51,9 +46,14 @@ void GameplayScene::OnEnter() {
     pPlayer.minSlopeDot = std::cos(glm::radians(pPlayer.maxSlopeAngle));
     m_scene.GetRegistry().AddComponent<PlayerComponent>(m_playerEntity, pPlayer);
 
+    LightComponent pLight;
+    pLight.color = glm::vec3(1.0f, 0.65f, 0.2f); // Warm fire light
+    pLight.intensity = 1.0f;
+    pLight.range = 35.0f;
+    m_scene.GetRegistry().AddComponent<LightComponent>(m_playerEntity, pLight);
+
     m_ctx.renderer->UpdateScene(m_scene);
 }
-
 void GameplayScene::OnExit() {
     // Clean up world resources when quitting back to menu
     m_chunk.Shutdown();
@@ -62,7 +62,6 @@ void GameplayScene::OnExit() {
 }
 
 void GameplayScene::Update(float deltaTime) {
-    // Quick pause toggle check (ESC key)
     static bool escPressedLast = false;
     bool escPressed = glfwGetKey(m_ctx.window, GLFW_KEY_ESCAPE) == GLFW_PRESS;
     if (escPressed && !escPressedLast) {
@@ -91,7 +90,25 @@ void GameplayScene::Update(float deltaTime) {
 
     m_ctx.renderer->UpdateUniformBuffer({ cam.pos, cam.front, cam.up });
     m_chunk.Update(cam.pos, m_scene, *m_ctx.renderer);
-    m_dayNight.Tick(deltaTime, m_scene);
+
+    // --- NEW: Light Aggregation ---
+    m_dayNight.Tick(deltaTime);
+
+    std::vector<Light> activeLights;
+    activeLights.push_back(m_dayNight.sunLight);
+    if (m_dayNight.moonLight.has_value()) {
+        activeLights.push_back(m_dayNight.moonLight.value());
+    }
+
+    auto lightGroup = m_scene.GetRegistry().QueryGroup<TransformComponent, LightComponent>();
+    for (Entity e : lightGroup) {
+        auto& t = m_scene.GetRegistry().GetComponent<TransformComponent>(e);
+        auto& l = m_scene.GetRegistry().GetComponent<LightComponent>(e);
+        // Elevate the light slightly so it isn't clipping through the floor
+        activeLights.push_back(Light::Point(t.position + glm::vec3(0.0f, 2.0f, 0.0f), l.color, l.intensity, l.range));
+    }
+    m_scene.SetLights(activeLights);
+
     m_ctx.renderer->UpdateScene(m_scene);
 }
 

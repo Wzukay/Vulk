@@ -228,6 +228,7 @@
     <None Include="shaders\boid.comp" />
     <None Include="shaders\boid.frag" />
     <None Include="shaders\boid.vert" />
+    <None Include="shaders\cluster_cull.comp" />
     <None Include="shaders\common_structures.glsl" />
     <None Include="shaders\fsr.frag" />
     <None Include="shaders\fxaa.frag" />

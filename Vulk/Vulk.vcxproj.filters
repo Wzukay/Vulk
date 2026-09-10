@@ -322,5 +322,8 @@
     <None Include="shaders\fxaa.frag">
       <Filter>Shaders\Fragment</Filter>
     </None>
+    <None Include="shaders\cluster_cull.comp">
+      <Filter>Shaders\Compute</Filter>
+    </None>
   </ItemGroup>
 </Project>

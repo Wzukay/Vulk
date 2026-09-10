@@ -18,6 +18,14 @@
 
 AssetManager g_AssetManager;
 
+AssetRecord* AssetManager::GetAssetRecord(const std::string& nickname) {
+    auto it = m_assetDirectory.find(nickname);
+    if (it != m_assetDirectory.end()) {
+        return &it->second;
+    }
+    return nullptr;
+}
+
 void AssetManager::CreateDefaultTexture() {
     uint8_t whitePixel[4] = { 255, 255, 255, 255 };
     VkDeviceSize imageSize = 4;
@@ -432,9 +440,10 @@ uint32_t AssetManager::LoadTextureFromMemory(const std::string& virtualName, con
 
     return newId;
 }
-uint32_t AssetManager::LoadTextureFromFile(const std::string& filePath) {
+uint32_t AssetManager::LoadTextureFromFile(const std::string& filePath, const std::string& nickname) {
     auto it = m_textureToId.find(filePath);
     if (it != m_textureToId.end()) {
+        if (!nickname.empty()) m_assetDirectory[nickname] = { nickname, filePath, AssetType::Texture, it->second, nullptr };
         return it->second;
     }
 
@@ -462,13 +471,13 @@ uint32_t AssetManager::LoadTextureFromFile(const std::string& filePath) {
 
     m_textureDirty = true;
 
+    if (!nickname.empty()) m_assetDirectory[nickname] = { nickname, filePath, AssetType::Texture, newId, nullptr };
+
     return newId;
 }
-void AssetManager::LoadTexture(const std::string& path) {
+void AssetManager::LoadTexture(const std::string& path, const std::string& nickname) {
     if (path.empty() || path == "default") return;
-    if (m_textureToId.find(path) != m_textureToId.end()) return;
-    // Load and add to registry automatically via LoadTextureFromFile
-    LoadTextureFromFile(path);
+    LoadTextureFromFile(path, nickname);
 }
 
 Texture* AssetManager::GetTexture(const std::string& path) {
@@ -496,9 +505,10 @@ uint32_t AssetManager::GetTextureId(const std::string& path) {
     return m_textureToId[path];
 }
 
-uint32_t AssetManager::LoadNormalTextureFromFile(const std::string& filePath) {
+uint32_t AssetManager::LoadNormalTextureFromFile(const std::string& filePath, const std::string& nickname) {
     auto it = m_normalTextureToId.find(filePath);
     if (it != m_normalTextureToId.end()) {
+        if (!nickname.empty()) m_assetDirectory[nickname] = { nickname, filePath, AssetType::NormalMap, it->second, nullptr };
         return it->second;
     }
 
@@ -523,15 +533,15 @@ uint32_t AssetManager::LoadNormalTextureFromFile(const std::string& filePath) {
     uint32_t newId = static_cast<uint32_t>(m_normalTextureRegistry.size());
     m_normalTextureRegistry.push_back(std::move(tex));
     m_normalTextureToId[filePath] = newId;
-
     m_textureDirty = true;
+
+    if (!nickname.empty()) m_assetDirectory[nickname] = { nickname, filePath, AssetType::NormalMap, newId, nullptr };
 
     return newId;
 }
-void AssetManager::LoadNormalTexture(const std::string& path) {
+void AssetManager::LoadNormalTexture(const std::string& path, const std::string& nickname) {
     if (path.empty()) return;
-    if (m_normalTextureToId.find(path) != m_normalTextureToId.end()) return;
-    LoadNormalTextureFromFile(path);
+    LoadNormalTextureFromFile(path, nickname);
 }
 Texture* AssetManager::GetNormalTexture(const std::string& path) {
     if (path.empty() || path == "default") {
@@ -557,9 +567,12 @@ uint32_t AssetManager::GetNormalTextureId(const std::string& path) {
     return m_normalTextureToId[path];
 }
 
-uint32_t AssetManager::LoadOrmTextureFromFile(const std::string& filePath) {
+uint32_t AssetManager::LoadOrmTextureFromFile(const std::string& filePath, const std::string& nickname) {
     auto it = m_ormTextureToId.find(filePath);
-    if (it != m_ormTextureToId.end()) return it->second;
+    if (it != m_ormTextureToId.end()) {
+        if (!nickname.empty()) m_assetDirectory[nickname] = { nickname, filePath, AssetType::OrmMap, it->second, nullptr };
+        return it->second;
+    }
 
     std::ifstream checkFile(filePath, std::ios::binary);
     if (!checkFile.is_open()) {
@@ -574,14 +587,15 @@ uint32_t AssetManager::LoadOrmTextureFromFile(const std::string& filePath) {
     uint32_t newId = static_cast<uint32_t>(m_ormTextureRegistry.size());
     m_ormTextureRegistry.push_back(std::move(tex));
     m_ormTextureToId[filePath] = newId;
-
     m_textureDirty = true;
+
+    if (!nickname.empty()) m_assetDirectory[nickname] = { nickname, filePath, AssetType::OrmMap, newId, nullptr };
+
     return newId;
 }
-void AssetManager::LoadOrmTexture(const std::string& path) {
+void AssetManager::LoadOrmTexture(const std::string& path, const std::string& nickname) {
     if (path.empty()) return;
-    if (m_ormTextureToId.find(path) != m_ormTextureToId.end()) return;
-    LoadOrmTextureFromFile(path);
+    LoadOrmTextureFromFile(path, nickname);
 }
 Texture* AssetManager::GetOrmTexture(const std::string& path) {
     if (path.empty() || path == "default") return &m_defaultOrmTexture;
@@ -814,30 +828,29 @@ void AssetManager::TransitionImageLayout(VkImage image, VkFormat format, VkImage
     EndSingleTimeCommands(commandBuffer);
 }
 
-void AssetManager::LoadMesh(const std::string& path) {
-    // 1. Prevent duplicate loading
-    if (m_meshes.find(path) != m_meshes.end()) return;
+void AssetManager::LoadMesh(const std::string& path, const std::string& nickname) {
+    if (m_meshes.find(path) != m_meshes.end()) {
+        if (!nickname.empty()) m_assetDirectory[nickname] = { nickname, path, AssetType::Model, 0, &m_meshes[path] };
+        return;
+    }
 
-    // 2. Route by extension
     if (path.length() > 4) {
         std::string ext = path.substr(path.length() - 4);
-        // Convert to lowercase to handle .GLB or .GLTF safely
         std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 
         if (ext == ".glb" || ext == "gltf") {
-            LoadGLTF(path);
+            LoadGLTF(path, nickname);
             return;
         }
     }
 
-    // 3. Hard failure for non-glTF files
     std::cerr << "\n[AssetManager Error] Unsupported model format!\n"
         << " -> Rejected file: " << path << "\n\n";
 
-    // Register empty dummy mesh to prevent crash and stop infinite reload loops
     m_meshes[path] = MeshAsset{};
+    if (!nickname.empty()) m_assetDirectory[nickname] = { nickname, path, AssetType::Model, 0, &m_meshes[path] };
 }
-void AssetManager::LoadGLTF(const std::string& path) {
+void AssetManager::LoadGLTF(const std::string& path, const std::string& nickname) {
     if (m_meshes.find(path) != m_meshes.end()) return;
 
     cgltf_options options = {};
@@ -1097,8 +1110,11 @@ void AssetManager::LoadGLTF(const std::string& path) {
     }
 
     cgltf_free(data);
-
     m_meshes[path] = std::move(mesh);
+
+    if (!nickname.empty()) {
+        m_assetDirectory[nickname] = { nickname, path, AssetType::Model, 0, &m_meshes[path] };
+    }
 }
 
 void AssetManager::RegisterMesh(
@@ -1280,4 +1296,5 @@ void AssetManager::Cleanup(VkDevice device) {
     m_ormTextureToId.clear();
 
     m_meshes.clear();
+    m_assetDirectory.clear();
 }

@@ -11,9 +11,11 @@ void BoidRenderer::Init(VkDevice device, VulkanRenderer* renderer, RingBufferUpl
     m_device = device;
     m_renderer = renderer;
     m_uploader = uploader;
+    m_framesInFlight = std::min(m_renderer->GetFramesInFlight(), MAX_FRAMES_IN_FLIGHT);
 
     VkDeviceSize bufferSize = m_maxBoids * sizeof(BoidInstance);
-    for (int i = 0; i < 2; i++) {
+
+    for (int i = 0; i < m_framesInFlight; i++) {
         m_renderer->CreateBuffer(bufferSize,
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
@@ -27,7 +29,7 @@ void BoidRenderer::Init(VkDevice device, VulkanRenderer* renderer, RingBufferUpl
 void BoidRenderer::Cleanup() {
     if (m_device == VK_NULL_HANDLE) return;
 
-    for (int i = 0; i < 2; i++) {
+    for (uint32_t i = 0; i < m_framesInFlight; i++) {
         m_renderer->DestroyBuffer(m_boidBuffers[i], m_boidMemories[i]);
     }
 
@@ -40,7 +42,7 @@ void BoidRenderer::Cleanup() {
     m_freeBoidSpans.clear();
 
     for (const auto& gc : m_garbageSets) {
-        vkFreeDescriptorSets(m_device, m_descriptorPool, 2, gc.sets);
+        vkFreeDescriptorSets(m_device, m_descriptorPool, static_cast<uint32_t>(gc.sets.size()), gc.sets.data());
     }
     m_garbageSets.clear();
 
@@ -55,7 +57,7 @@ void BoidRenderer::Cleanup() {
 
 uint32_t BoidRenderer::AllocateSpace(uint32_t boidCount) {
     std::lock_guard<std::mutex> lock(m_allocMutex);
-    uint32_t aligned = (boidCount + 7) & ~7; // Pad to multiple of 8 (256 bytes)
+    uint32_t aligned = (boidCount + 7) & ~7; 
 
     auto it = std::find_if(m_freeBoidSpans.begin(), m_freeBoidSpans.end(),
         [&](const FreeSpan& s) { return s.count >= aligned; });
@@ -72,157 +74,115 @@ uint32_t BoidRenderer::AllocateSpace(uint32_t boidCount) {
     }
 }
 
-void BoidRenderer::AddSwarm(
-    int64_t chunkKey,
-    const std::vector<BoidInstance>& initialBoids,
-    uint32_t textureId)
-{
-    if (initialBoids.empty()) {
-        return;
-    }
+void BoidRenderer::AddSwarms(int64_t chunkKey, const std::vector<SwarmData>& swarmsData) {
+    if (swarmsData.empty()) return;
 
-    // Cancel an upload for an older version of this chunk.
     auto pendingIt = m_pendingUploads.find(chunkKey);
     if (pendingIt != m_pendingUploads.end()) {
         pendingIt->second->store(true, std::memory_order_release);
         m_pendingUploads.erase(pendingIt);
     }
 
-    // Remove an already-visible swarm before replacing it.
     if (m_swarms.find(chunkKey) != m_swarms.end()) {
-        RemoveSwarm(chunkKey);
+        RemoveSwarms(chunkKey);
     }
-
-    const uint32_t boidCount =
-        static_cast<uint32_t>(initialBoids.size());
-    const uint32_t boidOffset = AllocateSpace(boidCount);
-
-    auto swarm = std::make_shared<BoidSwarmGPU>();
-    swarm->boidOffset = boidOffset;
-    swarm->boidCount = boidCount;
-    swarm->textureId = textureId;
-    swarm->pingPongIndex = 0;
-
-    for (const BoidInstance& boid : initialBoids) {
-        swarm->baseCenter += glm::vec3(boid.position);
-    }
-
-    swarm->baseCenter /= static_cast<float>(boidCount);
-    swarm->currentCenter = swarm->baseCenter;
-
-    const VkDeviceSize offsetBytes =
-        static_cast<VkDeviceSize>(boidOffset) * sizeof(BoidInstance);
-    const VkDeviceSize sizeBytes =
-        static_cast<VkDeviceSize>(boidCount) * sizeof(BoidInstance);
-
-    for (int i = 0; i < 2; ++i) {
-        VkDescriptorSetAllocateInfo allocInfo{};
-        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        allocInfo.descriptorPool = m_descriptorPool;
-        allocInfo.descriptorSetCount = 1;
-        allocInfo.pSetLayouts = &m_computeSetLayout;
-
-        if (vkAllocateDescriptorSets(
-            m_device,
-            &allocInfo,
-            &swarm->computeSets[i]) != VK_SUCCESS) {
-            throw std::runtime_error(
-                "Failed to allocate boid compute descriptor set");
-        }
-    }
-
-    VkDescriptorBufferInfo bufferInfo0{};
-    bufferInfo0.buffer = m_boidBuffers[0];
-    bufferInfo0.offset = offsetBytes;
-    bufferInfo0.range = sizeBytes;
-
-    VkDescriptorBufferInfo bufferInfo1{};
-    bufferInfo1.buffer = m_boidBuffers[1];
-    bufferInfo1.offset = offsetBytes;
-    bufferInfo1.range = sizeBytes;
-
-    VkWriteDescriptorSet writes[4]{};
-
-    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[0].dstSet = swarm->computeSets[0];
-    writes[0].dstBinding = 0;
-    writes[0].descriptorCount = 1;
-    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    writes[0].pBufferInfo = &bufferInfo0;
-
-    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[1].dstSet = swarm->computeSets[0];
-    writes[1].dstBinding = 1;
-    writes[1].descriptorCount = 1;
-    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    writes[1].pBufferInfo = &bufferInfo1;
-
-    writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[2].dstSet = swarm->computeSets[1];
-    writes[2].dstBinding = 0;
-    writes[2].descriptorCount = 1;
-    writes[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    writes[2].pBufferInfo = &bufferInfo1;
-
-    writes[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[3].dstSet = swarm->computeSets[1];
-    writes[3].dstBinding = 1;
-    writes[3].descriptorCount = 1;
-    writes[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    writes[3].pBufferInfo = &bufferInfo0;
-
-    vkUpdateDescriptorSets(m_device, 4, writes, 0, nullptr);
 
     auto cancelToken = std::make_shared<std::atomic_bool>(false);
     m_pendingUploads[chunkKey] = cancelToken;
 
-    CopyRegion uploadRegion{};
-    uploadRegion.srcData = initialBoids.data();
-    uploadRegion.size = sizeBytes;
-    uploadRegion.dstBuffer = m_boidBuffers[0];
-    uploadRegion.dstOffset = offsetBytes;
+    std::vector<CopyRegion> allRegions;
+    auto swarmsList = std::make_shared<std::vector<BoidSwarmGPU>>();
 
-    m_uploader->QueueBatchUpload(
-        { uploadRegion },
-        [this, chunkKey, swarm, cancelToken]() {
-            const auto activeIt = m_pendingUploads.find(chunkKey);
+    for (const auto& swarm : swarmsData) {
+        if (swarm.instances.empty()) continue;
 
-            // Do not let an old callback erase a newer upload's token.
-            const bool isCurrent =
-                activeIt != m_pendingUploads.end() &&
-                activeIt->second == cancelToken;
+        const uint32_t boidCount = static_cast<uint32_t>(swarm.instances.size());
+        const uint32_t boidOffset = AllocateSpace(boidCount);
 
-            if (isCurrent) {
-                m_pendingUploads.erase(activeIt);
+        BoidSwarmGPU gpuSwarm{};
+        gpuSwarm.boidOffset = boidOffset;
+        gpuSwarm.boidCount = boidCount;
+        gpuSwarm.behavior = swarm.behavior;
+        gpuSwarm.pingPongIndex = 0;
+
+        for (const auto& b : swarm.instances) gpuSwarm.baseCenter += glm::vec3(b.position);
+        gpuSwarm.baseCenter /= static_cast<float>(boidCount);
+        gpuSwarm.currentCenter = gpuSwarm.baseCenter;
+
+        const VkDeviceSize offsetBytes = static_cast<VkDeviceSize>(boidOffset) * sizeof(BoidInstance);
+        const VkDeviceSize sizeBytes = static_cast<VkDeviceSize>(boidCount) * sizeof(BoidInstance);
+
+        for (uint32_t i = 0; i < m_framesInFlight; ++i) {
+            VkDescriptorSetAllocateInfo allocInfo{};
+            allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            allocInfo.descriptorPool = m_descriptorPool;
+            allocInfo.descriptorSetCount = 1;
+            allocInfo.pSetLayouts = &m_computeSetLayout;
+
+            if (vkAllocateDescriptorSets(m_device, &allocInfo, &gpuSwarm.computeSets[i]) != VK_SUCCESS)
+                throw std::runtime_error("Failed to allocate boid compute descriptor set");
+
+            uint32_t readIdx = i;
+            uint32_t writeIdx = (i + 1) % m_framesInFlight;
+
+            VkDescriptorBufferInfo bRead{};
+            bRead.buffer = m_boidBuffers[readIdx];
+            bRead.offset = offsetBytes;
+            bRead.range = sizeBytes;
+
+            VkDescriptorBufferInfo bWrite{};
+            bWrite.buffer = m_boidBuffers[writeIdx];
+            bWrite.offset = offsetBytes;
+            bWrite.range = sizeBytes;
+
+            VkWriteDescriptorSet writes[2]{};
+            writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[0].dstSet = gpuSwarm.computeSets[i];
+            writes[0].dstBinding = 0;
+            writes[0].descriptorCount = 1;
+            writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[0].pBufferInfo = &bRead;
+
+            writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[1].dstSet = gpuSwarm.computeSets[i];
+            writes[1].dstBinding = 1;
+            writes[1].descriptorCount = 1;
+            writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[1].pBufferInfo = &bWrite;
+
+            vkUpdateDescriptorSets(m_device, 2, writes, 0, nullptr);
+        }
+
+        swarmsList->push_back(gpuSwarm);
+
+        CopyRegion r{};
+        r.srcData = swarm.instances.data();
+        r.size = sizeBytes;
+        r.dstBuffer = m_boidBuffers[0];
+        r.dstOffset = offsetBytes;
+        allRegions.push_back(r);
+    }
+
+    if (allRegions.empty()) return;
+
+    m_uploader->QueueBatchUpload(allRegions, [this, chunkKey, swarmsList, cancelToken]() {
+        const auto activeIt = m_pendingUploads.find(chunkKey);
+        const bool isCurrent = (activeIt != m_pendingUploads.end() && activeIt->second == cancelToken);
+        if (isCurrent) m_pendingUploads.erase(activeIt);
+
+        if (!isCurrent || cancelToken->load(std::memory_order_acquire)) {
+            std::lock_guard<std::mutex> lock(m_allocMutex);
+            for (auto& s : *swarmsList) {
+                m_freeBoidSpans.push_back({ s.boidOffset, (s.boidCount + 7u) & ~7u });
+                vkFreeDescriptorSets(m_device, m_descriptorPool, m_framesInFlight, s.computeSets);
             }
-
-            if (!isCurrent ||
-                cancelToken->load(std::memory_order_acquire)) {
-                const uint32_t aligned =
-                    (swarm->boidCount + 7u) & ~7u;
-
-                {
-                    std::lock_guard<std::mutex> lock(m_allocMutex);
-                    m_freeBoidSpans.push_back({
-                        swarm->boidOffset,
-                        aligned
-                        });
-                }
-
-                vkFreeDescriptorSets(
-                    m_device,
-                    m_descriptorPool,
-                    2,
-                    swarm->computeSets);
-
-                return;
-            }
-
-            m_swarms[chunkKey] = *swarm;
+            return;
+        }
+        m_swarms[chunkKey] = *swarmsList;
         });
 }
 
-void BoidRenderer::RemoveSwarm(int64_t chunkKey) {
+void BoidRenderer::RemoveSwarms(int64_t chunkKey) {
     auto pendingIt = m_pendingUploads.find(chunkKey);
     if (pendingIt != m_pendingUploads.end()) {
         pendingIt->second->store(true, std::memory_order_release);
@@ -230,27 +190,21 @@ void BoidRenderer::RemoveSwarm(int64_t chunkKey) {
     }
 
     auto it = m_swarms.find(chunkKey);
-    if (it == m_swarms.end()) {
-        return;
-    }
-
-    const uint32_t aligned =
-        (it->second.boidCount + 7u) & ~7u;
-
-    {
-        std::lock_guard<std::mutex> lock(m_allocMutex);
-        m_freeBoidSpans.push_back({
-            it->second.boidOffset,
-            aligned
-            });
-    }
+    if (it == m_swarms.end()) return;
 
     BoidGarbage garbage{};
-    garbage.sets[0] = it->second.computeSets[0];
-    garbage.sets[1] = it->second.computeSets[1];
     garbage.safeFrame = m_renderer->GetFrameCounter() + m_renderer->GetFramesInFlight();
 
-    m_garbageSets.push_back(garbage);
+    std::lock_guard<std::mutex> lock(m_allocMutex);
+    for (auto& s : it->second) {
+        m_freeBoidSpans.push_back({ s.boidOffset, (s.boidCount + 7u) & ~7u });
+
+        for (uint32_t i = 0; i < m_framesInFlight; ++i) {
+            garbage.sets.push_back(s.computeSets[i]);
+        }
+    }
+
+    if (!garbage.sets.empty()) m_garbageSets.push_back(garbage);
     m_swarms.erase(it);
 }
 
@@ -258,7 +212,7 @@ void BoidRenderer::TickCompute(VkCommandBuffer computeCmd, float deltaTime) {
     uint64_t currentFrame = m_renderer->GetFrameCounter();
     for (auto it = m_garbageSets.begin(); it != m_garbageSets.end(); ) {
         if (currentFrame >= it->safeFrame) {
-            vkFreeDescriptorSets(m_device, m_descriptorPool, 2, it->sets);
+            vkFreeDescriptorSets(m_device, m_descriptorPool, static_cast<uint32_t>(it->sets.size()), it->sets.data());
             it = m_garbageSets.erase(it);
         }
         else {
@@ -268,35 +222,40 @@ void BoidRenderer::TickCompute(VkCommandBuffer computeCmd, float deltaTime) {
 
     if (m_swarms.empty()) return;
 
+    VkMemoryBarrier computeWaitBarrier{};
+    computeWaitBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    computeWaitBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    computeWaitBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(computeCmd,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0, 1, &computeWaitBarrier, 0, nullptr, 0, nullptr);
+
     vkCmdBindPipeline(computeCmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_computePipeline);
 
-    // Apply Fix 5: Hoist static parameters outside the loop
-    BoidComputeParams basePc{};
-    basePc.deltaTime = deltaTime;
-    basePc.separationRadius = 12.0f;
-    basePc.alignmentRadius = 0.0f;
-    basePc.cohesionRadius = 20.0f;
-    basePc.maxSpeed = 15.0f;
-    basePc.minSpeed = 6.0f;
-    basePc.turnSpeed = 5.0f;
-    basePc.wanderStrength = 2.5f;
+    for (auto& [key, swarmList] : m_swarms) {
+        for (auto& swarm : swarmList) {
+            vkCmdBindDescriptorSets(computeCmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_computePipelineLayout, 0, 1, &swarm.computeSets[swarm.pingPongIndex], 0, nullptr);
 
-    for (auto& [key, swarm] : m_swarms) {
-        vkCmdBindDescriptorSets(computeCmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_computePipelineLayout, 0, 1, &swarm.computeSets[swarm.pingPongIndex], 0, nullptr);
+            swarm.lifeTime += deltaTime;
+            swarm.currentCenter.x = swarm.baseCenter.x + sin(swarm.lifeTime * swarm.behavior.driftSpeed) * swarm.behavior.driftRadius;
+            swarm.currentCenter.z = swarm.baseCenter.z + cos(swarm.lifeTime * swarm.behavior.driftSpeed * 0.8f) * swarm.behavior.driftRadius;
 
-        swarm.lifeTime += deltaTime;
-        float driftSpeed = 0.8f;
-        float driftRadius = 150.0f;
-        swarm.currentCenter.x = swarm.baseCenter.x + sin(swarm.lifeTime * driftSpeed) * driftRadius;
-        swarm.currentCenter.z = swarm.baseCenter.z + cos(swarm.lifeTime * driftSpeed * 0.8f) * driftRadius;
+            BoidComputeParams pc{};
+            pc.deltaTime = deltaTime;
+            pc.boidCount = swarm.boidCount;
+            pc.separationRadius = swarm.behavior.separationRadius;
+            pc.alignmentRadius = swarm.behavior.alignmentRadius;
+            pc.cohesionRadius = swarm.behavior.cohesionRadius;
+            pc.maxSpeed = swarm.behavior.maxSpeed;
+            pc.minSpeed = swarm.behavior.minSpeed;
+            pc.turnSpeed = swarm.behavior.turnSpeed;
+            pc.centerAndRadius = glm::vec4(swarm.currentCenter.x, swarm.currentCenter.y, swarm.currentCenter.z, 60.0f);
+            pc.wanderStrength = swarm.behavior.wanderStrength;
 
-        basePc.boidCount = swarm.boidCount;
-        basePc.centerAndRadius = glm::vec4(swarm.currentCenter, 60.0f);
-
-        vkCmdPushConstants(computeCmd, m_computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(BoidComputeParams), &basePc);
-
-        uint32_t groupCount = (swarm.boidCount + 255) / 256;
-        vkCmdDispatch(computeCmd, groupCount, 1, 1);
+            vkCmdPushConstants(computeCmd, m_computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(BoidComputeParams), &pc);
+            vkCmdDispatch(computeCmd, (swarm.boidCount + 255) / 256, 1, 1);
+        }
     }
 
     VkMemoryBarrier barrier{};
@@ -305,8 +264,9 @@ void BoidRenderer::TickCompute(VkCommandBuffer computeCmd, float deltaTime) {
     barrier.dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
     vkCmdPipelineBarrier(computeCmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
 
-    for (auto& [key, swarm] : m_swarms) {
-        swarm.pingPongIndex = 1 - swarm.pingPongIndex;
+    for (auto& [key, swarmList] : m_swarms) {
+        for (auto& swarm : swarmList) 
+            swarm.pingPongIndex = (swarm.pingPongIndex + 1) % m_framesInFlight;
     }
 }
 
@@ -316,42 +276,90 @@ void BoidRenderer::Draw(VkCommandBuffer drawCmd, VkDescriptorSet sharedDescripto
     vkCmdBindPipeline(drawCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_graphicsPipeline);
     vkCmdBindDescriptorSets(drawCmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_graphicsPipelineLayout, 0, 1, &sharedDescriptorSet, 0, nullptr);
 
-    for (const auto& [key, swarm] : m_swarms) {
-        VkBuffer buffers[] = { m_boidBuffers[swarm.pingPongIndex] };
-        VkDeviceSize offsets[] = { swarm.boidOffset * sizeof(BoidInstance) };
-        vkCmdBindVertexBuffers(drawCmd, 0, 1, buffers, offsets);
+    for (const auto& [key, swarmList] : m_swarms) {
+        for (const auto& swarm : swarmList) {
+            VkBuffer buffers[] = { m_boidBuffers[swarm.pingPongIndex] };
+            VkDeviceSize offsets[] = { swarm.boidOffset * sizeof(BoidInstance) };
+            vkCmdBindVertexBuffers(drawCmd, 0, 1, buffers, offsets);
 
-        vkCmdPushConstants(drawCmd, m_graphicsPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(uint32_t), &swarm.textureId);
-        vkCmdDraw(drawCmd, 6, swarm.boidCount, 0, 0);
-        outDrawCalls++;
+            BoidDrawPushConstants pc{};
+            pc.textureId = swarm.behavior.textureId;
+            pc.animationType = swarm.behavior.animationType;
+            pc.color1 = swarm.behavior.color1;
+            pc.color2 = swarm.behavior.color2;
+
+            vkCmdPushConstants(drawCmd, m_graphicsPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(BoidDrawPushConstants), &pc);
+            vkCmdDraw(drawCmd, 6, swarm.boidCount, 0, 0);
+            outDrawCalls++;
+        }
     }
 }
 
 void BoidRenderer::CreateComputePipeline() {
-    VkDescriptorSetLayoutBinding readBinding{ 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
-    VkDescriptorSetLayoutBinding writeBinding{ 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+    VkDescriptorSetLayoutBinding readBinding{};
+    readBinding.binding = 0;
+    readBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    readBinding.descriptorCount = 1;
+    readBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    VkDescriptorSetLayoutBinding writeBinding{};
+    writeBinding.binding = 1;
+    writeBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writeBinding.descriptorCount = 1;
+    writeBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
     VkDescriptorSetLayoutBinding bindings[] = { readBinding, writeBinding };
 
-    VkDescriptorSetLayoutCreateInfo layoutInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, nullptr, 0, 2, bindings };
+    VkDescriptorSetLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutInfo.bindingCount = 2;
+    layoutInfo.pBindings = bindings;
     if (vkCreateDescriptorSetLayout(m_device, &layoutInfo, nullptr, &m_computeSetLayout) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create boid compute layout");
     }
 
-    VkDescriptorPoolSize poolSize{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2000 };
-    VkDescriptorPoolCreateInfo poolInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, nullptr, VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, 1000, 1, &poolSize };
+    VkDescriptorPoolSize poolSize{};
+    poolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    poolSize.descriptorCount = 2000;
+
+    VkDescriptorPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    poolInfo.maxSets = 1000;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = &poolSize;
+
     if (vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_descriptorPool) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create boid descriptor pool");
     }
 
-    VkPushConstantRange pushRange{ VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(BoidComputeParams) };
-    VkPipelineLayoutCreateInfo pLayoutInfo{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, nullptr, 0, 1, &m_computeSetLayout, 1, &pushRange };
+    VkPushConstantRange pushRange{};
+    pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pushRange.size = sizeof(BoidComputeParams);
+    pushRange.offset = 0;
+
+    VkPipelineLayoutCreateInfo pLayoutInfo{};
+    pLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pLayoutInfo.setLayoutCount = 1;
+    pLayoutInfo.pSetLayouts = &m_computeSetLayout;
+    pLayoutInfo.pushConstantRangeCount = 1;
+    pLayoutInfo.pPushConstantRanges = &pushRange;
     vkCreatePipelineLayout(m_device, &pLayoutInfo, nullptr, &m_computePipelineLayout);
 
     auto compCode = VulkanRenderer::ReadFile("shaders/boid.spv");
     VkShaderModule compModule = VulkanRenderer::CreateShaderModule(m_device, compCode);
 
-    VkPipelineShaderStageCreateInfo stageInfo{ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, compModule, "main" };
-    VkComputePipelineCreateInfo pipelineInfo{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, nullptr, 0, stageInfo, m_computePipelineLayout, VK_NULL_HANDLE, 0 };
+    VkPipelineShaderStageCreateInfo stageInfo{};
+    stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    stageInfo.module = compModule;
+    stageInfo.pName = "main";
+
+    VkComputePipelineCreateInfo pipelineInfo{};
+    pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    pipelineInfo.stage = stageInfo;
+    pipelineInfo.layout = m_computePipelineLayout;
+
     vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_computePipeline);
 
     vkDestroyShaderModule(m_device, compModule, nullptr);
@@ -365,8 +373,14 @@ void BoidRenderer::CreateGraphicsPipeline(VkFormat colorFormat, VkFormat depthFo
     VkShaderModule fragModule = VulkanRenderer::CreateShaderModule(m_device, fragCode);
 
     VkPipelineShaderStageCreateInfo stages[2]{};
-    stages[0] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, vertModule, "main" };
-    stages[1] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fragModule, "main" };
+    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = vertModule;
+    stages[0].pName = "main";
+    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = fragModule;
+    stages[1].pName = "main";
 
     VkVertexInputBindingDescription bindingDesc{};
     bindingDesc.binding = 0;
@@ -374,35 +388,108 @@ void BoidRenderer::CreateGraphicsPipeline(VkFormat colorFormat, VkFormat depthFo
     bindingDesc.inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
 
     std::array<VkVertexInputAttributeDescription, 2> attribs{};
-    attribs[0] = { 0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(BoidInstance, position) };
-    attribs[1] = { 1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(BoidInstance, velocity) };
+    attribs[0].location = 0;
+    attribs[0].binding = 0;
+    attribs[0].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    attribs[0].offset = offsetof(BoidInstance, position);
 
-    VkPipelineVertexInputStateCreateInfo vertexInput{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+    attribs[1].location = 1;
+    attribs[1].binding = 0;
+    attribs[1].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    attribs[1].offset = offsetof(BoidInstance, velocity);
+
+    VkPipelineVertexInputStateCreateInfo vertexInput{};
+    vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     vertexInput.vertexBindingDescriptionCount = 1;
     vertexInput.pVertexBindingDescriptions = &bindingDesc;
     vertexInput.vertexAttributeDescriptionCount = static_cast<uint32_t>(attribs.size());
     vertexInput.pVertexAttributeDescriptions = attribs.data();
 
-    VkPipelineInputAssemblyStateCreateInfo inputAssembly{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, nullptr, 0, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, VK_FALSE };
-    VkPipelineViewportStateCreateInfo viewportState{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, nullptr, 0, 1, nullptr, 1, nullptr };
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+    inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    inputAssembly.primitiveRestartEnable = VK_FALSE;
 
-    VkPipelineRasterizationStateCreateInfo rasterizer{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, nullptr, 0, VK_FALSE, VK_FALSE, VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE, VK_FRONT_FACE_COUNTER_CLOCKWISE, VK_FALSE, 0, 0, 0, 1.0f };
-    VkPipelineMultisampleStateCreateInfo multisample{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, nullptr, 0, msaaSamples, VK_FALSE, 1.0f, nullptr, VK_FALSE, VK_FALSE };
-    VkPipelineDepthStencilStateCreateInfo depthStencil{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO, nullptr, 0, VK_TRUE, VK_TRUE, VK_COMPARE_OP_LESS, VK_FALSE, VK_FALSE };
+    VkPipelineViewportStateCreateInfo viewportState{};
+    viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewportState.viewportCount = 1;
+    viewportState.scissorCount = 1;
 
-    VkPipelineColorBlendAttachmentState blendAttachment{ VK_FALSE, VK_BLEND_FACTOR_ZERO, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD, VK_BLEND_FACTOR_ZERO, VK_BLEND_FACTOR_ZERO, VK_BLEND_OP_ADD, 0xF };
-    VkPipelineColorBlendStateCreateInfo colorBlending{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, nullptr, 0, VK_FALSE, VK_LOGIC_OP_COPY, 1, &blendAttachment };
+    VkPipelineRasterizationStateCreateInfo rasterizer{};
+    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer.cullMode = VK_CULL_MODE_NONE;
+    rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rasterizer.lineWidth = 1.0f;
+
+    VkPipelineMultisampleStateCreateInfo multisample{};
+    multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisample.rasterizationSamples = msaaSamples;
+    multisample.sampleShadingEnable = VK_FALSE;
+
+    // FIX: Transparent particles should NOT write to the depth buffer!
+    VkPipelineDepthStencilStateCreateInfo depthStencil{};
+    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStencil.depthTestEnable = VK_TRUE;
+    depthStencil.depthWriteEnable = VK_FALSE;
+    depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+
+    // FIX: Enable Alpha Blending!
+    VkPipelineColorBlendAttachmentState blendAttachment{};
+    blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    blendAttachment.blendEnable = VK_TRUE;
+    blendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    blendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    blendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+    blendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    blendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+    blendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+
+    VkPipelineColorBlendStateCreateInfo colorBlending{};
+    colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    colorBlending.attachmentCount = 1;
+    colorBlending.pAttachments = &blendAttachment;
 
     VkDynamicState dynamicStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
-    VkPipelineDynamicStateCreateInfo dynamicState{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, nullptr, 0, 2, dynamicStates };
+    VkPipelineDynamicStateCreateInfo dynamicState{};
+    dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamicState.dynamicStateCount = 2;
+    dynamicState.pDynamicStates = dynamicStates;
 
-    VkPushConstantRange pushRange{ VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(uint32_t) };
-    VkPipelineLayoutCreateInfo layoutInfo{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, nullptr, 0, 1, &sharedSetLayout, 1, &pushRange };
+    VkPushConstantRange pushRange{};
+    pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    pushRange.size = sizeof(BoidDrawPushConstants);
+    pushRange.offset = 0;
+
+    VkPipelineLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layoutInfo.setLayoutCount = 1;
+    layoutInfo.pSetLayouts = &sharedSetLayout;
+    layoutInfo.pushConstantRangeCount = 1;
+    layoutInfo.pPushConstantRanges = &pushRange;
     vkCreatePipelineLayout(m_device, &layoutInfo, nullptr, &m_graphicsPipelineLayout);
 
-    VkPipelineRenderingCreateInfo pipelineRenderingCreateInfo{ VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, nullptr, 0, 1, &colorFormat, depthFormat };
+    VkPipelineRenderingCreateInfo pipelineRenderingCreateInfo{};
+    pipelineRenderingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    pipelineRenderingCreateInfo.colorAttachmentCount = 1;
+    pipelineRenderingCreateInfo.pColorAttachmentFormats = &colorFormat;
+    pipelineRenderingCreateInfo.depthAttachmentFormat = depthFormat;
 
-    VkGraphicsPipelineCreateInfo pipelineInfo{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, &pipelineRenderingCreateInfo, 0, 2, stages, &vertexInput, &inputAssembly, nullptr, &viewportState, &rasterizer, &multisample, &depthStencil, &colorBlending, &dynamicState, m_graphicsPipelineLayout, VK_NULL_HANDLE, 0, VK_NULL_HANDLE, -1 };
+    VkGraphicsPipelineCreateInfo pipelineInfo{};
+    pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipelineInfo.pNext = &pipelineRenderingCreateInfo;
+    pipelineInfo.stageCount = 2;
+    pipelineInfo.pStages = stages;
+    pipelineInfo.pVertexInputState = &vertexInput;
+    pipelineInfo.pInputAssemblyState = &inputAssembly;
+    pipelineInfo.pViewportState = &viewportState;
+    pipelineInfo.pRasterizationState = &rasterizer;
+    pipelineInfo.pMultisampleState = &multisample;
+    pipelineInfo.pDepthStencilState = &depthStencil;
+    pipelineInfo.pColorBlendState = &colorBlending;
+    pipelineInfo.pDynamicState = &dynamicState;
+    pipelineInfo.layout = m_graphicsPipelineLayout;
+
     vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_graphicsPipeline);
 
     vkDestroyShaderModule(m_device, vertModule, nullptr);

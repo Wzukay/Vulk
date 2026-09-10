@@ -1,0 +1,57 @@
+#version 460
+#include "common_structures.glsl"
+layout(local_size_x = 16, local_size_y = 9, local_size_z = 1) in;
+
+struct Light { vec4 positionOrDir; vec4 color; vec4 params; };
+struct ClusterAABB { vec4 minPoint; vec4 maxPoint; };
+struct ClusterRecord { uint offset; uint count; };
+
+layout(std430, set = 0, binding = 1) readonly buffer LightBuffer { Light lights[]; };
+layout(std430, set = 0, binding = 2) readonly buffer AABBBuffer { ClusterAABB aabbs[]; };
+layout(std430, set = 0, binding = 3) writeonly buffer GridBuffer { ClusterRecord grid[]; };
+layout(std430, set = 0, binding = 4) buffer IndexBuffer { uint globalIndexCount; uint indices[]; };
+
+bool TestSphereAABB(vec3 center, float radius, vec3 aabbMin, vec3 aabbMax) {
+    vec3 closest = clamp(center, aabbMin, aabbMax);
+    vec3 distance = center - closest;
+    return dot(distance, distance) <= (radius * radius);
+}
+
+void main() {
+    uint clusterIdx = gl_GlobalInvocationID.x + 
+                      (gl_GlobalInvocationID.y * 16) + 
+                      (gl_GlobalInvocationID.z * 16 * 9);
+                      
+    ClusterAABB aabb = aabbs[clusterIdx];
+    
+    uint visibleLights[64];
+    uint visibleCount = 0;
+
+    for (uint i = 0; i < ubo.lightCount; ++i) {
+        bool isPointLight = lights[i].positionOrDir.w > 0.5;
+        
+        if (!isPointLight) {
+            // Directional sun light affects everything
+            if (visibleCount < 64) visibleLights[visibleCount++] = i;
+            continue;
+        }
+
+        // Transform point light to View Space
+        vec3 viewPos = (ubo.view * vec4(lights[i].positionOrDir.xyz, 1.0)).xyz;
+        float radius = lights[i].params.x; // Range
+
+        if (TestSphereAABB(viewPos, radius, aabb.minPoint.xyz, aabb.maxPoint.xyz)) {
+            if (visibleCount < 64) visibleLights[visibleCount++] = i;
+        }
+    }
+
+    // Allocate space in the global index list atomically
+    uint offset = atomicAdd(globalIndexCount, visibleCount);
+    
+    grid[clusterIdx].offset = offset;
+    grid[clusterIdx].count = visibleCount;
+
+    for (uint i = 0; i < visibleCount; ++i) {
+        indices[offset + i] = visibleLights[i];
+    }
+}
