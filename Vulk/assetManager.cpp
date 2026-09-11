@@ -26,6 +26,15 @@ AssetRecord* AssetManager::GetAssetRecord(const std::string& nickname) {
     return nullptr;
 }
 
+void AssetManager::LoadSound(const std::string& path, const std::string& nickname) {
+    if (nickname.empty()) return;
+
+    // Register the asset in the central directory so the Audio Engine can find its path
+    if (m_assetDirectory.find(nickname) == m_assetDirectory.end()) {
+        m_assetDirectory[nickname] = { nickname, path, AssetType::Sound, 0, nullptr };
+    }
+}
+
 void AssetManager::CreateDefaultTexture() {
     uint8_t whitePixel[4] = { 255, 255, 255, 255 };
     VkDeviceSize imageSize = 4;

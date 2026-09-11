@@ -103,6 +103,8 @@ public:
     void LoadMesh(const std::string& path, const std::string& nickname = "");
     void LoadGLTF(const std::string& path, const std::string& nickname = "");
 
+    void LoadSound(const std::string& path, const std::string& nickname);
+
     void RegisterMesh(
         const std::string& name,
         std::vector<ModelVertex>&& vertices,   

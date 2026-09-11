@@ -1,48 +1,16 @@
 #include "renderer_skybox.h"
+#include "renderer.h"
 
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
 
-namespace {
-
-    // Small self-contained shader-loading helper so this class doesn't need to
-    // reach back into VulkanRenderer for ReadFile/CreateShaderModule. If more
-    // systems get extracted the same way, this is a natural candidate to move
-    // into a shared shader_utils.h/.cpp used by all of them.
-    std::vector<char> ReadShaderFile(const std::string& filename) {
-        std::ifstream file(filename, std::ios::ate | std::ios::binary);
-        if (!file.is_open()) {
-            throw std::runtime_error("SkyboxRenderer: could not open shader binary: " + filename);
-        }
-        size_t fileSize = (size_t)file.tellg();
-        std::vector<char> buffer(fileSize);
-        file.seekg(0);
-        file.read(buffer.data(), fileSize);
-        file.close();
-        return buffer;
-    }
-
-    VkShaderModule LoadShaderModule(VkDevice device, const std::string& filename) {
-        std::vector<char> code = ReadShaderFile(filename);
-
-        VkShaderModuleCreateInfo createInfo{};
-        createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-        createInfo.codeSize = code.size();
-        createInfo.pCode = reinterpret_cast<const uint32_t*>(code.data());
-
-        VkShaderModule shaderModule;
-        if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
-            throw std::runtime_error("SkyboxRenderer: failed to create shader module: " + filename);
-        }
-        return shaderModule;
-    }
-
-} // namespace
-
 void SkyboxRenderer::Init(VkDevice device, VkFormat colorFormat, VkFormat depthFormat, VkDescriptorSetLayout sharedSetLayout, VkSampleCountFlagBits msaaSamples) {
-    skyboxVertModule = LoadShaderModule(device, "shaders/skybox_vert.spv");
-    skyboxFragModule = LoadShaderModule(device, "shaders/skybox_frag.spv");
+    auto skyboxVertCode = VulkanRenderer::ReadFile("shaders/skybox_vert.spv");
+    skyboxVertModule = VulkanRenderer::CreateShaderModule(device, skyboxVertCode);
+
+    auto skyboxFragCode = VulkanRenderer::ReadFile("shaders/skybox_frag.spv");
+    skyboxFragModule = VulkanRenderer::CreateShaderModule(device, skyboxFragCode);
 
     VkPipelineShaderStageCreateInfo vertStage{};
     vertStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -112,10 +80,17 @@ void SkyboxRenderer::Init(VkDevice device, VkFormat colorFormat, VkFormat depthF
     dynamicState.dynamicStateCount = 2;
     dynamicState.pDynamicStates = dynamicStates;
 
+    VkPushConstantRange pushRange{};
+    pushRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    pushRange.offset = 0;
+    pushRange.size = sizeof(SkyboxPushConstants);
+
     VkPipelineLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     layoutInfo.setLayoutCount = 1;
     layoutInfo.pSetLayouts = &sharedSetLayout;
+    layoutInfo.pushConstantRangeCount = 1;     
+    layoutInfo.pPushConstantRanges = &pushRange;
 
     if (vkCreatePipelineLayout(device, &layoutInfo, nullptr, &skyboxPipelineLayout) != VK_SUCCESS) {
         throw std::runtime_error("Failed to create skybox pipeline layout");
@@ -151,9 +126,6 @@ void SkyboxRenderer::Init(VkDevice device, VkFormat colorFormat, VkFormat depthF
         throw std::runtime_error("Failed to create skybox pipeline");
     }
 }
-void SkyboxRenderer::LoadTexture(const std::string& folder) {
-    
-}
 
 void SkyboxRenderer::UpdateDescriptor(VkDevice device, VkDescriptorSet sharedDescriptorSet) const {
     if (sharedDescriptorSet == VK_NULL_HANDLE) return;
@@ -184,11 +156,12 @@ void SkyboxRenderer::UpdateDescriptor(VkDevice device, VkDescriptorSet sharedDes
     vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
 }
 
-void SkyboxRenderer::Draw(VkCommandBuffer commandBuffer, VkDescriptorSet sharedDescriptorSet) const {
+void SkyboxRenderer::Draw(VkCommandBuffer commandBuffer, VkDescriptorSet sharedDescriptorSet, const SkyboxPushConstants& pc) const {
     if (!IsReady()) return;
-
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, skyboxPipeline);
     vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, skyboxPipelineLayout, 0, 1, &sharedDescriptorSet, 0, nullptr);
+
+    vkCmdPushConstants(commandBuffer, skyboxPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SkyboxPushConstants), &pc);
     vkCmdDraw(commandBuffer, 3, 1, 0, 0);
 }
 

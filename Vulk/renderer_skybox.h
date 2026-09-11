@@ -3,16 +3,19 @@
 #include <vulkan/vulkan_core.h>
 #include <string>
 
+#include "gpu_instances.h"
 #include "asset_manager.h"   
+
+class VulkanRenderer;
 
 class SkyboxRenderer {
 public:
-    // CHANGED: Replaced VkRenderPass with VkFormat colorFormat and depthFormat
     void Init(VkDevice device, VkFormat colorFormat, VkFormat depthFormat, VkDescriptorSetLayout sharedSetLayout, VkSampleCountFlagBits msaaSamples);
 
-    void LoadTexture(const std::string& folder = "assets/skybox/");
     void UpdateDescriptor(VkDevice device, VkDescriptorSet sharedDescriptorSet) const;
-    void Draw(VkCommandBuffer commandBuffer, VkDescriptorSet sharedDescriptorSet) const;
+
+    void Draw(VkCommandBuffer commandBuffer, VkDescriptorSet sharedDescriptorSet, const SkyboxPushConstants& pc) const;
+
     void Cleanup(VkDevice device);
 
     bool IsReady() const { return skyboxPipeline != VK_NULL_HANDLE; }

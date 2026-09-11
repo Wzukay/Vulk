@@ -15,7 +15,7 @@ void BoidRenderer::Init(VkDevice device, VulkanRenderer* renderer, RingBufferUpl
 
     VkDeviceSize bufferSize = m_maxBoids * sizeof(BoidInstance);
 
-    for (int i = 0; i < m_framesInFlight; i++) {
+    for (uint32_t i = 0; i < m_framesInFlight; i++) {
         m_renderer->CreateBuffer(bufferSize,
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,

@@ -8,6 +8,7 @@
 #include "player_system.h"
 #include "day_night.h"
 #include "scene_manager.h"
+#include "audio.h"
 
 #include <chrono>
 #include <thread>

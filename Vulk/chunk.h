@@ -197,4 +197,6 @@ private:
         const std::function<TerrainData(float, float)>& heightColorFunc);
     void GenerateChunkSwarms(int chunkX, int chunkZ, int lod, ChunkJobResult& outResult,
         const std::function<TerrainData(float, float)>& heightColorFunc);
+    void GenerateChunkStructures(int chunkX, int chunkZ, int lod, ChunkJobResult& outResult,
+        const std::function<TerrainData(float, float)>& heightColorFunc);
 };

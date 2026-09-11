@@ -143,7 +143,6 @@ struct TerrainChunkGPU {
 
     bool cachedOccluded = false;
 };
-
 struct TerrainChunkGPUData {
     glm::vec4 bounds;
     uint32_t indexCount;
@@ -151,7 +150,6 @@ struct TerrainChunkGPUData {
     uint32_t vertexOffset;
     uint32_t lod;
 };
-
 struct TerrainCullPush {
     glm::mat4 viewProj;
     glm::vec4 fadeParams;
@@ -220,14 +218,12 @@ struct WaterChunk {
     uint32_t vertexCount = 0;
     uint32_t indexCount = 0;
 };
-
 struct WaterPushConstants {
     glm::vec3 cameraPos;
     float time;
     glm::vec2 renderSize;
     glm::vec2 sceneUvScale;
 };
-
 struct WaterCullPush {
     glm::mat4 viewProj{ 1.0f };
     glm::vec3 cameraPos{ 0.0f };
@@ -235,7 +231,6 @@ struct WaterCullPush {
     uint32_t chunkCount = 0;
     glm::vec3 padding{ 0.0f };
 };
-
 struct WaterChunkGPUData {
     glm::vec4 centerRadius{ 0.0f };
     uint32_t indexCount = 0;
@@ -252,7 +247,6 @@ struct StaticCullPush {
     float _padding;
     glm::vec2 hzbSize;
 };
-
 struct MeshBufferAllocation {
     uint32_t firstIndex;
     int32_t vertexOffset;
@@ -260,13 +254,11 @@ struct MeshBufferAllocation {
     float maxBoundingRadius;
     uint32_t lodCount;
 };
-
 struct alignas(16) StaticInstanceCullData {
     glm::mat4 modelMatrix;
     glm::vec4 worldPositionRadius;
     glm::uvec4 drawData;
 };
-
 struct StaticIndirectBatch {
     VkDrawIndexedIndirectCommand command{};
     uint32_t outputBase = 0;
@@ -279,13 +271,10 @@ struct ClusterAABB {
     glm::vec4 minPoint;
     glm::vec4 maxPoint;
 };
-
 struct ClusterRecord {
     uint32_t offset;
     uint32_t count;
 };
-
-// --- BOID DATA STRUCTURES ---
 
 struct BoidBehavior {
     float separationRadius = 12.0f;
@@ -302,17 +291,14 @@ struct BoidBehavior {
     glm::vec4 color1 = glm::vec4(1.0f);
     glm::vec4 color2 = glm::vec4(1.0f);
 };
-
 struct BoidInstance {
     alignas(16) glm::vec4 position;
     alignas(16) glm::vec4 velocity;
 };
-
 struct SwarmData {
     std::vector<BoidInstance> instances;
     BoidBehavior behavior;
 };
-
 struct alignas(16) BoidComputeParams {
     float deltaTime;
     uint32_t boidCount;
@@ -329,11 +315,26 @@ struct alignas(16) BoidComputeParams {
     float wanderStrength;
     uint32_t padding[3];
 };
-
 struct BoidDrawPushConstants {
     uint32_t textureId;
     uint32_t animationType;
     float pad[2];
     glm::vec4 color1;
     glm::vec4 color2;
+};
+
+struct SkyParams {
+    glm::vec3 zenithColor;
+    glm::vec3 horizonColor;
+    float starFade;
+    float cloudTime;
+    float coverage;
+};
+struct SkyboxPushConstants {
+    float time;
+    float timeScale;
+    float starFade;
+    float coverage;
+    glm::vec4 zenithColor;
+    glm::vec4 horizonColor;
 };

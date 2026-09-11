@@ -306,6 +306,15 @@ public:
 
 private:
     SkyboxRenderer m_skybox;
+    SkyParams m_skyParams;
+public:
+    void SetSkyParams(const glm::vec3& z, const glm::vec3& h, float sf, float ct, float cv) {
+        m_skyParams.zenithColor = z;
+        m_skyParams.horizonColor = h;
+        m_skyParams.starFade = sf;
+        m_skyParams.cloudTime = ct;
+        m_skyParams.coverage = cv;
+    }
 
 private:
     VkRenderPass compositionRenderPass = VK_NULL_HANDLE;

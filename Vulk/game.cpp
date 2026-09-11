@@ -6,6 +6,8 @@ void Game::Init() {
     renderer.Initialize(g_Settings.windowWidth, g_Settings.windowHeight, "Vulk");
     window = renderer.GetWindow();
 
+    g_AudioEngine.Init();
+
     glfwSetWindowUserPointer(window, &input);
     glfwSetCursorPosCallback(window, [](GLFWwindow* window, double xpos, double ypos) {
         ImGui_ImplGlfw_CursorPosCallback(window, xpos, ypos); // Let ImGui see the mouse!

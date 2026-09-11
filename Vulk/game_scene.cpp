@@ -5,12 +5,15 @@
 #include "asset_manager.h"
 #include "input.h"
 #include "imgui.h"
+#include "audio.h"
 
 extern ControlMode g_CurrentMode;
 
 void GameplayScene::OnEnter() {
     std::cout << "[GameplayScene] Entering scene. Freezing to load assets...\n";
     glfwSetInputMode(m_ctx.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+
+    g_AssetManager.LoadSound("assets/sounds/hello.mp3", "hello_sfx");
 
     g_AssetManager.LoadTextureFromFile("assets/textures/butterfly_albedo.dds", "butterfly");
 
@@ -19,7 +22,9 @@ void GameplayScene::OnEnter() {
     g_AssetManager.LoadMesh("assets/models/tree/tree_lod2.glb");
     g_AssetManager.LoadMesh("assets/models/tree/tree_lod3.glb");
     g_AssetManager.LoadMesh("assets/models/rock/rock.glb");
-    
+    g_AssetManager.LoadMesh("assets/models/tent/tent.glb", "tent");
+    g_AssetManager.LoadMesh("assets/models/campfire/campfire.glb", "campfire");
+
     InitBiomes();
 
     m_chunk.Init(*m_ctx.renderer);
@@ -56,6 +61,7 @@ void GameplayScene::OnEnter() {
 }
 void GameplayScene::OnExit() {
     // Clean up world resources when quitting back to menu
+    g_AudioEngine.Cleanup();
     m_chunk.Shutdown();
     m_scene.Clear();
     m_ctx.renderer->ClearHeightCache();
@@ -74,6 +80,10 @@ void GameplayScene::Update(float deltaTime) {
 
     CameraData cam = m_ctx.input->ProcessInput(m_ctx.window);
 
+    g_AudioEngine.Tick();
+
+    g_AudioEngine.UpdateListener(cam.pos, cam.front, cam.up);
+
     auto& transform = m_scene.GetRegistry().GetComponent<TransformComponent>(m_playerEntity);
     auto& physics = m_scene.GetRegistry().GetComponent<PhysicsComponent>(m_playerEntity);
     auto& playerOpt = m_scene.GetRegistry().GetComponent<PlayerComponent>(m_playerEntity);
@@ -91,8 +101,10 @@ void GameplayScene::Update(float deltaTime) {
     m_ctx.renderer->UpdateUniformBuffer({ cam.pos, cam.front, cam.up });
     m_chunk.Update(cam.pos, m_scene, *m_ctx.renderer);
 
-    // --- NEW: Light Aggregation ---
     m_dayNight.Tick(deltaTime);
+
+    m_ctx.renderer->SetSkyParams(m_dayNight.zenithColor, m_dayNight.horizonColor,
+                                m_dayNight.starFade, m_dayNight.cloudTime, m_dayNight.coverage);
 
     std::vector<Light> activeLights;
     activeLights.push_back(m_dayNight.sunLight);

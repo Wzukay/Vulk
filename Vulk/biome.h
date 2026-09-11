@@ -54,6 +54,28 @@ struct SwarmSpawnRule {
     BoidBehavior behavior; // <-- Added this
 };
 
+struct PeripheralProp {
+    std::string lodGroupName;
+    int minCount;
+    int maxCount;
+    float minRadius;
+    float maxRadius;
+    float scaleMin;
+    float scaleMax;
+};
+
+struct StructureTemplate {
+    std::string name;
+    std::string centralLodGroup;
+    float centralScale;
+    std::vector<PeripheralProp> peripherals;
+};
+
+struct StructureSpawnRule {
+    StructureTemplate structure;
+    float spawnChance;
+};
+
 struct BiomeDefinition {
     BiomeType type;
     float heightScale;
@@ -68,6 +90,7 @@ struct BiomeDefinition {
 
     std::vector<PropSpawnRule> props;
     std::vector<SwarmSpawnRule> swarms;
+    std::vector<StructureSpawnRule> structures;
 };
 
 // Global Data Access

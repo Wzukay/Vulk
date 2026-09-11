@@ -1135,6 +1135,7 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
 
     GenerateChunkProps(chunkX, chunkZ, outResult.lod, outResult, GetFastLocalData);
     GenerateChunkSwarms(chunkX, chunkZ, outResult.lod, outResult, GetFastLocalData);
+    GenerateChunkStructures(chunkX, chunkZ, outResult.lod, outResult, GetFastLocalData);
 
     if (outResult.lod == 0) {
         const float GRASS_STEP = 8.0f;
@@ -1313,6 +1314,97 @@ void Chunk::GenerateChunkSwarms(int chunkX, int chunkZ, int lod, ChunkJobResult&
                 swarmData.instances.push_back(b);
             }
             if (!swarmData.instances.empty()) outResult.swarms.push_back(swarmData);
+        }
+    }
+}
+void Chunk::GenerateChunkStructures(int chunkX, int chunkZ, int lod, ChunkJobResult& outResult,
+    const std::function<TerrainData(float, float)>& heightColorFunc) {
+
+    // Only generate structures at LOD 0, 1, or 2
+    if (lod > 2) return;
+
+    float centerWorldX = chunkX * m_chunkSize + (m_chunkSize * 0.5f);
+    float centerWorldZ = chunkZ * m_chunkSize + (m_chunkSize * 0.5f);
+
+    BiomeType biome = GetDominantBiome(centerWorldX, centerWorldZ);
+    const BiomeDefinition& def = GetBiomeDefinition(biome);
+
+    if (def.structures.empty()) return;
+
+    // Deterministic hash for this chunk
+    uint32_t chunkHash = Hash2D(chunkX, chunkZ, s_globalSeed + 9999);
+    float spawnRoll = (chunkHash % 1000) / 1000.0f;
+
+    float cumulativeChance = 0.0f;
+
+    for (const auto& rule : def.structures) {
+        cumulativeChance += rule.spawnChance;
+
+        if (spawnRoll < cumulativeChance) {
+            TerrainData centerData = heightColorFunc(centerWorldX, centerWorldZ);
+            if (centerData.waterLevel > 0.0f) return; // No underwater camps
+
+            std::cout << "[World Gen] " << rule.structure.name << " spawned at X: "
+                << centerWorldX << " Z: " << centerWorldZ << "\n";
+
+            // 1. SPAWN THE CENTRAL PIECE (Campfire)
+            PropInstance centerProp{};
+            centerProp.position = glm::vec3(centerWorldX, centerData.height, centerWorldZ);
+            centerProp.rotation = glm::vec3(0.0f, static_cast<float>(chunkHash % 360), 0.0f);
+            centerProp.scale = glm::vec3(rule.structure.centralScale);
+            centerProp.lodGroupName = rule.structure.centralLodGroup;
+            centerProp.customPayload = 0.0f;
+            outResult.props.push_back(centerProp);
+
+            // 2. SPAWN THE PERIPHERALS (Tents)
+            // Use a separate hash state so we can safely advance it for multiple peripherals
+            uint32_t pHash = Hash2D(chunkX, chunkZ, s_globalSeed + 7777);
+
+            for (const auto& periph : rule.structure.peripherals) {
+                int countRange = periph.maxCount - periph.minCount + 1;
+                int actualCount = periph.minCount + (pHash % countRange);
+
+                // Fast Xorshift to advance the random state
+                pHash ^= pHash << 13; pHash ^= pHash >> 17; pHash ^= pHash << 5;
+
+                for (int i = 0; i < actualCount; i++) {
+                    // Random Angle
+                    float angle = (pHash % 360) * (3.14159f / 180.0f);
+                    pHash ^= pHash << 13; pHash ^= pHash >> 17; pHash ^= pHash << 5;
+
+                    // Random Radius
+                    float rFrac = (pHash % 100) / 100.0f;
+                    pHash ^= pHash << 13; pHash ^= pHash >> 17; pHash ^= pHash << 5;
+                    float radius = std::lerp(periph.minRadius, periph.maxRadius, rFrac);
+
+                    // Calculate World Position
+                    float pX = centerWorldX + cos(angle) * radius;
+                    float pZ = centerWorldZ + sin(angle) * radius;
+
+                    TerrainData pData = heightColorFunc(pX, pZ);
+                    if (pData.waterLevel > 0.0f) continue;
+
+                    // Random Scale
+                    float sFrac = (pHash % 100) / 100.0f;
+                    pHash ^= pHash << 13; pHash ^= pHash >> 17; pHash ^= pHash << 5;
+                    float scale = std::lerp(periph.scaleMin, periph.scaleMax, sFrac);
+
+                    // Calculate Rotation so the "tents" face the "campfire"
+                    float facingAngle = atan2(centerWorldX - pX, centerWorldZ - pZ);
+
+                    PropInstance pProp{};
+                    pProp.position = glm::vec3(pX, pData.height, pZ);
+                    pProp.rotation = glm::vec3(0.0f, glm::degrees(facingAngle), 0.0f);
+                    pProp.scale = glm::vec3(scale);
+                    pProp.lodGroupName = periph.lodGroupName;
+                    pProp.customPayload = 0.0f;
+
+                    outResult.props.push_back(pProp);
+                }
+            }
+
+            // Only spawn one structure per chunk to prevent overlap
+            break;
         }
     }
 }

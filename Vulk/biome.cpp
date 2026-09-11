@@ -24,6 +24,15 @@ const std::vector<std::string> ROCK_MESHES = {
     "assets/models/rock/rock.glb"
 };
 
+const std::vector<std::string> TENT_MESHES = {
+    "assets/models/tent/tent.glb"
+};
+
+const std::vector<std::string> CAMPFIRE_MESHES = {
+    "assets/models/campfire/campfire.glb"
+};
+
+
 // --- BOID BEHAVIOR TEMPLATES ---
 BoidBehavior GetButterflyBehavior() {
     BoidBehavior b;
@@ -49,6 +58,26 @@ BoidBehavior GetFireflyBehavior() {
     return b;
 }
 
+StructureTemplate GetCampStructure() {
+    StructureTemplate camp;
+    camp.name = "Plains Camp";
+    camp.centralLodGroup = "CampfireGroup"; // Dummy for Campfire
+    camp.centralScale = 100.0f;           // Make the "campfire" a bit bigger
+
+    // Define the "Tents" that spawn around the campfire
+    PeripheralProp tent;
+    tent.lodGroupName = "TentGroup";    // Dummy for Tents
+    tent.minCount = 0;
+    tent.maxCount = 5;
+    tent.minRadius = 4.0f;              // Don't spawn inside the fire
+    tent.maxRadius = 12.0f;             // Max distance from the fire
+    tent.scaleMin = 5.0f;
+    tent.scaleMax = 5.0f;
+
+    camp.peripherals.push_back(tent);
+    return camp;
+}
+
 // Texture Weights: X = Dirt/Sand, Y = Grass, Z = Rock/Snow
 static BiomeDefinition G_BIOMES[] = {
 
@@ -67,7 +96,8 @@ static BiomeDefinition G_BIOMES[] = {
         .props = {
             PropSpawnRule{ "RockGroup", 0.01f, 0.8f, NOISE_INDEX_ROCKS, 2.0f, 150.0f, 0.5f, 1.2f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
         },
-        .swarms = {}
+        .swarms = {},
+        .structures = { }
     },
     {
         .type = BiomeType::Savanna,
@@ -82,7 +112,8 @@ static BiomeDefinition G_BIOMES[] = {
             PropSpawnRule{ "TreeGroup", 0.02f, 0.4f, NOISE_INDEX_TREES, 2.0f, 60.0f, 0.08f, 0.12f, TREE_GROUND_OFFSET, CULL_LOD_TREES, false },
             PropSpawnRule{ "RockGroup", 0.02f, 0.6f, NOISE_INDEX_ROCKS, 2.0f, 180.0f, 0.8f, 1.5f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
         },
-        .swarms = { SwarmSpawnRule{ 25, 0.30f, 20.0f, 2.0f, 60.0f, 0.5f, 0.8f, 4.0f, GetButterflyBehavior() } }
+        .swarms = { SwarmSpawnRule{ 25, 0.30f, 20.0f, 2.0f, 60.0f, 0.5f, 0.8f, 4.0f, GetButterflyBehavior() } },
+        .structures = { }
     },
     {
         .type = BiomeType::Jungle,
@@ -96,7 +127,8 @@ static BiomeDefinition G_BIOMES[] = {
         .props = {
             PropSpawnRule{ "TreeGroup", 0.30f, 0.0f, NOISE_INDEX_TREES, 2.0f, 90.0f, 0.06f, 0.25f, TREE_GROUND_OFFSET, CULL_LOD_TREES, false }
         },
-        .swarms = { SwarmSpawnRule{ 60, 0.50f, 10.0f, 2.0f, 90.0f, 0.3f, 0.6f, 8.0f, GetButterflyBehavior() } }
+        .swarms = { SwarmSpawnRule{ 60, 0.50f, 10.0f, 2.0f, 90.0f, 0.3f, 0.6f, 8.0f, GetButterflyBehavior() } },
+        .structures = { }
     },
     {
         .type = BiomeType::Swamp,
@@ -111,7 +143,8 @@ static BiomeDefinition G_BIOMES[] = {
             PropSpawnRule{ "TreeGroup", 0.10f, 0.3f, NOISE_INDEX_TREES, 2.0f, 30.0f, 0.08f, 0.15f, TREE_GROUND_OFFSET, CULL_LOD_TREES, false },
             PropSpawnRule{ "RockGroup", 0.05f, 0.4f, NOISE_INDEX_ROCKS, 2.0f, 40.0f, 1.0f, 2.0f, -0.5f, CULL_LOD_ROCKS, true }
         },
-        .swarms = { SwarmSpawnRule{ 80, 0.80f, 8.0f, 2.0f, 30.0f, 0.2f, 0.4f, 2.0f, GetFireflyBehavior() } }
+        .swarms = { SwarmSpawnRule{ 80, 0.80f, 8.0f, 2.0f, 30.0f, 0.2f, 0.4f, 2.0f, GetFireflyBehavior() } },
+        .structures = { }
     },
 
     // ==========================================
@@ -130,7 +163,8 @@ static BiomeDefinition G_BIOMES[] = {
             PropSpawnRule{ "TreeGroup", 0.08f, 0.5f, NOISE_INDEX_TREES, 2.0f, 80.0f, 0.03f, 0.05f, -0.5f, CULL_LOD_TREES, true },
             PropSpawnRule{ "RockGroup", 0.05f, 0.6f, NOISE_INDEX_ROCKS, 2.0f, 150.0f, 0.5f, 1.0f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
         },
-        .swarms = { SwarmSpawnRule{ 30, 0.30f, 15.0f, 2.0f, 80.0f, 0.5f, 1.0f, 4.0f, GetButterflyBehavior() } }
+        .swarms = { SwarmSpawnRule{ 30, 0.30f, 15.0f, 2.0f, 80.0f, 0.5f, 1.0f, 4.0f, GetButterflyBehavior() } },
+        .structures = { }
     },
     {
         .type = BiomeType::Plains,
@@ -144,7 +178,10 @@ static BiomeDefinition G_BIOMES[] = {
         .props = {
             PropSpawnRule{ "RockGroup", 0.01f, 0.8f, NOISE_INDEX_ROCKS, 2.0f, 180.0f, 0.8f, 1.2f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
         },
-        .swarms = { SwarmSpawnRule{ 46, 0.40f, 15.0f, 2.0f, 80.0f, 0.5f, 1.0f, 4.0f, GetButterflyBehavior() } }
+        .swarms = { SwarmSpawnRule{ 46, 0.40f, 15.0f, 2.0f, 80.0f, 0.5f, 1.0f, 4.0f, GetButterflyBehavior() } },
+        .structures = {
+            StructureSpawnRule{ GetCampStructure(), 0.5f } // 5% chance per Plains chunk
+        }
     },
     {
         .type = BiomeType::Forest,
@@ -159,7 +196,8 @@ static BiomeDefinition G_BIOMES[] = {
             PropSpawnRule{ "TreeGroup", 0.12f, 0.2f, NOISE_INDEX_TREES, 2.0f, 85.0f, 0.08f, 0.14f, TREE_GROUND_OFFSET, CULL_LOD_TREES, false },
             PropSpawnRule{ "RockGroup", 0.05f, 0.5f, NOISE_INDEX_ROCKS, 2.0f, 180.0f, 1.0f, 1.5f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
         },
-        .swarms = { SwarmSpawnRule{ 40, 0.60f, 12.0f, 2.0f, 85.0f, 0.3f, 0.6f, 3.0f, GetFireflyBehavior() } }
+        .swarms = { SwarmSpawnRule{ 40, 0.60f, 12.0f, 2.0f, 85.0f, 0.3f, 0.6f, 3.0f, GetFireflyBehavior() } },
+        .structures = { }
     },
     {
         .type = BiomeType::DeepForest,
@@ -173,7 +211,8 @@ static BiomeDefinition G_BIOMES[] = {
         .props = {
             PropSpawnRule{ "TreeGroup", 0.25f, 0.05f, NOISE_INDEX_TREES, 2.0f, 100.0f, 0.10f, 0.18f, TREE_GROUND_OFFSET, CULL_LOD_TREES, false }
         },
-        .swarms = { SwarmSpawnRule{ 60, 0.80f, 15.0f, 2.0f, 100.0f, 0.3f, 0.6f, 4.0f, GetFireflyBehavior() } }
+        .swarms = { SwarmSpawnRule{ 60, 0.80f, 15.0f, 2.0f, 100.0f, 0.3f, 0.6f, 4.0f, GetFireflyBehavior() } },
+        .structures = { }
     },
 
     // ==========================================
@@ -191,7 +230,8 @@ static BiomeDefinition G_BIOMES[] = {
         .props = {
             PropSpawnRule{ "RockGroup", 0.05f, 0.4f, NOISE_INDEX_ROCKS, 2.0f, 180.0f, 0.5f, 1.0f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
         },
-        .swarms = {}
+        .swarms = {},
+        .structures = { }
     },
     {
         .type = BiomeType::Taiga,
@@ -206,7 +246,8 @@ static BiomeDefinition G_BIOMES[] = {
             PropSpawnRule{ "TreeGroup", 0.15f, 0.2f, NOISE_INDEX_TREES, 2.0f, 100.0f, 0.06f, 0.12f, TREE_GROUND_OFFSET, CULL_LOD_TREES, false },
             PropSpawnRule{ "RockGroup", 0.08f, 0.4f, NOISE_INDEX_ROCKS, 2.0f, 180.0f, 1.0f, 1.5f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
         },
-        .swarms = {}
+        .swarms = {},
+        .structures = { }
     },
     {
         .type = BiomeType::SnowWastes,
@@ -220,7 +261,8 @@ static BiomeDefinition G_BIOMES[] = {
         .props = {
             PropSpawnRule{ "RockGroup", 0.03f, 0.5f, NOISE_INDEX_ROCKS, 2.0f, 200.0f, 1.0f, 2.0f, ROCK_SINK_DEPTH, CULL_LOD_ROCKS, true }
         },
-        .swarms = {}
+        .swarms = {},
+        .structures = { }
     },
     {
         .type = BiomeType::Alpine,
@@ -234,7 +276,8 @@ static BiomeDefinition G_BIOMES[] = {
         .props = {
             PropSpawnRule{ "RockGroup", 0.12f, 0.2f, NOISE_INDEX_ROCKS, 2.0f, 250.0f, 1.5f, 4.0f, -0.5f, CULL_LOD_ROCKS, true }
         },
-        .swarms = {}
+        .swarms = {},
+        .structures = { }
     }
 };
 
@@ -266,6 +309,9 @@ BiomeType DetermineBiome(float temperature, float moisture) {
 void InitBiomes() {
     g_AssetManager.RegisterLodGroup("TreeGroup", TREE_MESHES);
     g_AssetManager.RegisterLodGroup("RockGroup", ROCK_MESHES);
+    g_AssetManager.RegisterLodGroup("TentGroup", TENT_MESHES);
+    g_AssetManager.RegisterLodGroup("CampfireGroup", CAMPFIRE_MESHES);
+    
 
     // Fetch the texture ID safely at runtime
     AssetRecord* record = g_AssetManager.GetAssetRecord("butterfly");

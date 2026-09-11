@@ -375,7 +375,6 @@ void VulkanRenderer::InitVulkan() {
 
 	m_staticMeshRenderer.Init(logicalDevice, this);
 	m_skybox.Init(logicalDevice, swapChainImageFormat, depthFormat, descriptorSetLayout, m_currentMsaaSamples);
-	m_skybox.LoadTexture();
 	m_skybox.UpdateDescriptor(logicalDevice, descriptorSet);
 
 	m_terrainRenderer.Init(logicalDevice, this, &m_uploader, 5'000'000, 10'000'000);
@@ -2534,7 +2533,16 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 			};
 
 		auto f0 = std::async(std::launch::async, [&]() { return recordTask(0, [&](VkCommandBuffer scb) {
-			m_skybox.Draw(scb, descriptorSet);
+			SkyboxPushConstants skyPc{};
+			skyPc.time = static_cast<float>(glfwGetTime());
+			skyPc.timeScale = m_skyParams.cloudTime;
+			skyPc.coverage = m_skyParams.coverage;
+			skyPc.starFade = m_skyParams.starFade;
+			skyPc.zenithColor = glm::vec4(m_skyParams.zenithColor, 1.0f);
+			skyPc.horizonColor = glm::vec4(m_skyParams.horizonColor, 1.0f);
+
+			m_skybox.Draw(scb, descriptorSet, skyPc);
+
 			vkCmdBindDescriptorSets(scb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
 			vkCmdBindDescriptorSets(scb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 1, 1, &m_clusterForwardSets[currentFrame], 0, nullptr);
 			if (staticPipeline != VK_NULL_HANDLE && instancedPipeline != VK_NULL_HANDLE) m_staticMeshRenderer.Draw(scb, pipelineLayout, descriptorSet, cameraPosition, frustumPlanes, static_cast<uint32_t>(currentFrame), staticPipeline, instancedPipeline, dc0, cc0, tv0, ti0);

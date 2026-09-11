@@ -1,82 +1,137 @@
 #version 450
 #include "common_structures.glsl"
 
+layout(push_constant) uniform SkyPush {
+    float time;
+    float timeScale;
+    float starFade;
+    float coverage;
+    vec4 zenithColor;
+    vec4 horizonColor;
+} pc;
+
 layout(location = 0) in vec3 inViewDir;
 layout(location = 0) out vec4 outColor;
 
-float hash(vec3 p) {
-    p = fract(p * 0.3183099 + 0.1);
-    p *= 17.0;
-    return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+vec2 hash(vec2 p) {
+    p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
+    return -1.0 + 2.0 * fract(sin(p) * 43758.5453123);
+}
+
+float noise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(dot(hash(i + vec2(0.0,0.0)), f - vec2(0.0,0.0)), 
+                   dot(hash(i + vec2(1.0,0.0)), f - vec2(1.0,0.0)), u.x),
+               mix(dot(hash(i + vec2(0.0,1.0)), f - vec2(0.0,1.0)), 
+                   dot(hash(i + vec2(1.0,1.0)), f - vec2(1.0,1.0)), u.x), u.y);
+}
+
+float fbm(vec2 uv) {
+    float f = 0.0;
+    float amp = 0.5;
+    float freq = 2.0;
+    
+    for(int i = 0; i < 5; i++) {
+        f += amp * noise(uv * freq);
+        uv = mat2(0.8, -0.6, 0.6, 0.8) * uv; 
+        amp *= 0.5;
+        freq *= 2.0;
+    }
+    return f * 0.5 + 0.5;
 }
 
 void main() {
     vec3 viewDir = normalize(inViewDir);
     vec3 sunDir = normalize(ubo.sunDirection.xyz);
     
-    float height = max(0.0, viewDir.y); 
+    // 1. Take the colors directly from C++
+    vec3 zenithColor = pc.zenithColor.rgb;
+    vec3 horizonColor = pc.horizonColor.rgb;
     
-    // --- 1. STYLIZED 4-PHASE COLOR PALETTES ---
-    vec3 nZ  = vec3(0.002, 0.002, 0.008); 
-    vec3 nH  = vec3(0.005, 0.01, 0.02);
-    
-    vec3 twZ = vec3(0.05, 0.04, 0.14);   // Indigo Twilight Zenith
-    vec3 twH = vec3(0.45, 0.10, 0.25);   // Magenta Twilight Horizon
-    
-    vec3 ssZ = vec3(0.10, 0.25, 0.50);   // Blue Sunrise Zenith
-    vec3 ssH = vec3(1.00, 0.45, 0.10);   // Vibrant Orange Sunrise Horizon
-    
-    vec3 dZ  = vec3(0.05, 0.35, 0.75);   // Azure Day Zenith
-    vec3 dH  = vec3(0.50, 0.75, 0.95);   // Soft Light Blue Day Horizon
-    
-    // Smooth S-Curve blends based on sun height
-    float t = sunDir.y;
-    float b1 = smoothstep(-0.20, -0.05, t); // Night -> Twilight
-    float b2 = smoothstep(-0.05,  0.08, t); // Twilight -> Sunrise
-    float b3 = smoothstep( 0.08,  0.35, t); // Sunrise -> Day
-    
-    vec3 curZ = mix(mix(mix(nZ, twZ, b1), ssZ, b2), dZ, b3);
-    vec3 curH = mix(mix(mix(nH, twH, b1), ssH, b2), dH, b3);
-    
-    // Smooth gradient from horizon to zenith
-    vec3 skyColor = mix(curH, curZ, pow(height, 0.5));
-    
-    // --- 2. STYLIZED SUN ---
-    float sunDot = dot(viewDir, sunDir);
-    // Larger, slightly softer sun disk
-    float sunDisk = smoothstep(0.998, 0.9995, sunDot); 
-    
-    // Rich, painted atmospheric glow
-    float sunGlow = pow(max(0.0, sunDot), 12.0) * 0.4 + pow(max(0.0, sunDot), 64.0) * 0.3;
-    vec3 glowColor = mix(mix(vec3(0.8, 0.1, 0.5), vec3(1.0, 0.4, 0.1), b2), vec3(1.0, 0.9, 0.7), b3);
-    
-    // --- 3. MAGICAL MOON ---
-    vec3 moonDir = -sunDir; 
-    float moonDot = dot(viewDir, moonDir);
-    float moonDisk = smoothstep(0.9985, 0.9995, moonDot);
-    float moonGlow = pow(max(0.0, moonDot), 64.0) * 0.05;
-    vec3 moonColor = vec3(0.65, 0.7, 0.75);
-    
-    // --- 4. STARS ---
-    float starField = 0.0;
-    if (b3 < 0.8 && viewDir.y > 0.0) {
-        float starRand = hash(floor(viewDir * 450.0)); 
-        starField = smoothstep(0.996, 1.0, starRand) * (1.0 - b3);
-        starField *= smoothstep(0.99, 0.96, moonDot); // Dim stars around the moon
+    float horizonMix = clamp(viewDir.y * 4.0, 0.0, 1.0);
+    vec3 skyColor = mix(horizonColor, zenithColor, horizonMix);
+
+    // 2. Stars
+    if (pc.starFade > 0.0 && viewDir.y > 0.0) {
+        // Snap the view vector to a fixed 3D grid so the hash evaluates identically across sub-pixels
+        vec3 starGrid = floor(viewDir * 400.0);
+        
+        // Generate a random number specifically for this grid chunk
+        float starHash = fract(sin(dot(starGrid, vec3(12.9898, 78.233, 54.53))) * 43758.5453);
+        
+        // Only top 0.5% of chunks become a star
+        float star = smoothstep(0.995, 1.0, starHash);
+        
+        // Add a gentle twinkle using the time scale and the star's unique hash
+        float twinkle = 0.8 + 0.2 * sin(pc.time * 2.0 + starHash * 100.0);
+        
+        skyColor += vec3(star * twinkle) * pc.starFade * horizonMix; 
     }
     
-    // --- 5. FOG & GROUND BLEND ---
-    if (viewDir.y < 0.0) {
-        skyColor = mix(curH, curH * 0.2, clamp(-viewDir.y * 5.0, 0.0, 1.0));
+    // 3. Sun
+    float sunDot = max(dot(viewDir, sunDir), 0.0);
+    skyColor += ubo.sunColor.rgb * pow(sunDot, 256.0) * 3.0; 
+    skyColor += ubo.sunColor.rgb * pow(sunDot, 8.0) * 0.4;   
+
+    // 4. Moon
+    vec3 moonDir = -sunDir;
+    float moonDot = max(dot(viewDir, moonDir), 0.0);
+    float moonBlend = smoothstep(0.0, -0.2, sunDir.y);
+    if (moonBlend > 0.0) {
+        vec3 moonColor = vec3(0.55, 0.6, 0.65);
+        skyColor += moonColor * pow(moonDot, 512.0) * 2.5 * moonBlend; 
+        skyColor += moonColor * pow(moonDot, 16.0) * 0.2 * moonBlend;  
     }
-    
-    vec3 finalColor = skyColor 
-                    + (sunDisk * ubo.sunColor.rgb * 1.5) 
-                    + (sunGlow * glowColor * max(0.0, sunDir.y + 0.15))
-                    // Lowered the moon disk multiplier to 1.2
-                    + (moonDisk * moonColor * 1.2)
-                    + (moonGlow * moonColor)
-                    + vec3(max(0.0, starField));
-    
-    outColor = vec4(finalColor, 1.0);
+
+    // 5. Clouds
+    if (viewDir.y > 0.01) {
+        vec2 cloudUV = viewDir.xz / (viewDir.y + 0.15); 
+        cloudUV *= 0.6; 
+        
+        // Using the safe, pre-scaled CPU time
+        vec2 windOffset = vec2(pc.time * 0.015, pc.time * 0.005);
+        
+        float baseDensity = fbm(cloudUV + windOffset);
+        float coverage = pc.coverage; 
+        float density = smoothstep(coverage, coverage + 0.25, baseDensity);
+        
+        if (density > 0.0) {
+            // FIX: Recover the exact C++ twilight blend factor (1.0 = Day, 0.0 = Night)
+            float twilightBlend = 1.0 - pc.starFade; 
+            
+            // 1. Calculate the shadow cast by the Sun
+            float densityTowardSun = fbm(cloudUV + windOffset + sunDir.xz * 0.15);
+            densityTowardSun = smoothstep(coverage, coverage + 0.25, densityTowardSun);
+            float sunShadow = clamp(densityTowardSun - density, 0.0, 1.0);
+            
+            // 2. Calculate the shadow cast by the Moon (Opposite direction)
+            float densityTowardMoon = fbm(cloudUV + windOffset - sunDir.xz * 0.15);
+            densityTowardMoon = smoothstep(coverage, coverage + 0.25, densityTowardMoon);
+            float moonShadow = clamp(densityTowardMoon - density, 0.0, 1.0);
+            
+            // 3. Smoothly crossfade the shadows during sunset/sunrise! No snapping.
+            float shadow = mix(moonShadow, sunShadow, twilightBlend);
+            
+            // Lighting colors
+            vec3 baseCloudWhite = mix(vec3(0.05, 0.05, 0.08), vec3(0.95, 0.98, 1.0), twilightBlend);
+            vec3 cloudLight = mix(baseCloudWhite, ubo.sunColor.rgb, 0.6);
+            
+            float moonBlend = smoothstep(0.0, -0.2, sunDir.y);
+            if (moonBlend > 0.0) {
+                cloudLight += vec3(0.15, 0.2, 0.25) * moonBlend; 
+            }
+
+            vec3 cloudShadow = mix(vec3(0.35, 0.4, 0.45) * twilightBlend, skyColor, 0.4);
+            vec3 finalCloudColor = mix(cloudLight, cloudShadow, shadow * 2.0);
+            
+            float distanceFade = smoothstep(0.01, 0.2, viewDir.y);
+            float finalAlpha = clamp(density * distanceFade, 0.0, 1.0);
+            
+            skyColor = mix(skyColor, finalCloudColor, finalAlpha);
+        }
+    }
+
+    outColor = vec4(skyColor, 1.0);
 }
