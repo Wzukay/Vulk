@@ -39,6 +39,9 @@ struct Settings {
     float terrainLod2EndRatio = 0.72f;
     float terrainLod3EndRatio = 0.88f;
 
+    bool enableMotionBlur = false;
+    bool enableGodRays = false;
+
     bool showStats = true;
     float timeScale = 1.0f;
 

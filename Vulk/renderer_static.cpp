@@ -136,7 +136,7 @@ void StaticMeshRenderer::ResizeBuffers(uint32_t requiredVertices, uint32_t requi
 		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_indexBuffer, m_indexMemory);
 }
 
-void StaticMeshRenderer::UploadUniqueMeshes(const std::unordered_set<std::string>& uniqueMeshNames) {
+void StaticMeshRenderer::UploadUniqueMeshes(const std::unordered_set<uint32_t>& uniqueMeshHashes) {
 	std::vector<ModelVertex> allVerts;
 	std::vector<uint16_t> allIndices;
 	m_meshAllocations.clear();
@@ -144,7 +144,8 @@ void StaticMeshRenderer::UploadUniqueMeshes(const std::unordered_set<std::string
 	uint32_t vertexOffset = 0;
 	uint32_t indexOffset = 0;
 
-	for (const auto& name : uniqueMeshNames) {
+	for (const auto& hash : uniqueMeshHashes) {
+		std::string name = StringHash::Get(hash);
 		const LodGroup* group = g_AssetManager.GetLodGroup(name);
 		MeshBufferAllocation alloc;
 		alloc.firstIndex = indexOffset;
@@ -202,7 +203,7 @@ void StaticMeshRenderer::UploadUniqueMeshes(const std::unordered_set<std::string
 			indexOffset += static_cast<uint32_t>(mesh->indices.size());
 		}
 
-		m_meshAllocations[name] = alloc;
+		m_meshAllocations[hash] = alloc;
 	}
 
 	if (allVerts.empty() || allIndices.empty()) return;
@@ -241,54 +242,43 @@ void StaticMeshRenderer::UploadUniqueMeshes(const std::unordered_set<std::string
 }
 
 void StaticMeshRenderer::UpdateScene(const Scene& scene) {
-	const auto& instances = scene.GetInstances();
+	const auto& instances = scene.GetStaticInstances();
 
-	std::unordered_set<std::string> uniqueMeshNames;
-
+	std::unordered_set<uint32_t> uniqueMeshHashes;
 	for (const auto& inst : instances) {
-		uniqueMeshNames.insert(inst.meshName);
+		uniqueMeshHashes.insert(inst.meshHash);
 	}
 
-	bool geometryChanged =
-		uniqueMeshNames.size() != m_meshAllocations.size();
-
+	bool geometryChanged = uniqueMeshHashes.size() != m_meshAllocations.size();
 	if (!geometryChanged) {
-		for (const auto& name : uniqueMeshNames) {
-			if (m_meshAllocations.find(name) ==
-				m_meshAllocations.end()) {
+		for (uint32_t hash : uniqueMeshHashes) {
+			if (m_meshAllocations.find(hash) == m_meshAllocations.end()) {
 				geometryChanged = true;
 				break;
 			}
 		}
 	}
 
-	if (geometryChanged) {
-		UploadUniqueMeshes(uniqueMeshNames);
-	}
+	if (geometryChanged) UploadUniqueMeshes(uniqueMeshHashes);
 
 	m_staticDrawList.clear();
 	m_sceneObjects.clear();
 	m_subMeshes.clear();
 	m_cullInstances.clear();
 	m_indirectBatches.clear();
+	m_batchIndexByMeshHash.clear();
 
 	for (const auto& inst : instances) {
 		if (inst.isInstanced) {
-			const auto allocIt = m_meshAllocations.find(inst.meshName);
+			const auto allocIt = m_meshAllocations.find(inst.meshHash);
 			if (allocIt == m_meshAllocations.end() || allocIt->second.subMeshes.empty()) continue;
 
 			const MeshBufferAllocation& alloc = allocIt->second;
 
-			// Find if this LodGroup has already generated its batch array
-			auto batchIt = std::find_if(m_indirectBatches.begin(), m_indirectBatches.end(), [&](const StaticIndirectBatch& batch) {
-				return batch.command.indexCount == alloc.subMeshes[0].indexCount &&
-					batch.command.firstIndex == alloc.subMeshes[0].firstIndex + alloc.firstIndex &&
-					batch.textureId == alloc.subMeshes[0].textureId;
-				});
-
 			uint32_t baseCommandIndex = 0;
+			auto cacheIt = m_batchIndexByMeshHash.find(inst.meshHash);
 
-			if (batchIt == m_indirectBatches.end()) {
+			if (cacheIt == m_batchIndexByMeshHash.end()) {
 				baseCommandIndex = static_cast<uint32_t>(m_indirectBatches.size());
 
 				// Automatically generate sequential indirect commands for every LOD level!
@@ -307,9 +297,11 @@ void StaticMeshRenderer::UpdateScene(const Scene& scene) {
 
 					m_indirectBatches.push_back(batch);
 				}
+
+				m_batchIndexByMeshHash[inst.meshHash] = baseCommandIndex;
 			}
 			else {
-				baseCommandIndex = static_cast<uint32_t>(std::distance(m_indirectBatches.begin(), batchIt));
+				baseCommandIndex = cacheIt->second;
 			}
 
 			if (m_cullInstances.size() >= m_maxInstances) throw std::runtime_error("Static instance buffer overflow");
@@ -339,7 +331,7 @@ void StaticMeshRenderer::UpdateScene(const Scene& scene) {
 			continue;
 		}
 
-		const auto allocIt = m_meshAllocations.find(inst.meshName);
+		const auto allocIt = m_meshAllocations.find(inst.meshHash);
 
 		if (allocIt == m_meshAllocations.end()) {
 			continue;
@@ -458,6 +450,38 @@ void StaticMeshRenderer::Draw(VkCommandBuffer commandBuffer, VkPipelineLayout pi
 	}
 }
 
+void StaticMeshRenderer::DrawDynamic(VkCommandBuffer commandBuffer, VkPipelineLayout pipelineLayout,
+	const std::vector<MeshInstance>& dynamicInstances, VkPipeline pipeline) {
+	if (dynamicInstances.empty() || pipeline == VK_NULL_HANDLE) return;
+
+	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+
+	VkBuffer vertexBuffers[] = { m_vertexBuffer };
+	VkDeviceSize offsets[] = { 0 };
+	vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+	vkCmdBindIndexBuffer(commandBuffer, m_indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+
+	for (const auto& inst : dynamicInstances) {
+		auto allocIt = m_meshAllocations.find(inst.meshHash);
+		if (allocIt == m_meshAllocations.end() || allocIt->second.subMeshes.empty()) continue;
+
+		const auto& sub = allocIt->second.subMeshes[0]; // Assuming primary submesh
+
+		PushConstants constants{};
+		constants.modelMatrix = inst.transform;
+		constants.textureId = sub.textureId;
+		constants.normalTextureId = sub.normalTextureId;
+
+		vkCmdPushConstants(commandBuffer, pipelineLayout,
+			VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+			0, sizeof(PushConstants), &constants);
+
+		vkCmdDrawIndexed(commandBuffer, sub.indexCount, 1,
+			sub.firstIndex + allocIt->second.firstIndex,
+			sub.vertexOffset + allocIt->second.vertexOffset, 0);
+	}
+}
+
 void StaticMeshRenderer::Cull(VkCommandBuffer commandBuffer, const glm::vec3& cameraPos, const glm::mat4& viewProj, const glm::vec2& hzbSize, 
     uint32_t currentFrameIndex, uint32_t& outCulledCount, uint32_t& outVertexCount, uint32_t& outIndexCount)
 {
@@ -551,6 +575,21 @@ void StaticMeshRenderer::Cull(VkCommandBuffer commandBuffer, const glm::vec3& ca
 	push.totalInstances = static_cast<uint32_t>(m_cullInstances.size());
 	push.maxDistance = g_Settings.GetStaticFadeEnd();
 	push.hzbSize = hzbSize;
+
+	glm::vec3 axisX = glm::vec3(viewProj[0][0], viewProj[1][0], viewProj[2][0]);
+	glm::vec3 axisY = glm::vec3(viewProj[0][1], viewProj[1][1], viewProj[2][1]);
+	glm::vec3 axisZ = glm::vec3(viewProj[0][2], viewProj[1][2], viewProj[2][2]);
+	glm::vec3 axisW = glm::vec3(viewProj[0][3], viewProj[1][3], viewProj[2][3]);
+
+	// 2. Pre-calculate the expensive square roots on the CPU!
+	glm::vec4 axisLengths(
+		glm::length(axisX),
+		glm::length(axisY),
+		glm::length(axisZ),
+		glm::length(axisW)
+	);
+
+	push.axisLengths = axisLengths;
 
 	vkCmdBindPipeline(
 		commandBuffer,

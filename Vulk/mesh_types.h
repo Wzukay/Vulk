@@ -11,7 +11,7 @@ enum class MeshType
 };
 
 struct MeshInstance {
-    std::string meshName;
+    uint32_t meshHash = 0;
     glm::mat4 transform;
     uint32_t objectId;
 

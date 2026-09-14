@@ -34,6 +34,8 @@ void Settings::LoadFromFile(const std::string& path) {
         else if (key == "terrainLod1EndRatio") terrainLod1EndRatio = std::stof(value);
         else if (key == "terrainLod2EndRatio") terrainLod2EndRatio = std::stof(value);
         else if (key == "terrainLod3EndRatio") terrainLod3EndRatio = std::stof(value);
+        else if (key == "enableMotionBlur") enableMotionBlur = (value == "true" || value == "1");
+        else if (key == "enableGodRays") enableGodRays = (value == "true" || value == "1");
         else if (key == "maxMipLevels") maxMipLevels = std::stoi(value);
         else if (key == "vsync") vsync = (value == "true" || value == "1");
         else if (key == "frameCap") frameCap = std::stoi(value);
@@ -84,7 +86,9 @@ void Settings::SaveToFile(const std::string& path) const {
     file << "terrainLod0EndRatio " << terrainLod0EndRatio << "\n";
     file << "terrainLod1EndRatio " << terrainLod1EndRatio << "\n";
     file << "terrainLod2EndRatio " << terrainLod2EndRatio << "\n";
-    file << "terrainLod3EndRatio " << terrainLod3EndRatio << "\n\n";
+    file << "terrainLod3EndRatio " << terrainLod3EndRatio << "\n";
+    file << "enableMotionBlur " << (enableMotionBlur ? "true" : "false") << "\n";
+    file << "enableGodRays " << (enableGodRays ? "true" : "false") << "\n\n";
 
     file << "# --- Debug ---\n";
     file << "showStats " << (showStats ? "true" : "false") << "\n";

@@ -54,44 +54,24 @@ void Chunk::PrecomputeChunkOffsets(int viewDistance) {
         }
     }
 
-    // Sort once based on squared distance from center
     std::sort(s_sortedChunkOffsets.begin(), s_sortedChunkOffsets.end(), [](const auto& a, const auto& b) {
         return (a.first * a.first + a.second * a.second) < (b.first * b.first + b.second * b.second);
         });
 }
 float Chunk::GetLodMorph(float closestEdgeDistance, int currentLod) const {
     float transitionWidth = std::min(chunkSize * 0.25f, 128.0f);
-
     float transitionEnd = 0.0f;
 
     switch (currentLod) {
-    case 0:
-        transitionEnd = g_Settings.GetTerrainLod0End();
-        break;
-
-    case 1:
-        transitionEnd = g_Settings.GetTerrainLod1End();
-        break;
-
-    case 2:
-        transitionEnd = g_Settings.GetTerrainLod2End();
-        break;
-
-    case 3:
-        transitionEnd = g_Settings.GetTerrainLod3End();
-        break;
-
-    default:
-        return 0.0f;
+    case 0: transitionEnd = g_Settings.GetTerrainLod0End(); break;
+    case 1: transitionEnd = g_Settings.GetTerrainLod1End(); break;
+    case 2: transitionEnd = g_Settings.GetTerrainLod2End(); break;
+    case 3: transitionEnd = g_Settings.GetTerrainLod3End(); break;
+    default: return 0.0f;
     }
 
     float transitionStart = transitionEnd - transitionWidth;
-
-    return glm::clamp(
-        (closestEdgeDistance - transitionStart) / transitionWidth,
-        0.0f,
-        1.0f
-    );
+    return glm::clamp((closestEdgeDistance - transitionStart) / transitionWidth, 0.0f, 1.0f);
 }
 
 glm::vec3 Chunk::ChunkBoundsCenter(int cx, int cz) const {
@@ -105,6 +85,7 @@ float Chunk::ChunkBoundsRadius() const {
     return std::sqrt(footprintRadius * footprintRadius + heightMargin * heightMargin);
 }
 
+// BASELINE: The exact Update loop you had before things broke.
 bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& renderer) {
     if (m_shuttingDown) return false;
 
@@ -173,14 +154,12 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
                 tComp.isDirty = true;
 
                 RenderComponent rComp;
-
                 if (!propData.lodGroupName.empty()) {
-                    rComp.meshName = propData.lodGroupName;
+                    rComp.meshHash = StringHash::Hash(propData.lodGroupName);
                 }
                 else {
-                    rComp.meshName = "";
+                    rComp.meshHash = 0;
                 }
-
                 rComp.type = MeshType::Static;
                 rComp.isInstanced = true;
                 rComp.isVisible = true;
@@ -195,32 +174,20 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
                 staticSceneChanged = true;
             }
 
-            if (staticSceneChanged) scene.MarkDirty();
+            if (staticSceneChanged) scene.MarkStaticDirty();
 
             PublishGridCache(resultKey, std::move(result.physicsGrid));
 
             renderer.AddTerrainChunk(resultKey, result.coord.cx, result.coord.cz, result.lod, result.vertices, result.indices);
-            
-            if (!result.grassInstances.empty()) {
-                renderer.AddGrass(resultKey, result.grassInstances);
-            }
-            else {
-                renderer.RemoveGrass(resultKey);
-            }
 
-            if (!result.swarms.empty()) {
-                renderer.AddSwarms(resultKey, result.swarms);
-            }
-            else {
-                renderer.RemoveSwarms(resultKey);
-            }
+            if (!result.grassInstances.empty()) renderer.AddGrass(resultKey, result.grassInstances);
+            else renderer.RemoveGrass(resultKey);
 
-            if (!result.waterVertices.empty()) {
-                renderer.AddWaterChunk(resultKey, result.waterVertices, result.waterIndices);
-            }
-            else {
-                renderer.RemoveWaterChunk(resultKey);
-            }
+            if (!result.swarms.empty()) renderer.AddSwarms(resultKey, result.swarms);
+            else renderer.RemoveSwarms(resultKey);
+
+            if (!result.waterVertices.empty()) renderer.AddWaterChunk(resultKey, result.waterVertices, result.waterIndices);
+            else renderer.RemoveWaterChunk(resultKey);
 
             loadedChunks[resultKey] = result.lod;
             loadingChunks.erase(resultKey);
@@ -253,8 +220,6 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
         m_desiredList.reserve(range * range);
         m_desiredKeysLookup.reserve(range * range);
 
-        // FIX 1: O(1) grid generation using the precomputed spiral offset. 
-        // No std::sort required!
         for (const auto& offset : s_sortedChunkOffsets) {
             ChunkCoord coord{ camChunkX + offset.first, camChunkZ + offset.second };
             if (DesiredLodForDistance(glm::distance(ChunkBoundsCenter(coord.cx, coord.cz), camPos)) >= 5) continue;
@@ -267,8 +232,6 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
         m_currentAmortizeIndex = 0;
         m_needsGridRebuild = true;
 
-        // FIX 2: MOVED FROM BOTTOM OF FUNCTION
-        // Only run the heavy O(N) map deletion loops when the grid actually shifts!
         for (auto it = loadedChunks.begin(); it != loadedChunks.end(); ) {
             if (m_desiredKeysLookup.find(it->first) == m_desiredKeysLookup.end()) {
                 RemoveGridCache(it->first);
@@ -292,7 +255,7 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
             if (dx > preGenRadius || dz > preGenRadius) {
                 int64_t keyToCancel = it->first;
                 for (auto& job : asyncResults) {
-                    if (job.key == keyToCancel) {
+                    if (job.key == keyToCancel && job.cancelToken) {
                         job.cancelToken->store(true, std::memory_order_relaxed);
                     }
                 }
@@ -329,7 +292,6 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
             float true3DDistance = std::sqrt(distSq);
 
             int desiredLod = DesiredLodForDistance(true3DDistance);
-
             int divisor = 1 << desiredLod;
             int targetResolution = ((resolution - 1) / divisor) + 1;
 
@@ -368,7 +330,7 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
                 int64_t itemKey = item.coord.Key();
                 if (loadingChunks.find(itemKey) != loadingChunks.end()) {
                     for (auto& activeJob : asyncResults) {
-                        if (activeJob.key == itemKey) {
+                        if (activeJob.key == itemKey && activeJob.cancelToken) {
                             activeJob.cancelToken->store(true, std::memory_order_relaxed);
                         }
                     }
@@ -387,7 +349,6 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
                     jobData.coord = ChunkCoord{ cx, cz };
                     jobData.lod = lod;
 
-                    // Acquire pooled buffers (reuses heap capacity)
                     PooledMeshBuffers buffers = m_bufferPool.Acquire();
                     jobData.vertices = std::move(buffers.vertices);
                     jobData.indices = std::move(buffers.indices);
@@ -437,25 +398,21 @@ TerrainData Chunk::CalculateHeightAndColor(float worldX, float worldZ) {
     static thread_local bool initialized = false;
 
     if (!initialized) {
-        // 1. Macro Elevation (Continents, Rolling Hills)
         baseNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
         baseNoise.SetFractalType(FastNoiseLite::FractalType_FBm);
         baseNoise.SetFractalOctaves(4);
         baseNoise.SetFrequency(0.0008f);
 
-        // 2. Mountains & Valleys (Using Ridged Multifractal for sharp peaks)
         ridgeNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
         ridgeNoise.SetFractalType(FastNoiseLite::FractalType_Ridged);
         ridgeNoise.SetFractalOctaves(4);
         ridgeNoise.SetFrequency(0.0015f);
 
-        // 3. Micro Detail & Dirt Masking (Reusing one noise for two jobs!)
         detailNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
         detailNoise.SetFractalType(FastNoiseLite::FractalType_FBm);
         detailNoise.SetFractalOctaves(3);
         detailNoise.SetFrequency(0.015f);
 
-        // 4. Biome Climate
         tempNoise.SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);
         tempNoise.SetFrequency(0.00028f);
 
@@ -481,39 +438,21 @@ TerrainData Chunk::CalculateHeightAndColor(float worldX, float worldZ) {
     auto clamp01 = [](float v) { return std::clamp(v, 0.0f, 1.0f); };
     auto n01 = [](float n) { return (n + 1.0f) * 0.5f; };
 
-    // --- 1. SHAPE GENERATION (3 NOISES) ---
-
-    // Base elevation (-1 to 1 mapped to 0 to 1)
     float base = n01(baseNoise.GetNoise(worldX, worldZ));
-
-    // FIX: Map the Ridged fractal to 0..1 so it never digs negative holes!
     float ridge = n01(ridgeNoise.GetNoise(worldX, worldZ));
-
-    // Detail / Dirt noise
     float detail = n01(detailNoise.GetNoise(worldX, worldZ));
 
-    // Start with a foundational height to keep things above the void
     float height = 25.0f;
-
-    // Lowlands: Gentle, sweeping hills
     float plainsHeight = base * 25.0f;
-
-    // Highlands: Steep ridges multiplied by a mountain mask (derived from the base noise)
     float mountainMask = glm::smoothstep(0.4f, 0.7f, base);
-
-    // Square the ridge so valleys are wide and peaks are sharp
     float mountainHeight = std::pow(ridge, 2.0f) * 140.0f;
 
-    // Combine plains and mountains
     height += std::lerp(plainsHeight, plainsHeight + mountainHeight, mountainMask);
-
-    // Add micro details to everything except the steepest mountain cliffs
     height += (detail * 4.0f) * (1.0f - mountainMask * 0.5f);
 
-    // --- 2. BIOME EVALUATION (2 NOISES) ---
     float t = clamp01(n01(tempNoise.GetNoise(worldX, worldZ)));
     float m = clamp01(n01(moistNoise.GetNoise(worldX, worldZ)));
-    
+
     struct BiomeCenter { BiomeType type; float t; float m; };
     const BiomeCenter centers[] = {
         {BiomeType::Desert,     0.83f, 0.125f}, {BiomeType::Savanna, 0.83f, 0.375f}, {BiomeType::Jungle,     0.83f, 0.65f}, {BiomeType::Swamp,      0.83f, 0.90f},
@@ -530,7 +469,6 @@ TerrainData Chunk::CalculateHeightAndColor(float worldX, float worldZ) {
         float dm = m - centers[i].m;
         float distSq = dt * dt + dm * dm;
 
-        // Power of 4 falloff creates smooth but distinct biome regions
         float weight = 1.0f / (distSq * distSq + 0.0001f);
 
         const BiomeDefinition& def = GetBiomeDefinition(centers[i].type);
@@ -542,24 +480,15 @@ TerrainData Chunk::CalculateHeightAndColor(float worldX, float worldZ) {
     blendedWeights /= totalWeight;
     blendedColor /= totalWeight;
 
-    // --- 4. BIOME-BASED LAKE GENERATION ---
     float lakeWaterLevel = 28.0f;
     float lakeMaxMacroHeight = 42.0f;
-
-    // 1. TIGHTEN THE THRESHOLDS
-    const float BASIN_THRESHOLD = 0.25f;      // Increased to require stronger noise to carve
-    const float WATER_MESH_THRESHOLD = 0.25f; // Match closely to basin so puddles don't spawn without deep carving
-
+    const float BASIN_THRESHOLD = 0.25f;
+    const float WATER_MESH_THRESHOLD = 0.25f;
     float lakeMask = 0.0f;
 
-    // Lower the noise frequencies to make lakes much wider and less scattered
     float hugeLakeNoise = n01(lakeNoise.GetNoise(worldX * 0.12f, worldZ * 0.12f));
-
-    // Stricter cutoffs so only deep/large pockets survive the math
     float hugeLakeMask = glm::smoothstep(0.68f, 0.85f, hugeLakeNoise);
-
     float rawLakeMask = hugeLakeMask;
-
     float macroHeight = 25.0f + plainsHeight;
 
     if (rawLakeMask > 0.0f && macroHeight <= lakeMaxMacroHeight) {
@@ -569,18 +498,12 @@ TerrainData Chunk::CalculateHeightAndColor(float worldX, float worldZ) {
         float localDetail = std::abs(detail * 2.0f - 1.0f);
         float mountainSteepness = mountainMask * 25.0f;
         float terrainSteepness = mountainSteepness + localDetail * 8.0f;
-
-        // Soften the slope mask so lakes don't fragment into small puddles on bumpy terrain
         float slopeMask = 1.0f - glm::smoothstep(12.0f, 25.0f, terrainSteepness);
-
         float basinMask = lakeMask * slopeMask;
 
-        // 2. Carve the basin
         if (basinMask > BASIN_THRESHOLD) {
-            // Hardcode the depth to the large lake depth since medium lakes are gone
             float lakeDepth = 14.0f;
             float lakeBed = lakeWaterLevel - lakeDepth;
-
             float basinDeformation = glm::smoothstep(BASIN_THRESHOLD, BASIN_THRESHOLD + 0.35f, basinMask);
 
             height = std::lerp(height, lakeBed, basinDeformation);
@@ -589,12 +512,13 @@ TerrainData Chunk::CalculateHeightAndColor(float worldX, float worldZ) {
         }
     }
 
-    // 3. Use the matching WATER_MESH_THRESHOLD to generate the mesh
     return { height, blendedWeights, blendedColor, lakeMask > WATER_MESH_THRESHOLD ? lakeWaterLevel : 0.0f };
 }
+
 float Chunk::GetHeight(float worldX, float worldZ) {
     return CalculateHeightAndColor(worldX, worldZ).height;
 }
+
 float Chunk::GetCachedHeightFromGrid(float worldX, float worldZ) {
     const float chunkSize = m_chunkSize;
     int chunkX = static_cast<int>(std::floor(worldX / chunkSize));
@@ -638,6 +562,7 @@ float Chunk::GetCachedHeightFromGrid(float worldX, float worldZ) {
     float h1 = std::lerp(h01, h11, tx);
     return std::lerp(h0, h1, tz);
 }
+
 void Chunk::PublishGridCache(int64_t chunkKey, ChunkGridCache&& gridCache) {
     std::unique_lock<std::shared_mutex> lock(s_activeChunkGridsMutex);
     s_activeChunkGrids[chunkKey] = std::move(gridCache);
@@ -648,22 +573,8 @@ void Chunk::RemoveGridCache(int64_t chunkKey) {
 }
 
 void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSize,
-    ChunkJobResult& outResult,
-    std::shared_ptr<std::atomic<bool>> cancelToken)
+    ChunkJobResult& outResult, std::shared_ptr<std::atomic<bool>> cancelToken)
 {
-    auto isCancelled = [&]() {
-        return cancelToken && cancelToken->load(std::memory_order_relaxed);
-        };
-
-    auto discardCancelledResult = [&]() {
-        outResult.vertices.clear();
-        outResult.indices.clear();
-        outResult.grassInstances.clear();
-        outResult.props.clear();
-        outResult.swarms.clear();
-        outResult.physicsGrid = {};
-        };
-
     outResult.vertices.clear();
     outResult.indices.clear();
     outResult.grassInstances.clear();
@@ -672,11 +583,6 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
 
     outResult.vertices.reserve(resolution * resolution + (resolution - 1) * 8);
     outResult.indices.reserve(((resolution - 1) * (resolution - 1) * 6) + ((resolution - 1) * 4 * 6));
-
-    if (isCancelled()) {
-        discardCancelledResult();
-        return;
-    }
 
     const float step = chunkSize / (float)(resolution - 1);
     float originX = chunkX * chunkSize;
@@ -691,11 +597,6 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
     std::vector<glm::vec3> groundColorGrid(gridSize * gridSize);
 
     for (int gz = 0; gz < gridSize; ++gz) {
-        if (isCancelled()) {
-            discardCancelledResult();
-            return;
-        }
-
         const float worldZ = originZ + (gz - pad) * step;
         const int rowOffset = gz * gridSize;
 
@@ -741,10 +642,7 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
         };
 
     for (int z = 0; z < resolution; z++) {
-        if (isCancelled()) {
-            discardCancelledResult();
-            return;
-        }
+        if (cancelToken && cancelToken->load(std::memory_order_relaxed)) return;
 
         float worldZ = originZ + z * step;
         for (int x = 0; x < resolution; x++) {
@@ -760,7 +658,6 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
             v.pos = glm::vec3(worldX, h, worldZ);
             v.texCoord = glm::packHalf2x16(glm::vec2(worldX * 0.02f, worldZ * 0.02f));
 
-            // Pack the biome weights (dirt, grass, rock) into the tangent for the fragment shader
             glm::vec3 biomeWeights = GetCachedColor(x, z);
 
             glm::vec3 tangentX(2.0f * step, hR - hL, 0.0f);
@@ -861,7 +758,7 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
     const float waterGridScale = 1.0f / static_cast<float>(waterSubdivisions);
     const int waterStep = 1;
 
-    std::vector<TerrainData> waterSamples(waterResolution* waterResolution);
+    std::vector<TerrainData> waterSamples(waterResolution * waterResolution);
 
     for (int z = 0; z < waterResolution; ++z) {
         for (int x = 0; x < waterResolution; ++x) {
@@ -883,7 +780,7 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
         float worldX = originX + gridPos.x * step;
         float worldZ = originZ + gridPos.y * step;
 
-        const float SNAP_RESOLUTION = 0.5f; 
+        const float SNAP_RESOLUTION = 0.5f;
         uint32_t xKey = static_cast<uint32_t>(std::round(worldX / SNAP_RESOLUTION));
         uint32_t zKey = static_cast<uint32_t>(std::round(worldZ / SNAP_RESOLUTION));
         uint64_t key = (static_cast<uint64_t>(xKey) << 32) | zKey;
@@ -939,10 +836,7 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
         };
 
     for (int z = 0; z < waterResolution - 1; z += waterStep) {
-        if (isCancelled()) {
-            discardCancelledResult();
-            return;
-        }
+        if (cancelToken && cancelToken->load(std::memory_order_relaxed)) return;
 
         const int z1 = std::min(z + waterStep, waterResolution - 1);
 
@@ -967,10 +861,10 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
 
             float waterHeight = std::max(std::max(w00, w10), std::max(w11, w01));
 
-            glm::vec2 p00(static_cast<float>(x)* waterGridScale, static_cast<float>(z)* waterGridScale);
-            glm::vec2 p10(static_cast<float>(x1)* waterGridScale, static_cast<float>(z)* waterGridScale);
-            glm::vec2 p11(static_cast<float>(x1)* waterGridScale, static_cast<float>(z1)* waterGridScale);
-            glm::vec2 p01(static_cast<float>(x)* waterGridScale, static_cast<float>(z1)* waterGridScale);
+            glm::vec2 p00(static_cast<float>(x) * waterGridScale, static_cast<float>(z) * waterGridScale);
+            glm::vec2 p10(static_cast<float>(x1) * waterGridScale, static_cast<float>(z) * waterGridScale);
+            glm::vec2 p11(static_cast<float>(x1) * waterGridScale, static_cast<float>(z1) * waterGridScale);
+            glm::vec2 p01(static_cast<float>(x) * waterGridScale, static_cast<float>(z1) * waterGridScale);
 
             glm::vec2 e0 = (p00 + p10) * 0.5f;
             glm::vec2 e1 = (p10 + p11) * 0.5f;
@@ -978,97 +872,45 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
             glm::vec2 e3 = (p01 + p00) * 0.5f;
 
             switch (mask) {
-            case 1:
-                emitPolygon({ p00, e0, e3 }, waterHeight);
-                break;
-
-            case 2:
-                emitPolygon({ p10, e1, e0 }, waterHeight);
-                break;
-
-            case 3:
-                emitPolygon({ p00, p10, e1, e3 }, waterHeight);
-                break;
-
-            case 4:
-                emitPolygon({ p11, e2, e1 }, waterHeight);
-                break;
-
-            case 5:
-                emitPolygon({ p00, e0, e3 }, waterHeight);
-                emitPolygon({ p11, e2, e1 }, waterHeight);
-                break;
-
-            case 6:
-                emitPolygon({ p10, p11, e2, e0 }, waterHeight);
-                break;
-
-            case 7:
-                emitPolygon({ p00, p10, p11, e2, e3 }, waterHeight);
-                break;
-
-            case 8:
-                emitPolygon({ p01, e3, e2 }, waterHeight);
-                break;
-
-            case 9:
-                emitPolygon({ p00, e0, e2, p01 }, waterHeight);
-                break;
-
-            case 10:
-                emitPolygon({ p10, e1, e0 }, waterHeight);
-                emitPolygon({ p01, e3, e2 }, waterHeight);
-                break;
-
-            case 11:
-                emitPolygon({ p00, p10, e1, e2, p01 }, waterHeight);
-                break;
-
-            case 12:
-                emitPolygon({ p01, p11, e1, e3 }, waterHeight);
-                break;
-
-            case 13:
-                emitPolygon({ p00, e0, e1, p11, p01 }, waterHeight);
-                break;
-
-            case 14:
-                emitPolygon({ e0, p10, p11, p01, e3 }, waterHeight);
-                break;
-
-            case 15:
-                emitPolygon({ p00, p10, p11, p01 }, waterHeight);
-                break;
+            case 1:  emitPolygon({ p00, e0, e3 }, waterHeight); break;
+            case 2:  emitPolygon({ p10, e1, e0 }, waterHeight); break;
+            case 3:  emitPolygon({ p00, p10, e1, e3 }, waterHeight); break;
+            case 4:  emitPolygon({ p11, e2, e1 }, waterHeight); break;
+            case 5:  emitPolygon({ p00, e0, e3 }, waterHeight); emitPolygon({ p11, e2, e1 }, waterHeight); break;
+            case 6:  emitPolygon({ p10, p11, e2, e0 }, waterHeight); break;
+            case 7:  emitPolygon({ p00, p10, p11, e2, e3 }, waterHeight); break;
+            case 8:  emitPolygon({ p01, e3, e2 }, waterHeight); break;
+            case 9:  emitPolygon({ p00, e0, e2, p01 }, waterHeight); break;
+            case 10: emitPolygon({ p10, e1, e0 }, waterHeight); emitPolygon({ p01, e3, e2 }, waterHeight); break;
+            case 11: emitPolygon({ p00, p10, e1, e2, p01 }, waterHeight); break;
+            case 12: emitPolygon({ p01, p11, e1, e3 }, waterHeight); break;
+            case 13: emitPolygon({ p00, e0, e1, p11, p01 }, waterHeight); break;
+            case 14: emitPolygon({ e0, p10, p11, p01, e3 }, waterHeight); break;
+            case 15: emitPolygon({ p00, p10, p11, p01 }, waterHeight); break;
             }
         }
     }
 
-    if (isCancelled()) {
-        discardCancelledResult();
-        return;
-    }
+    if (cancelToken && cancelToken->load(std::memory_order_relaxed)) return;
 
-    meshopt_optimizeVertexCache(
-        outResult.indices.data(),
-        outResult.indices.data(),
-        outResult.indices.size(),
-        outResult.vertices.size()
-    );
+    if (!outResult.indices.empty()) {
+        meshopt_optimizeVertexCache(
+            outResult.indices.data(),
+            outResult.indices.data(),
+            outResult.indices.size(),
+            outResult.vertices.size()
+        );
 
-    std::vector<ModelVertex> rearrangedVertices(outResult.vertices.size());
-    meshopt_optimizeVertexFetch(
-        rearrangedVertices.data(),
-        outResult.indices.data(),
-        outResult.indices.size(),
-        outResult.vertices.data(),
-        outResult.vertices.size(),
-        sizeof(ModelVertex)
-    );
-    outResult.vertices = std::move(rearrangedVertices);
-
-    if (isCancelled()) {
-        discardCancelledResult();
-        return;
+        std::vector<ModelVertex> rearrangedVertices(outResult.vertices.size());
+        meshopt_optimizeVertexFetch(
+            rearrangedVertices.data(),
+            outResult.indices.data(),
+            outResult.indices.size(),
+            outResult.vertices.data(),
+            outResult.vertices.size(),
+            sizeof(ModelVertex)
+        );
+        outResult.vertices = std::move(rearrangedVertices);
     }
 
     auto GetFastLocalData = [&](float wX, float wZ) -> TerrainData {
@@ -1146,10 +988,8 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
         outResult.grassInstances.reserve(gridCells * gridCells * bladesPerCell);
 
         for (float localX = 0.0f; localX < chunkSize; localX += GRASS_STEP) {
-            if (isCancelled()) {
-                discardCancelledResult();
-                return;
-            }
+            if (cancelToken && cancelToken->load(std::memory_order_relaxed)) return;
+
             for (float localZ = 0.0f; localZ < chunkSize; localZ += GRASS_STEP) {
 
                 float baseX = originX + localX;
@@ -1157,7 +997,7 @@ void Chunk::GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSiz
 
                 TerrainData data = GetFastLocalData(baseX, baseZ);
 
-                if (data.height <= -5.0f || data.biomeWeights.y < 0.2f) continue;
+                if (data.height <= -5.0f || data.height > 60.0f || data.waterLevel > 0.0f || data.biomeWeights.y < 0.2f) continue;
 
                 float hR = GetFastLocalData(baseX + 2.0f, baseZ).height;
                 float hU = GetFastLocalData(baseX, baseZ + 2.0f).height;
@@ -1232,36 +1072,40 @@ void Chunk::GenerateChunkProps(int chunkX, int chunkZ, int lod, ChunkJobResult& 
             if (def.props.empty()) continue;
 
             uint32_t coordHash = Hash2D(chunkX * 1000 + ix, chunkZ * 1000 + iz, s_globalSeed);
-
             TerrainData data = heightColorFunc(worldX, worldZ);
 
             if (data.waterLevel > 0.0f) continue;
 
-            float masks[2] = { treeNoise.GetNoise(worldX, worldZ), stoneNoise.GetNoise(worldX, worldZ) };
-            float spawnChance = (coordHash % 1000) / 1000.0f;
+            float rawTree = treeNoise.GetNoise(worldX, worldZ);
+            float rawStone = stoneNoise.GetNoise(worldX, worldZ);
+            float masks[2] = { (rawTree + 1.0f) * 0.5f, (rawStone + 1.0f) * 0.5f };
+
+            uint32_t ruleHash = coordHash;
 
             for (const auto& rule : def.props) {
                 if (lod > rule.maxLod) continue;
                 if (data.height < rule.minHeight || data.height > rule.maxHeight) continue;
                 if (masks[rule.noiseIndex] < rule.noiseThreshold) continue;
 
-                if (spawnChance < rule.spawnChance) {
+                ruleHash ^= ruleHash << 13; ruleHash ^= ruleHash >> 17; ruleHash ^= ruleHash << 5;
+                float ruleRoll = (ruleHash % 1000) / 1000.0f;
+
+                if (ruleRoll < rule.spawnChance) {
                     PropInstance prop{};
                     prop.position = glm::vec3(worldX, data.height + rule.groundOffset, worldZ);
 
                     prop.rotation = glm::vec3(
-                        rule.alignToNormal ? static_cast<float>(coordHash % 360) : 0.0f,
-                        static_cast<float>((coordHash >> 4) % 360),
-                        rule.alignToNormal ? static_cast<float>((coordHash >> 8) % 360) : 0.0f
+                        rule.alignToNormal ? static_cast<float>(ruleHash % 360) : 0.0f,
+                        static_cast<float>((ruleHash >> 4) % 360),
+                        rule.alignToNormal ? static_cast<float>((ruleHash >> 8) % 360) : 0.0f
                     );
 
-                    float scaleT = static_cast<float>((coordHash >> 8) % 100) / 100.0f;
+                    float scaleT = static_cast<float>((ruleHash >> 8) % 100) / 100.0f;
                     prop.scale = glm::vec3(std::lerp(rule.minScale, rule.maxScale, scaleT));
-                    prop.customPayload = static_cast<float>(coordHash % 100) / 100.0f;
+                    prop.customPayload = static_cast<float>(ruleHash % 100) / 100.0f;
                     prop.lodGroupName = rule.lodGroupName;
 
                     outResult.props.push_back(prop);
-                    break;
                 }
             }
         }

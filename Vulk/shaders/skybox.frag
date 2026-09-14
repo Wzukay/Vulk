@@ -51,20 +51,16 @@ void main() {
     vec3 horizonColor = pc.horizonColor.rgb;
     
     float horizonMix = clamp(viewDir.y * 4.0, 0.0, 1.0);
-    vec3 skyColor = mix(horizonColor, zenithColor, horizonMix);
 
-    // 2. Stars
+    vec3 cleanSkyGradient = mix(horizonColor, zenithColor, horizonMix);
+
+    vec3 skyColor = cleanSkyGradient;
+
+    // 2. Stars (Locked to grid, gentle twinkle)
     if (pc.starFade > 0.0 && viewDir.y > 0.0) {
-        // Snap the view vector to a fixed 3D grid so the hash evaluates identically across sub-pixels
         vec3 starGrid = floor(viewDir * 400.0);
-        
-        // Generate a random number specifically for this grid chunk
         float starHash = fract(sin(dot(starGrid, vec3(12.9898, 78.233, 54.53))) * 43758.5453);
-        
-        // Only top 0.5% of chunks become a star
         float star = smoothstep(0.995, 1.0, starHash);
-        
-        // Add a gentle twinkle using the time scale and the star's unique hash
         float twinkle = 0.8 + 0.2 * sin(pc.time * 2.0 + starHash * 100.0);
         
         skyColor += vec3(star * twinkle) * pc.starFade * horizonMix; 
@@ -72,66 +68,80 @@ void main() {
     
     // 3. Sun
     float sunDot = max(dot(viewDir, sunDir), 0.0);
-    skyColor += ubo.sunColor.rgb * pow(sunDot, 256.0) * 3.0; 
-    skyColor += ubo.sunColor.rgb * pow(sunDot, 8.0) * 0.4;   
+    float sunIntensity = pow(sunDot, 2048.0) * 3.0 + pow(sunDot, 32.0) * 0.4;
+    skyColor += ubo.sunColor.rgb * sunIntensity;
 
     // 4. Moon
     vec3 moonDir = -sunDir;
     float moonDot = max(dot(viewDir, moonDir), 0.0);
     float moonBlend = smoothstep(0.0, -0.2, sunDir.y);
+    float moonIntensity = 0.0;
+
     if (moonBlend > 0.0) {
         vec3 moonColor = vec3(0.55, 0.6, 0.65);
-        skyColor += moonColor * pow(moonDot, 512.0) * 2.5 * moonBlend; 
-        skyColor += moonColor * pow(moonDot, 16.0) * 0.2 * moonBlend;  
+        moonIntensity = (pow(moonDot, 512.0) * 2.5 + pow(moonDot, 16.0) * 0.2) * moonBlend;
+        skyColor += moonColor * moonIntensity; 
     }
 
-    // 5. Clouds
+    // 5. Fast 2.5D Clouds
     if (viewDir.y > 0.01) {
-        vec2 cloudUV = viewDir.xz / (viewDir.y + 0.15); 
-        cloudUV *= 0.6; 
-        
-        // Using the safe, pre-scaled CPU time
+        float twilightBlend = 1.0 - pc.starFade; 
         vec2 windOffset = vec2(pc.time * 0.015, pc.time * 0.005);
-        
-        float baseDensity = fbm(cloudUV + windOffset);
         float coverage = pc.coverage; 
-        float density = smoothstep(coverage, coverage + 0.25, baseDensity);
         
-        if (density > 0.0) {
-            // FIX: Recover the exact C++ twilight blend factor (1.0 = Day, 0.0 = Night)
-            float twilightBlend = 1.0 - pc.starFade; 
+        // LAYER 1: Cloud Bottoms
+        vec2 uvBottom = viewDir.xz / (viewDir.y + 0.15); 
+        uvBottom *= 0.6; 
+        float baseBottom = fbm(uvBottom + windOffset);
+        float densityBottom = smoothstep(coverage, coverage + 0.20, baseBottom);
+        
+        // LAYER 2: Cloud Tops
+        // Pushed height up to 0.25 for much stronger 3D parallax when moving the camera
+        vec2 uvTop = viewDir.xz / (viewDir.y + 0.25); 
+        uvTop *= 0.6;
+        float baseTop = fbm(uvTop + windOffset);
+        float densityTop = smoothstep(coverage, coverage + 0.20, baseTop);
+
+        float finalDensity = max(densityBottom, densityTop);
+
+        if (finalDensity > 0.0) {
+            // Directional Shadows (Sun/Moon blocking)
+            float densityTowardSun = fbm(uvBottom + windOffset + sunDir.xz * 0.12);
+            densityTowardSun = smoothstep(coverage, coverage + 0.30, densityTowardSun);
+            float sunShadow = clamp(densityTowardSun - densityBottom, 0.0, 1.0);
             
-            // 1. Calculate the shadow cast by the Sun
-            float densityTowardSun = fbm(cloudUV + windOffset + sunDir.xz * 0.15);
-            densityTowardSun = smoothstep(coverage, coverage + 0.25, densityTowardSun);
-            float sunShadow = clamp(densityTowardSun - density, 0.0, 1.0);
+            float densityTowardMoon = fbm(uvBottom + windOffset - sunDir.xz * 0.12);
+            densityTowardMoon = smoothstep(coverage, coverage + 0.30, densityTowardMoon);
+            float moonShadow = clamp(densityTowardMoon - densityBottom, 0.0, 1.0);
             
-            // 2. Calculate the shadow cast by the Moon (Opposite direction)
-            float densityTowardMoon = fbm(cloudUV + windOffset - sunDir.xz * 0.15);
-            densityTowardMoon = smoothstep(coverage, coverage + 0.25, densityTowardMoon);
-            float moonShadow = clamp(densityTowardMoon - density, 0.0, 1.0);
+            float directionalShadow = mix(moonShadow, sunShadow, twilightBlend);
             
-            // 3. Smoothly crossfade the shadows during sunset/sunrise! No snapping.
-            float shadow = mix(moonShadow, sunShadow, twilightBlend);
+            // NEW: Pillowy Volume Math
+            // Calculates a fake "Up" normal by comparing the top and bottom layer densities.
+            // 1.0 = Peak of the cloud, 0.0 = Deep underbelly
+            float fakeNormalY = smoothstep(0.0, 0.6, densityTop - (densityBottom * 0.5));
             
-            // Lighting colors
             vec3 baseCloudWhite = mix(vec3(0.05, 0.05, 0.08), vec3(0.95, 0.98, 1.0), twilightBlend);
             vec3 cloudLight = mix(baseCloudWhite, ubo.sunColor.rgb, 0.6);
-            
-            float moonBlend = smoothstep(0.0, -0.2, sunDir.y);
             if (moonBlend > 0.0) {
                 cloudLight += vec3(0.15, 0.2, 0.25) * moonBlend; 
             }
 
-            vec3 cloudShadow = mix(vec3(0.35, 0.4, 0.45) * twilightBlend, skyColor, 0.4);
-            vec3 finalCloudColor = mix(cloudLight, cloudShadow, shadow * 2.0);
+            vec3 cloudShadow = mix(vec3(0.35, 0.4, 0.45) * twilightBlend, cleanSkyGradient, 0.4);
+            
+            // 1. Apply directional shadow (sun/moon occlusion)
+            vec3 finalCloudColor = mix(cloudLight, cloudShadow, directionalShadow * 1.5);
+            
+            // 2. Apply vertical volume shadow (underbellies get dark, tops stay bright)
+            // This forces the bottom layer to look like a thick volumetric shadow
+            finalCloudColor = mix(cloudShadow, finalCloudColor, fakeNormalY * 0.8 + 0.2);
             
             float distanceFade = smoothstep(0.01, 0.2, viewDir.y);
-            float finalAlpha = clamp(density * distanceFade, 0.0, 1.0);
+            float finalAlpha = clamp(finalDensity * distanceFade, 0.0, 1.0);
             
             skyColor = mix(skyColor, finalCloudColor, finalAlpha);
         }
     }
 
-    outColor = vec4(skyColor, 1.0);
+    outColor = vec4(skyColor, 0.0);
 }

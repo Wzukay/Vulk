@@ -17,7 +17,21 @@ bool TestSphereAABB(vec3 center, float radius, vec3 aabbMin, vec3 aabbMax) {
     return dot(distance, distance) <= (radius * radius);
 }
 
+shared vec3 sharedViewSpaceLights[256];
+
 void main() {
+    // 2. Get a flattened index for the current thread within this specific 16x9 workgroup
+    uint localThreadIdx = gl_LocalInvocationIndex; 
+
+    // 3. COLLABORATIVE CACHING: The threads work together to transform the lights once!
+    // If there are 50 lights, the first 50 threads do the math, and the rest do nothing.
+    for (uint i = localThreadIdx; i < ubo.lightCount; i += (16 * 9)) {
+        sharedViewSpaceLights[i] = (ubo.view * vec4(lights[i].positionOrDir.xyz, 1.0)).xyz;
+    }
+
+    // 4. Force all threads to wait here until the shared array is fully populated
+    barrier(); 
+
     uint clusterIdx = gl_GlobalInvocationID.x + 
                       (gl_GlobalInvocationID.y * 16) + 
                       (gl_GlobalInvocationID.z * 16 * 9);
@@ -31,23 +45,20 @@ void main() {
         bool isPointLight = lights[i].positionOrDir.w > 0.5;
         
         if (!isPointLight) {
-            // Directional sun light affects everything
             if (visibleCount < 64) visibleLights[visibleCount++] = i;
             continue;
         }
 
-        // Transform point light to View Space
-        vec3 viewPos = (ubo.view * vec4(lights[i].positionOrDir.xyz, 1.0)).xyz;
-        float radius = lights[i].params.x; // Range
+        // 5. Read the pre-transformed position from blazing-fast shared memory!
+        vec3 viewPos = sharedViewSpaceLights[i];
+        float radius = lights[i].params.x;
 
         if (TestSphereAABB(viewPos, radius, aabb.minPoint.xyz, aabb.maxPoint.xyz)) {
             if (visibleCount < 64) visibleLights[visibleCount++] = i;
         }
     }
 
-    // Allocate space in the global index list atomically
     uint offset = atomicAdd(globalIndexCount, visibleCount);
-    
     grid[clusterIdx].offset = offset;
     grid[clusterIdx].count = visibleCount;
 

@@ -356,8 +356,15 @@ void GrassRenderer::AddGrass(int64_t key, const std::vector<GrassInstance>& gras
 void GrassRenderer::Cull(VkCommandBuffer commandBuffer, uint32_t currentFrameIndex) {
 	if (m_grassChunks.empty() || m_computePipeline == VK_NULL_HANDLE) return;
 
-	const float fadeStart = g_Settings.GetGrassFadeStart();
-	const float fadeEnd = g_Settings.GetGrassFadeEnd();
+	float fadeStart = g_Settings.GetGrassFadeStart();
+	float fadeEnd = g_Settings.GetGrassFadeEnd();
+	float lod0End = g_Settings.GetTerrainLod0End();
+
+	if (fadeEnd > lod0End) {
+		fadeEnd = lod0End - 5.0f;
+		if (fadeStart > fadeEnd) fadeStart = fadeEnd * 0.8f;
+	}
+
 	const glm::vec3& camPos = m_renderer->GetCameraPosition();
 
 	m_visibleChunksThisFrame.clear();
@@ -426,8 +433,15 @@ void GrassRenderer::Draw(VkCommandBuffer commandBuffer, VkDescriptorSet sharedDe
 	static auto startTime = std::chrono::high_resolution_clock::now();
 	float time = std::chrono::duration<float>(std::chrono::high_resolution_clock::now() - startTime).count();
 
-	const float fadeStart = g_Settings.GetGrassFadeStart();
-	const float fadeEnd = g_Settings.GetGrassFadeEnd();
+	float fadeStart = g_Settings.GetGrassFadeStart();
+	float fadeEnd = g_Settings.GetGrassFadeEnd();
+	float lod0End = g_Settings.GetTerrainLod0End();
+
+	if (fadeEnd > lod0End) {
+		fadeEnd = lod0End - 5.0f;
+		if (fadeStart > fadeEnd) fadeStart = fadeEnd * 0.8f;
+	}
+
 	const glm::vec3& camPos = m_renderer->GetCameraPosition();
 
 	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);

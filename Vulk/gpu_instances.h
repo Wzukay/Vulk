@@ -34,6 +34,8 @@ struct UniformBufferObject {
     alignas(16) glm::mat4 inverseViewProj;
     alignas(16) glm::mat4 inverseProj;
     alignas(16) glm::mat4 inverseView;
+
+    alignas(16) glm::mat4 previousViewProj;
 };
 
 struct SSAOUBO {
@@ -74,6 +76,10 @@ struct FSRConstants {
     float sharpness;
     uint32_t enableSSAO;
     glm::vec2 renderScale;
+    uint32_t enableMotionBlur;
+    uint32_t enableGodRays;
+    glm::vec2 lightScreenPos;
+    glm::vec4 lightColorAndIntensity;
 };
 
 struct RenderTarget {
@@ -246,6 +252,7 @@ struct StaticCullPush {
     float maxDistance;
     float _padding;
     glm::vec2 hzbSize;
+    glm::vec4 axisLengths;
 };
 struct MeshBufferAllocation {
     uint32_t firstIndex;

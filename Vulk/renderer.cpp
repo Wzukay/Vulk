@@ -1039,6 +1039,8 @@ void VulkanRenderer::UpdateUniformBuffer(const CameraData& cam) {
 	ubo.inverseProj = glm::inverse(ubo.proj);
 	ubo.inverseView = glm::inverse(ubo.view);
 
+	ubo.previousViewProj = m_previousViewProj;
+
 	m_currentViewProj = ubo.proj * ubo.view;
 
 	UpdateFrustumPlanes(ubo.proj * ubo.view);
@@ -1057,14 +1059,14 @@ void VulkanRenderer::UpdateUniformBuffer(const CameraData& cam) {
 		ubo.ambient = 0.22f;
 	}
 
+	m_previousViewProj = m_currentViewProj;
+
 	memcpy(uniformBufferMapped, &ubo, sizeof(ubo));
 
 	if (g_Settings.enableSSAO && ssaoUBOMapped != nullptr) {
 		ssaoUBOMapped->projection = ubo.proj;
 		ssaoUBOMapped->inverseProjection = ubo.inverseProj;
 	}
-
-	m_previousViewProj = m_currentViewProj;
 }
 
 void VulkanRenderer::CreateLightBuffer() {
@@ -1762,41 +1764,27 @@ void VulkanRenderer::RecreateGraphicsPipeline() {
 	CreateGraphicsPipeline();
 }
 void VulkanRenderer::CreateCompositionPipeline() {
-	VkDescriptorSetLayoutBinding samplerBinding{};
-	samplerBinding.binding = 0;
-	samplerBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	samplerBinding.descriptorCount = 1;
-	samplerBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+	VkDescriptorSetLayoutBinding uboBinding{ 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr };
+	VkDescriptorSetLayoutBinding samplerBinding{ 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr };
+	VkDescriptorSetLayoutBinding ssaoBinding{ 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr };
+	VkDescriptorSetLayoutBinding waterBinding{ 3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr };
+	VkDescriptorSetLayoutBinding depthBinding{ 4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr };
 
-	VkDescriptorSetLayoutBinding ssaoBinding{};
-	ssaoBinding.binding = 1;
-	ssaoBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	ssaoBinding.descriptorCount = 1;
-	ssaoBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-
-	VkDescriptorSetLayoutBinding waterBinding{};
-	waterBinding.binding = 2;
-	waterBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	waterBinding.descriptorCount = 1;
-	waterBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-
-	VkDescriptorSetLayoutBinding bindings[] = { samplerBinding, ssaoBinding, waterBinding };
+	VkDescriptorSetLayoutBinding bindings[] = { uboBinding, samplerBinding, ssaoBinding, waterBinding, depthBinding };
 
 	VkDescriptorSetLayoutCreateInfo layoutInfo{};
 	layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-	layoutInfo.bindingCount = 3;
+	layoutInfo.bindingCount = 5;
 	layoutInfo.pBindings = bindings;
 	vkCreateDescriptorSetLayout(logicalDevice, &layoutInfo, nullptr, &compositionDescriptorSetLayout);
 
-	VkDescriptorPoolSize poolSize{};
-	poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	poolSize.descriptorCount = 3;
+	VkDescriptorPoolSize poolSizes[2]{};
+	poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	poolSizes[0].descriptorCount = 4;
+	poolSizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+	poolSizes[1].descriptorCount = 1;
 
-	VkDescriptorPoolCreateInfo poolInfo{};
-	poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-	poolInfo.poolSizeCount = 1;
-	poolInfo.pPoolSizes = &poolSize;
-	poolInfo.maxSets = 1;
+	VkDescriptorPoolCreateInfo poolInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, nullptr, 0, 1, 2, poolSizes };
 	vkCreateDescriptorPool(logicalDevice, &poolInfo, nullptr, &compositionDescriptorPool);
 
 	VkDescriptorSetAllocateInfo allocInfo{};
@@ -1821,29 +1809,53 @@ void VulkanRenderer::CreateCompositionPipeline() {
 	waterImageInfo.imageView = waterTarget.view;
 	waterImageInfo.sampler = waterTarget.sampler;
 
-	VkWriteDescriptorSet descriptorWrites[3]{};
+	VkDescriptorImageInfo depthImageInfo{};
+	depthImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	depthImageInfo.imageView = depthTarget.view;
+	depthImageInfo.sampler = depthTarget.sampler;
+
+	VkDescriptorBufferInfo uboInfo{};
+	uboInfo.buffer = uniformBuffer;
+	uboInfo.offset = 0;
+	uboInfo.range = sizeof(UniformBufferObject);
+
+	VkWriteDescriptorSet descriptorWrites[5]{};
 	descriptorWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 	descriptorWrites[0].dstSet = compositionDescriptorSet;
-	descriptorWrites[0].dstBinding = 0;
+	descriptorWrites[0].dstBinding = 1;
 	descriptorWrites[0].descriptorCount = 1;
 	descriptorWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 	descriptorWrites[0].pImageInfo = &imageInfo;
 
 	descriptorWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 	descriptorWrites[1].dstSet = compositionDescriptorSet;
-	descriptorWrites[1].dstBinding = 1;
+	descriptorWrites[1].dstBinding = 2;
 	descriptorWrites[1].descriptorCount = 1;
 	descriptorWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 	descriptorWrites[1].pImageInfo = &ssaoImageInfo;
 
 	descriptorWrites[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 	descriptorWrites[2].dstSet = compositionDescriptorSet;
-	descriptorWrites[2].dstBinding = 2;
+	descriptorWrites[2].dstBinding = 3;
 	descriptorWrites[2].descriptorCount = 1;
 	descriptorWrites[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 	descriptorWrites[2].pImageInfo = &waterImageInfo;
 
-	vkUpdateDescriptorSets(logicalDevice, 3, descriptorWrites, 0, nullptr);
+	descriptorWrites[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	descriptorWrites[3].dstSet = compositionDescriptorSet;
+	descriptorWrites[3].dstBinding = 4;
+	descriptorWrites[3].descriptorCount = 1;
+	descriptorWrites[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	descriptorWrites[3].pImageInfo = &depthImageInfo;
+
+	descriptorWrites[4].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	descriptorWrites[4].dstSet = compositionDescriptorSet;
+	descriptorWrites[4].dstBinding = 0;
+	descriptorWrites[4].descriptorCount = 1;
+	descriptorWrites[4].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+	descriptorWrites[4].pBufferInfo = &uboInfo;
+
+	vkUpdateDescriptorSets(logicalDevice, 5, descriptorWrites, 0, nullptr);
 
 	VkPushConstantRange fsrPushConstantRange{};
 	fsrPushConstantRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
@@ -2545,7 +2557,14 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 
 			vkCmdBindDescriptorSets(scb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
 			vkCmdBindDescriptorSets(scb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 1, 1, &m_clusterForwardSets[currentFrame], 0, nullptr);
-			if (staticPipeline != VK_NULL_HANDLE && instancedPipeline != VK_NULL_HANDLE) m_staticMeshRenderer.Draw(scb, pipelineLayout, descriptorSet, cameraPosition, frustumPlanes, static_cast<uint32_t>(currentFrame), staticPipeline, instancedPipeline, dc0, cc0, tv0, ti0);
+			if (staticPipeline != VK_NULL_HANDLE && instancedPipeline != VK_NULL_HANDLE) {
+				m_staticMeshRenderer.Draw(scb, pipelineLayout, descriptorSet, cameraPosition, frustumPlanes, static_cast<uint32_t>(currentFrame), staticPipeline, instancedPipeline, dc0, cc0, tv0, ti0);
+
+				const auto& dynInstances = currentScene->GetDynamicInstances();
+				m_staticMeshRenderer.DrawDynamic(scb, pipelineLayout, dynInstances, staticPipeline);
+
+				dc0 += static_cast<uint32_t>(dynInstances.size());
+			}
 			}); });
 
 		auto f1 = std::async(std::launch::async, [&]() { return recordTask(1, [&](VkCommandBuffer scb) {
@@ -2784,6 +2803,31 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 		vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, compositionPipeline);
 		vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, compositionPipelineLayout, 0, 1, &compositionDescriptorSet, 0, nullptr);
 
+		glm::vec3 primaryLightDir = glm::vec3(0.0f, 1.0f, 0.0f);
+		glm::vec3 lightColor = glm::vec3(1.0f, 0.95f, 0.8f); // Warm sun tint
+		float baseIntensity = 0.8f;
+
+		if (currentScene != nullptr && !currentScene->GetLights().empty()) {
+			primaryLightDir = glm::normalize(glm::vec3(currentScene->GetLights()[0].positionOrDir));
+
+			// If the sun dips below the horizon, switch to the Moon!
+			if (primaryLightDir.y < -0.0f && currentScene->GetLights().size() > 1) {
+				primaryLightDir = glm::normalize(glm::vec3(currentScene->GetLights()[1].positionOrDir));
+				lightColor = glm::vec3(0.5f, 0.7f, 1.0f); // Cool moon tint
+				baseIntensity = 0.15f;
+			}
+		}
+
+		glm::vec4 clipSpace = m_currentViewProj * glm::vec4(primaryLightDir * 10000.0f, 1.0f);
+		glm::vec2 ndc = glm::vec2(clipSpace.x, clipSpace.y) / clipSpace.w;
+		glm::vec2 screenPos = ndc * 0.5f + 0.5f;
+
+		float finalIntensity = baseIntensity;
+		if (clipSpace.w < 0.0f) finalIntensity = 0.0f;
+
+		finalIntensity *= 1.0f - glm::smoothstep(1.2f, 2.5f, glm::length(ndc));
+
+		// 4. Populate your existing struct
 		FSRConstants fc{};
 		fc.const0 = glm::vec4(0.0f);
 		fc.const1 = glm::vec4(0.0f);
@@ -2791,7 +2835,14 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 		fc.const3 = glm::vec4(0.0f);
 		fc.sharpness = g_Settings.enableFSR ? 0.35f : 0.0f;
 		fc.enableSSAO = g_Settings.enableSSAO ? 1 : 0;
+		fc.enableMotionBlur = g_Settings.enableMotionBlur ? 1 : 0;
 		fc.renderScale = activeScale;
+
+		// Pass the new variables!
+		fc.enableGodRays = g_Settings.enableGodRays ? 1 : 0;
+		fc.lightScreenPos = screenPos;
+		fc.lightColorAndIntensity = glm::vec4(lightColor, finalIntensity);
+
 		vkCmdPushConstants(commandBuffer, compositionPipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(FSRConstants), &fc);
 
 		vkCmdDraw(commandBuffer, 3, 1, 0, 0);
@@ -3313,7 +3364,7 @@ void VulkanRenderer::EndUI() {
 }
 void VulkanRenderer::UpdateScene(const Scene& scene) {
 	// Scene caches the ECS traversal, avoids rebuilding the static draw lists and instance buckets when nothing changed
-	if (scene.NeedsRendererUpdate()) {
+	if (scene.NeedsStaticUpdate()) {
 		m_staticMeshRenderer.UpdateScene(scene);
 	}
 

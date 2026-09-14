@@ -38,35 +38,6 @@ layout(push_constant) uniform PushConstants {
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
-// --- VORONOI NOISE GENERATOR ---
-vec2 hash22(vec2 p) {
-    p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
-    return fract(sin(p) * 43758.5453123);
-}
-
-// Returns the distance to the closest Voronoi cell center
-float calculateVoronoiDistance(vec2 x) {
-    vec2 n = floor(x);
-    vec2 f = fract(x);
-
-    float minDist = 8.0;
-
-    // Check the 9 neighboring grid cells
-    for (int j = -1; j <= 1; j++) {
-        for (int i = -1; i <= 1; i++) {
-            vec2 g = vec2(float(i), float(j));
-            vec2 o = hash22(n + g); // Jitter the center
-            vec2 r = g + o - f;
-            float d = dot(r, r); // Squared distance
-
-            if (d < minDist) {
-                minDist = d;
-            }
-        }
-    }
-    return sqrt(minDist);
-}
-
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= pc.totalInstances) return;
@@ -84,14 +55,14 @@ void main() {
 
     if (!visible) return;
 
-    // 2. VORONOI CLUMPING
-    // Multiply by frequency. 0.08 means clumps are roughly 12.5 meters wide.
-    float distToClumpCenter = calculateVoronoiDistance(inst.position.xz * 0.08);
-    
-    // clumpMask: 1.0 at the center of the patch, 0.0 at the edges
-    float clumpMask = smoothstep(0.85, 0.2, distToClumpCenter);
+    // 2. FAST TRIGONOMETRIC CLUMPING
+    float noiseA = sin(inst.position.x * 0.15) * cos(inst.position.z * 0.15);
+    float noiseB = sin(inst.position.x * 0.05 + 1.2) * cos(inst.position.z * 0.05 + 0.8);
 
-    // Hard cull grass that falls in the empty spaces between Voronoi cells
+    // clumpMask: 1.0 at the center of the patch, 0.0 at the edges
+    float clumpMask = smoothstep(0.1, 0.4, (noiseA * noiseB) * 0.5 + 0.5);
+
+    // Hard cull grass that falls in the empty spaces
     if (clumpMask < 0.05) {
         return; 
     }

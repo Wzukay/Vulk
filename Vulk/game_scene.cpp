@@ -103,8 +103,7 @@ void GameplayScene::Update(float deltaTime) {
 
     m_dayNight.Tick(deltaTime);
 
-    m_ctx.renderer->SetSkyParams(m_dayNight.zenithColor, m_dayNight.horizonColor,
-                                m_dayNight.starFade, m_dayNight.cloudTime, m_dayNight.coverage);
+    m_ctx.renderer->SetSkyParams(m_dayNight.zenithColor, m_dayNight.horizonColor, m_dayNight.starFade, m_dayNight.cloudTime, m_dayNight.coverage);
 
     std::vector<Light> activeLights;
     activeLights.push_back(m_dayNight.sunLight);
@@ -121,7 +120,10 @@ void GameplayScene::Update(float deltaTime) {
     }
     m_scene.SetLights(activeLights);
 
-    m_ctx.renderer->UpdateScene(m_scene);
+    if (m_scene.NeedsStaticUpdate() || m_scene.HasModifiedLights()) {
+        m_ctx.renderer->UpdateScene(m_scene);
+        m_scene.ClearModifiedLightsFlag();
+    }
 }
 
 void GameplayScene::Render() {

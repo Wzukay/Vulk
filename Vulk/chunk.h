@@ -15,6 +15,7 @@
 #include <queue>
 #include <optional>
 #include <shared_mutex>
+#include <deque>
 
 #include "asset_manager.h"
 #include "scene.h"
@@ -45,13 +46,12 @@ struct ChunkCoord {
 
 struct TerrainData {
     float height;
-    glm::vec3 biomeWeights; // Used for texture splatting
-    glm::vec3 groundColor;  // Used for base ground tint
+    glm::vec3 biomeWeights;
+    glm::vec3 groundColor;
     float waterLevel;
 };
 
-struct TerrainSample
-{
+struct TerrainSample {
     float height;
     glm::vec3 biomeWeights;
 };
@@ -60,6 +60,7 @@ struct ChunkGridCache {
     int resolution = 0;
     std::vector<float> heightData;
 };
+
 struct ChunkJobResult {
     ChunkCoord coord;
     std::vector<ModelVertex> vertices;
@@ -76,6 +77,7 @@ struct ChunkJobResult {
     std::vector<PropInstance> props;
     std::vector<SwarmData> swarms;
 };
+
 struct ChunkSortItem {
     ChunkCoord coord;
     float distanceSq;
@@ -94,6 +96,7 @@ struct PooledMeshBuffers {
     std::vector<ModelVertex> vertices;
     std::vector<uint32_t> indices;
 };
+
 class MeshBufferPool {
 private:
     std::mutex m_mutex;
@@ -102,7 +105,7 @@ public:
     PooledMeshBuffers Acquire() {
         std::lock_guard<std::mutex> lock(m_mutex);
         if (m_pool.empty()) {
-            return PooledMeshBuffers(); // Fresh allocation only if empty
+            return PooledMeshBuffers();
         }
         auto buffers = std::move(m_pool.back());
         m_pool.pop_back();
@@ -110,7 +113,7 @@ public:
     }
 
     void Release(PooledMeshBuffers&& buffers) {
-        buffers.vertices.clear(); // Clears elements but retains underlying heap capacity
+        buffers.vertices.clear();
         buffers.indices.clear();
         std::lock_guard<std::mutex> lock(m_mutex);
         m_pool.push_back(std::move(buffers));
@@ -134,6 +137,8 @@ public:
     void Init(VulkanRenderer& renderer);
     void SetSeed(int s) { s_globalSeed = s; }
     void SetRandomSeed() { s_globalSeed = std::rand() % 1000000; }
+
+    // BASELINE: Original Update Signature
     bool Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& renderer);
 
     static float GetCachedHeightFromGrid(float worldX, float worldZ);
@@ -145,7 +150,7 @@ public:
 
 private:
     bool m_shuttingDown = false;
-    const float MOVE_THRESHOLD = 64.0f;       // Trigger if moved more than 16 meters (e.g., 1/8th of a chunk)
+    const float MOVE_THRESHOLD = 64.0f;
     const float ROTATE_THRESHOLD = 0.965f;
 
     size_t m_currentAmortizeIndex = 0;
@@ -189,9 +194,8 @@ private:
 
     static uint32_t Hash2D(int x, int z, int seed);
 
-
     void GenerateChunk(int chunkX, int chunkZ, int resolution, float chunkSize,
-        ChunkJobResult& outResult, std::shared_ptr<std::atomic<bool>> cancelToken = nullptr);
+        ChunkJobResult& outResult, std::shared_ptr<std::atomic<bool>> cancelToken);
 
     void GenerateChunkProps(int chunkX, int chunkZ, int lod, ChunkJobResult& outResult,
         const std::function<TerrainData(float, float)>& heightColorFunc);

@@ -14,6 +14,29 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include "mesh_types.h"
 
+class StringHash {
+public:
+    static uint32_t Hash(const std::string& str) {
+        if (str.empty()) return 0;
+        uint32_t hash = 2166136261u;
+        for (char c : str) {
+            hash ^= static_cast<uint32_t>(c);
+            hash *= 16777619u;
+        }
+        // Store it so the renderer can look up the file path later!
+        if (m_registry.find(hash) == m_registry.end()) {
+            m_registry[hash] = str;
+        }
+        return hash;
+    }
+
+    static std::string Get(uint32_t hash) {
+        return m_registry.count(hash) ? m_registry[hash] : "";
+    }
+private:
+    static inline std::unordered_map<uint32_t, std::string> m_registry;
+};
+
 // Forward declarations for templated view interactions
 class Registry;
 template <typename... Components> class MultiView;
@@ -50,7 +73,7 @@ struct LightComponent {
 };
 
 struct RenderComponent {
-    std::string meshName;
+    uint32_t meshHash = 0;
     uint32_t albedoTextureId = 0;
     uint32_t normalTextureId = 0;
     MeshType type = MeshType::Static;
@@ -136,12 +159,37 @@ private:
     std::unordered_map<std::type_index, std::unique_ptr<IComponentPool>> m_pools;
 
     template <typename T>
+    static size_t TypeSlot() {
+        static const size_t slot = s_nextSlot++;
+        return slot;
+    }
+    static inline size_t s_nextSlot = 0;
+
+    std::vector<void*> m_poolCache;
+
+    template <typename T>
     ComponentPool<T>* GetPool() {
-        auto typeIdx = std::type_index(typeid(T));
-        if (m_pools.find(typeIdx) == m_pools.end()) {
-            m_pools[typeIdx] = std::make_unique<ComponentPool<T>>();
+        size_t slot = TypeSlot<T>();
+        if (slot >= m_poolCache.size()) {
+            m_poolCache.resize(slot + 1, nullptr);
         }
-        return static_cast<ComponentPool<T>*>(m_pools[typeIdx].get());
+        if (m_poolCache[slot] != nullptr) {
+            return static_cast<ComponentPool<T>*>(m_poolCache[slot]);
+        }
+
+        auto typeIdx = std::type_index(typeid(T));
+        auto it = m_pools.find(typeIdx);
+        ComponentPool<T>* pool;
+        if (it == m_pools.end()) {
+            auto newPool = std::make_unique<ComponentPool<T>>();
+            pool = newPool.get();
+            m_pools[typeIdx] = std::move(newPool);
+        }
+        else {
+            pool = static_cast<ComponentPool<T>*>(it->second.get());
+        }
+        m_poolCache[slot] = pool;
+        return pool;
     }
 
 public:
@@ -172,9 +220,14 @@ public:
 
     void Clear() {
         m_pools.clear();
+        m_poolCache.clear();
+        m_poolCache.shrink_to_fit();
         m_freeEntities.clear();
         m_nextEntity = 0;
     }
+
+    // Friend declaration needed since GetPool is private and MultiView needs it.
+    template <typename... Components> friend class MultiView;
 };
 
 template <typename... Components>

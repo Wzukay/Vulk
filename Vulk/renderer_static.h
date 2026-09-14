@@ -28,6 +28,8 @@ public:
         VkPipeline staticPipeline, VkPipeline instancedPipeline, // Pipelines passed securely
         uint32_t& outDrawCalls, uint32_t& outCulledCount,
         uint32_t& outVertexCount, uint32_t& outIndexCount);
+    void DrawDynamic(VkCommandBuffer commandBuffer, VkPipelineLayout pipelineLayout,
+        const std::vector<MeshInstance>& dynamicInstances, VkPipeline pipeline);
 
     void Cull(VkCommandBuffer commandBuffer, const glm::vec3& cameraPos, const glm::mat4& viewProj, const glm::vec2& hzbSize,
         uint32_t currentFrameIndex, uint32_t& outCulledCount, uint32_t& outVertexCount, uint32_t& outIndexCount);
@@ -87,9 +89,10 @@ private:
     VkDeviceSize m_maxIndices = 0;
 
     // Deduplication tracking
-    std::unordered_map<std::string, MeshBufferAllocation> m_meshAllocations;
+    std::unordered_map<uint32_t, MeshBufferAllocation> m_meshAllocations;
     std::vector<StaticInstanceCullData> m_cullInstances;
     std::vector<StaticIndirectBatch> m_indirectBatches;
+    std::unordered_map<uint32_t, uint32_t> m_batchIndexByMeshHash;
 
     std::vector<SceneObject> m_sceneObjects;
     std::vector<SubMesh> m_subMeshes;
@@ -104,7 +107,7 @@ private:
     glm::vec3 m_lastFrustumNormal = glm::vec3(0.0f);
     uint32_t m_sampleJitterCounter = 0;
 
-    void UploadUniqueMeshes(const std::unordered_set<std::string>& uniqueMeshNames);
+    void UploadUniqueMeshes(const std::unordered_set<uint32_t>& uniqueMeshHashes);
     void ResizeBuffers(uint32_t requiredVertices, uint32_t requiredIndices);
     void CreateCullPipeline();
     void UpdateCullDescriptors();

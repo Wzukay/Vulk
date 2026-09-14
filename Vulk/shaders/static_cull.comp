@@ -27,6 +27,7 @@ layout(push_constant) uniform CullPush {
     uint totalInstances;
     float maxDistance;
     vec2 hzbSize;
+    vec4 axisLengths;
 } push;
 
 uint atomicAddDivergent(bool wantsToWrite, uint cmdIndex) {
