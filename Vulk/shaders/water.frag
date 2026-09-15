@@ -54,6 +54,11 @@ void main() {
     ivec2 pixelCoord = ivec2(gl_FragCoord.xy);
     float opaqueDepth = texelFetch(sceneDepth, pixelCoord, 0).r;
 
+    // If the water fragment is further away than the terrain, discard it!
+    if (gl_FragCoord.z > opaqueDepth) {
+        discard;
+    }
+
     // 1. Reconstruct the exact world position of the opaque terrain behind the water
     vec2 screenUv = gl_FragCoord.xy / pc.renderSize;
     vec2 ndc = screenUv * 2.0 - 1.0;

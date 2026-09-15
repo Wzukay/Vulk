@@ -129,7 +129,7 @@ void main() {
 
     // Apply motion blur to the base scene color
     vec4 sceneColor = GetMotionBlurredColor(fragUV, activeUV);
-    vec4 waterColor = texture(waterTexture, fragUV);
+    vec4 waterColor = texture(waterTexture, activeUV);
 
     if (pc.enableSSAO == 1) {
         sceneColor.rgb *= texture(ssaoMap, activeUV).r;

@@ -41,39 +41,31 @@ bool IsChunkVisible(WaterChunk chunk) {
     vec3 center = chunk.centerRadius.xyz;
     float radius = chunk.centerRadius.w;
 
+    // 1. Distance Cull (If it's hidden deep in the fog, don't draw it)
     if (length(center - push.cameraPos) > push.maxDistance + radius) {
         return false;
     }
 
-    vec4 clipCenter = push.viewProj * vec4(center, 1.0);
+    // 2. Transpose the matrix so we can extract the ROWS instead of COLUMNS!
+    mat4 m = transpose(push.viewProj);
+    vec4 planes[6];
+    
+    // Extract true 3D Frustum Planes
+    planes[0] = m[3] + m[0]; // Left
+    planes[1] = m[3] - m[0]; // Right
+    planes[2] = m[3] + m[1]; // Bottom
+    planes[3] = m[3] - m[1]; // Top
+    planes[4] = m[2];        // Near
+    planes[5] = m[3] - m[2]; // Far
 
-    float radiusX = radius * length(vec3(push.viewProj[0].x, push.viewProj[1].x, push.viewProj[2].x));
-    float radiusY = radius * length(vec3(push.viewProj[0].y, push.viewProj[1].y, push.viewProj[2].y));
-    float radiusZ = radius * length(vec3(push.viewProj[0].z, push.viewProj[1].z, push.viewProj[2].z));
-    float radiusW = radius * length(vec3(push.viewProj[0].w, push.viewProj[1].w, push.viewProj[2].w));
-
-    if (clipCenter.x + clipCenter.w < -(radiusX + radiusW)) {
-        return false;
-    }
-
-    if (clipCenter.x - clipCenter.w > radiusX + radiusW) {
-        return false;
-    }
-
-    if (clipCenter.y + clipCenter.w < -(radiusY + radiusW)) {
-        return false;
-    }
-
-    if (clipCenter.y - clipCenter.w > radiusY + radiusW) {
-        return false;
-    }
-
-    if (clipCenter.z + radiusZ < 0.0) {
-        return false;
-    }
-
-    if (clipCenter.z - clipCenter.w > radiusZ + radiusW) {
-        return false;
+    // 3. Test the chunk's bounding sphere against all 6 planes
+    for (int i = 0; i < 6; i++) {
+        float l = length(planes[i].xyz); // Normalize the plane normal
+        
+        // If the sphere is completely on the negative side of the plane, it is outside the camera!
+        if (dot(planes[i].xyz / l, center) + (planes[i].w / l) + radius < 0.0) {
+            return false;
+        }
     }
 
     return true;

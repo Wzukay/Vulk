@@ -34,5 +34,8 @@ public:
 	float cameraSpeed = 5;
 	void ProcessMouse(GLFWwindow* window, double xpos, double ypos);
 	CameraData ProcessInput(GLFWwindow* window);
+	void SetCameraPosition(const glm::vec3& newPos) {
+		cam.pos = newPos; // Or m_cameraPos, depending on your naming convention
+	}
 };
 

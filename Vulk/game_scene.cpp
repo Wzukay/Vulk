@@ -78,6 +78,7 @@ void GameplayScene::Update(float deltaTime) {
 
     if (m_isPaused) return;
 
+    // 1. Get raw camera data from Input (This holds the NoClip position!)
     CameraData cam = m_ctx.input->ProcessInput(m_ctx.window);
 
     g_AudioEngine.Tick();
@@ -87,18 +88,52 @@ void GameplayScene::Update(float deltaTime) {
     auto& physics = m_scene.GetRegistry().GetComponent<PhysicsComponent>(m_playerEntity);
     auto& playerOpt = m_scene.GetRegistry().GetComponent<PlayerComponent>(m_playerEntity);
 
+    // 2. TELEPORT LOGIC
+    static ControlMode lastMode = g_CurrentMode;
+    if (lastMode != g_CurrentMode) {
+        if (g_CurrentMode == ControlMode::Player) {
+            // NoClip -> Player: Drop the physical body exactly where the camera is
+            transform.position = cam.pos - glm::vec3(0.0f, playerOpt.playerHeight, 0.0f);
+
+            // Zero out velocity so you don't inherit old falling momentum
+            physics.velocity = glm::vec3(0.0f);
+            transform.isDirty = true;
+        }
+        else if (g_CurrentMode == ControlMode::NoClip) {
+            // Player -> NoClip: Snap the camera to exactly where the player's eyes are
+            glm::vec3 eyePos = transform.position + glm::vec3(0.0f, playerOpt.playerHeight, 0.0f);
+
+            m_ctx.input->SetCameraPosition(eyePos);
+            cam.pos = eyePos;
+        }
+        lastMode = g_CurrentMode;
+    }
+
+    // 3. Process WASD Intentions
     if (g_CurrentMode == ControlMode::Player) {
         Player::Update(m_scene.GetRegistry(), m_playerEntity, m_ctx.window, cam.front, cam.up, deltaTime);
-
-        cam.pos = transform.position + glm::vec3(0.0f, playerOpt.playerHeight, 0.0f);
     }
     else {
         physics.velocity.x = 0.0f;
         physics.velocity.z = 0.0f;
     }
 
+    // 4. Run Physics FIRST so gravity pulls the body down
     PhysicsSystem::Update(m_scene.GetRegistry(), deltaTime);
 
+    // 5. Sync cameras AFTER gravity is applied
+    if (g_CurrentMode == ControlMode::Player) {
+        // The body has moved/fallen. Calculate the new eye position.
+        glm::vec3 eyePos = transform.position + glm::vec3(0.0f, playerOpt.playerHeight, 0.0f);
+
+        // Force the Input system's internal ghost camera to fall with us
+        m_ctx.input->SetCameraPosition(eyePos);
+
+        // Lock the visual renderer camera to the post-gravity body
+        cam.pos = eyePos;
+    }
+
+    // 6. Update rendering
     m_ctx.renderer->UpdateUniformBuffer({ cam.pos, cam.front, cam.up });
     m_chunk.Update(cam.pos, m_scene, *m_ctx.renderer);
 

@@ -161,7 +161,7 @@ void main() {
 
     finalColor.rgb += GetGodRays(activeUV);
 
-    vec4 waterColor = texture(waterTexture, fragUV);
+    vec4 waterColor = texture(waterTexture, activeUV);
     finalColor = mix(finalColor, waterColor.rgb, waterColor.a);
 
     outColor = vec4(finalColor, sceneAlpha);

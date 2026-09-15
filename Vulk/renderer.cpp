@@ -24,6 +24,10 @@ static void DestroyDebugUtilsMessengerEXT(VkInstance instance, VkDebugUtilsMesse
 	if (func != nullptr) func(instance, debugMessenger, pAllocator);
 }
 static VKAPI_ATTR VkBool32 VKAPI_CALL DebugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity, VkDebugUtilsMessageTypeFlagsEXT messageType, const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData, void* pUserVoid) {
+	if (strstr(pCallbackData->pMessage, "VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_KMT_BIT") != nullptr) {
+		return VK_FALSE;
+	}
+	
 	if (messageSeverity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT) {
 		std::cerr << "[VULKAN VALIDATION]: " << pCallbackData->pMessage << "\n\n";
 	}
@@ -383,7 +387,7 @@ void VulkanRenderer::InitVulkan() {
 	m_terrainRenderer.UpdateHZBDescriptor(hzbTarget.view, hzbTarget.sampler);
 	m_staticMeshRenderer.UpdateHZBDescriptor(hzbTarget.view, hzbTarget.sampler);
 
-	m_waterRenderer.Init(logicalDevice, this, &m_uploader, swapChainImageFormat, depthFormat, descriptorSetLayout, m_currentMsaaSamples);
+	m_waterRenderer.Init(logicalDevice, this, &m_uploader, swapChainImageFormat, depthFormat, descriptorSetLayout, VK_SAMPLE_COUNT_1_BIT);
 	m_waterRenderer.SetSceneDepth(depthTarget.view, depthTarget.sampler);
 	m_grassRenderer.Init(logicalDevice, this, &m_uploader, swapChainImageFormat, depthFormat, descriptorSetLayout, m_currentMsaaSamples);
 	m_boidRenderer.Init(logicalDevice, this, &m_uploader, swapChainImageFormat, depthFormat, descriptorSetLayout, m_currentMsaaSamples);
@@ -1466,11 +1470,16 @@ void VulkanRenderer::GenerateHZB(VkCommandBuffer commandBuffer) {
 
 	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, hzbPipeline);
 
-	uint32_t currentWidth = std::max(1u, static_cast<uint32_t>(GetInternalWidth()) / 2);
-	uint32_t currentHeight = std::max(1u, static_cast<uint32_t>(GetInternalHeight()) / 2);
+	uint32_t renderW = std::min(static_cast<uint32_t>(GetInternalWidth()), swapChainExtent.width);
+	uint32_t renderH = std::min(static_cast<uint32_t>(GetInternalHeight()), swapChainExtent.height);
+
+	uint32_t activeWidth = std::max(1u, renderW / 2);
+	uint32_t activeHeight = std::max(1u, renderH / 2);
+
+	uint32_t physicalWidth = std::max(1u, swapChainExtent.width / 2);
+	uint32_t physicalHeight = std::max(1u, swapChainExtent.height / 2);
 
 	for (uint32_t i = 0; i < hzbMipLevels; i++) {
-		// If not the first mip, transition the *previous* mip to READ_ONLY so we can sample from it
 		if (i > 0) {
 			VkImageMemoryBarrier barrier{};
 			barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -1494,16 +1503,19 @@ void VulkanRenderer::GenerateHZB(VkCommandBuffer commandBuffer) {
 
 		vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, hzbPipelineLayout, 0, 1, &hzbDescriptorSets[i], 0, nullptr);
 
-		glm::vec2 outSize(currentWidth, currentHeight);
+		// --- FIX: Pass the Physical Size to the shader! ---
+		glm::vec2 outSize((float)physicalWidth, (float)physicalHeight);
 		vkCmdPushConstants(commandBuffer, hzbPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(glm::vec2), &outSize);
 
-		// 16x16 local workgroup size (defined in the GLSL shader)
-		uint32_t groupCountX = (currentWidth + 15) / 16;
-		uint32_t groupCountY = (currentHeight + 15) / 16;
+		// --- FIX: Only dispatch threads for the Active Area! ---
+		uint32_t groupCountX = (activeWidth + 15) / 16;
+		uint32_t groupCountY = (activeHeight + 15) / 16;
 		vkCmdDispatch(commandBuffer, groupCountX, groupCountY, 1);
 
-		currentWidth = std::max(1u, currentWidth / 2);
-		currentHeight = std::max(1u, currentHeight / 2);
+		activeWidth = std::max(1u, activeWidth / 2);
+		activeHeight = std::max(1u, activeHeight / 2);
+		physicalWidth = std::max(1u, physicalWidth / 2);
+		physicalHeight = std::max(1u, physicalHeight / 2);
 	}
 
 	// Transition the final mip to READ_ONLY so the whole pyramid is ready for the terrain culling shader
@@ -2372,11 +2384,15 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 	if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) throw std::runtime_error("Failed to start recording.");
 
+	// 1. Establish safely clamped physical rendering boundaries for the active frame
+	uint32_t renderWidth = std::min(static_cast<uint32_t>(GetInternalWidth()), swapChainExtent.width);
+	uint32_t renderHeight = std::min(static_cast<uint32_t>(GetInternalHeight()), swapChainExtent.height);
+
 	m_boidRenderer.TickCompute(commandBuffer, ImGui::GetIO().DeltaTime);
 	m_grassRenderer.Cull(commandBuffer, static_cast<uint32_t>(currentFrame));
 
 	if (currentScene != nullptr) {
-		glm::vec2 dynamicHzbSize = glm::vec2((float)GetInternalWidth() / 2.0f, (float)GetInternalHeight() / 2.0f);
+		glm::vec2 dynamicHzbSize = glm::vec2((float)renderWidth / 2.0f, (float)renderHeight / 2.0f);
 		m_staticMeshRenderer.Cull(commandBuffer, cameraPosition, m_previousViewProj, dynamicHzbSize, static_cast<uint32_t>(currentFrame), culledCount, sceneTotalVertices, sceneTotalIndices);
 		m_terrainRenderer.Cull(commandBuffer, cameraPosition, m_previousViewProj, dynamicHzbSize, (float)(hzbMipLevels - 1), static_cast<uint32_t>(currentFrame), culledCount, sceneTotalVertices, sceneTotalIndices);
 		m_waterRenderer.Cull(commandBuffer, cameraPosition, m_currentViewProj, static_cast<uint32_t>(currentFrame));
@@ -2389,17 +2405,18 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 	TransitionImageLayout(commandBuffer, offscreenTarget.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
 	TransitionImageLayout(commandBuffer, depthTarget.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_ASPECT_DEPTH_BIT);
 
+	// The Viewport and Scissor ONLY draw inside the Active Render Scale bounds
 	VkViewport viewport{};
 	viewport.x = 0.0f;
 	viewport.y = 0.0f;
-	viewport.width = static_cast<float>(GetInternalWidth());
-	viewport.height = static_cast<float>(GetInternalHeight());
+	viewport.width = static_cast<float>(renderWidth);
+	viewport.height = static_cast<float>(renderHeight);
 	viewport.minDepth = 0.0f;
 	viewport.maxDepth = 1.0f;
 
 	VkRect2D scissor{};
 	scissor.offset = { 0, 0 };
-	scissor.extent = { GetInternalWidth(), GetInternalHeight() };
+	scissor.extent = { renderWidth, renderHeight };
 
 	VkRenderingAttachmentInfo colorAttachment{};
 	colorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
@@ -2431,7 +2448,8 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 	VkRenderingInfo renderingInfo{};
 	renderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
 	renderingInfo.renderArea.offset = { 0, 0 };
-	renderingInfo.renderArea.extent = { GetInternalWidth(), GetInternalHeight() };
+	// FIX: Clear the ENTIRE physical extent to wipe the green AMD garbage data
+	renderingInfo.renderArea.extent = swapChainExtent;
 	renderingInfo.layerCount = 1;
 	renderingInfo.colorAttachmentCount = 1;
 	renderingInfo.pColorAttachments = &colorAttachment;
@@ -2542,8 +2560,8 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 	TransitionImageLayout(commandBuffer, depthTarget.image, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_ASPECT_DEPTH_BIT);
 	TransitionImageLayout(commandBuffer, waterTarget.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
 
-	uint32_t waterWidth = GetInternalWidth();
-	uint32_t waterHeight = GetInternalHeight();
+	uint32_t waterWidth = renderWidth;
+	uint32_t waterHeight = renderHeight;
 	VkViewport waterViewport{};
 	waterViewport.x = 0.0f; waterViewport.y = 0.0f;
 	waterViewport.width = static_cast<float>(waterWidth); waterViewport.height = static_cast<float>(waterHeight);
@@ -2566,7 +2584,8 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 	VkRenderingInfo waterRenderingInfo{};
 	waterRenderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
 	waterRenderingInfo.renderArea.offset = { 0, 0 };
-	waterRenderingInfo.renderArea.extent = { waterWidth, waterHeight };
+	// FIX: Clear the ENTIRE physical extent
+	waterRenderingInfo.renderArea.extent = swapChainExtent;
 	waterRenderingInfo.layerCount = 1;
 	waterRenderingInfo.colorAttachmentCount = 1;
 	waterRenderingInfo.pColorAttachments = &waterAttachment;
@@ -2579,19 +2598,26 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 
 	TransitionImageLayout(commandBuffer, waterTarget.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
 
-	glm::vec2 activeScale = glm::vec2((float)GetInternalWidth() / (float)swapChainExtent.width, (float)GetInternalHeight() / (float)swapChainExtent.height);
+	glm::vec2 activeScale = glm::vec2((float)renderWidth / (float)swapChainExtent.width, (float)renderHeight / (float)swapChainExtent.height);
 	GenerateHZB(commandBuffer);
 
 	if (g_Settings.enableSSAO) {
-		uint32_t ssaoWidth = std::max(1u, GetInternalWidth() / 2);
-		uint32_t ssaoHeight = std::max(1u, GetInternalHeight() / 2);
+		uint32_t ssaoWidth = std::max(1u, renderWidth / 2);
+		uint32_t ssaoHeight = std::max(1u, renderHeight / 2);
+
+		// FIX: Calculate the full physical bounds to properly clear memory and divide UVs
+		VkExtent2D ssaoFullExtent = { std::max(1u, swapChainExtent.width / 2), std::max(1u, swapChainExtent.height / 2) };
+		glm::vec2 physicalHalfSize = glm::vec2((float)ssaoFullExtent.width, (float)ssaoFullExtent.height);
+
 		VkViewport ssaoViewport{};
 		ssaoViewport.x = 0.0f; ssaoViewport.y = 0.0f;
-		ssaoViewport.width = static_cast<float>(ssaoWidth); ssaoViewport.height = static_cast<float>(ssaoHeight);
+		ssaoViewport.width = static_cast<float>(ssaoWidth);
+		ssaoViewport.height = static_cast<float>(ssaoHeight);
 		ssaoViewport.minDepth = 0.0f; ssaoViewport.maxDepth = 1.0f;
 
 		VkRect2D ssaoScissor{};
-		ssaoScissor.offset = { 0, 0 }; ssaoScissor.extent = { ssaoWidth, ssaoHeight };
+		ssaoScissor.offset = { 0, 0 };
+		ssaoScissor.extent = { ssaoWidth, ssaoHeight };
 
 		TransitionImageLayout(commandBuffer, ssaoTarget.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
 
@@ -2609,7 +2635,7 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 		VkRenderingInfo ssaoRenderInfo{};
 		ssaoRenderInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
 		ssaoRenderInfo.renderArea.offset = { 0, 0 };
-		ssaoRenderInfo.renderArea.extent = { ssaoWidth, ssaoHeight };
+		ssaoRenderInfo.renderArea.extent = ssaoFullExtent; // FIX: Clear entire physical memory
 		ssaoRenderInfo.layerCount = 1;
 		ssaoRenderInfo.colorAttachmentCount = 1;
 		ssaoRenderInfo.pColorAttachments = &ssaoAttachment;
@@ -2621,7 +2647,7 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 		vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, ssaoPipelineLayout, 0, 1, &ssaoDescriptorSet, 0, nullptr);
 
 		SSAOPushConstants ssaoPC{};
-		ssaoPC.screenSize = glm::vec2(ssaoWidth, ssaoHeight);
+		ssaoPC.screenSize = physicalHalfSize; // FIX: Prevents sliding shadows
 		ssaoPC.radius = 1.6f;
 		ssaoPC.bias = 0.2f;
 		ssaoPC.renderScale = activeScale;
@@ -2646,7 +2672,7 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 		VkRenderingInfo blurHRenderInfo{};
 		blurHRenderInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
 		blurHRenderInfo.renderArea.offset = { 0, 0 };
-		blurHRenderInfo.renderArea.extent = { ssaoWidth, ssaoHeight };
+		blurHRenderInfo.renderArea.extent = ssaoFullExtent; // FIX: Clear entire physical memory
 		blurHRenderInfo.layerCount = 1;
 		blurHRenderInfo.colorAttachmentCount = 1;
 		blurHRenderInfo.pColorAttachments = &blurHAttachment;
@@ -2658,7 +2684,7 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 		vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, ssaoBlurPipelineLayout, 0, 1, &ssaoBlurDescriptorSetHorizontal, 0, nullptr);
 
 		SSAOBlurPushConstants blurHPC{};
-		blurHPC.screenSize = glm::vec2(ssaoWidth, ssaoHeight);
+		blurHPC.screenSize = physicalHalfSize; // FIX: Prevents sliding shadows
 		blurHPC.blurDirection = glm::vec2(1.0f, 0.0f);
 		blurHPC.colorSigma = 0.10f;
 		blurHPC.spatialSigma = 2.0f;
@@ -2684,7 +2710,7 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 		VkRenderingInfo blurVRenderInfo{};
 		blurVRenderInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
 		blurVRenderInfo.renderArea.offset = { 0, 0 };
-		blurVRenderInfo.renderArea.extent = { ssaoWidth, ssaoHeight };
+		blurVRenderInfo.renderArea.extent = ssaoFullExtent; // FIX: Clear entire physical memory
 		blurVRenderInfo.layerCount = 1;
 		blurVRenderInfo.colorAttachmentCount = 1;
 		blurVRenderInfo.pColorAttachments = &blurVAttachment;
@@ -2696,7 +2722,7 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 		vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, ssaoBlurPipelineLayout, 0, 1, &ssaoBlurDescriptorSetVertical, 0, nullptr);
 
 		SSAOBlurPushConstants blurVPC{};
-		blurVPC.screenSize = glm::vec2(ssaoWidth, ssaoHeight);
+		blurVPC.screenSize = physicalHalfSize; // FIX: Prevents sliding shadows
 		blurVPC.blurDirection = glm::vec2(0.0f, 1.0f);
 		blurVPC.colorSigma = 0.10f;
 		blurVPC.spatialSigma = 2.0f;
@@ -2714,6 +2740,7 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 
 	TransitionImageLayout(commandBuffer, offscreenTarget.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
 
+	// The Composition Pass renders at the Native Window scale to keep UI crisp
 	VkRenderPassBeginInfo compPassInfo{};
 	compPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
 	compPassInfo.renderPass = compositionRenderPass;
@@ -2756,7 +2783,6 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 		if (currentScene != nullptr && !currentScene->GetLights().empty()) {
 			primaryLightDir = glm::normalize(glm::vec3(currentScene->GetLights()[0].positionOrDir));
 
-			// If the sun dips below the horizon, switch to the Moon!
 			if (primaryLightDir.y < -0.0f && currentScene->GetLights().size() > 1) {
 				primaryLightDir = glm::normalize(glm::vec3(currentScene->GetLights()[1].positionOrDir));
 				lightColor = glm::vec3(0.5f, 0.7f, 1.0f); // Cool moon tint
@@ -2773,7 +2799,6 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 
 		finalIntensity *= 1.0f - glm::smoothstep(1.2f, 2.5f, glm::length(ndc));
 
-		// 4. Populate your existing struct
 		FSRConstants fc{};
 		fc.const0 = glm::vec4(0.0f);
 		fc.const1 = glm::vec4(0.0f);
@@ -2782,9 +2807,10 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 		fc.sharpness = g_Settings.enableFSR ? 0.35f : 0.0f;
 		fc.enableSSAO = g_Settings.enableSSAO ? 1 : 0;
 		fc.enableMotionBlur = g_Settings.enableMotionBlur ? 1 : 0;
+
+		// Map the rendering back up to the fullscreen UI pass
 		fc.renderScale = activeScale;
 
-		// Pass the new variables!
 		fc.enableGodRays = g_Settings.enableGodRays ? 1 : 0;
 		fc.lightScreenPos = screenPos;
 		fc.lightColorAndIntensity = glm::vec4(lightColor, finalIntensity);
@@ -2869,8 +2895,8 @@ void VulkanRenderer::RemoveWaterChunk(int64_t key) {
 	m_waterRenderer.RemoveWaterChunk(key);
 }
 void VulkanRenderer::CreateWaterTarget() {
-	uint32_t width = GetInternalWidth();
-	uint32_t height = GetInternalHeight();
+	uint32_t width = swapChainExtent.width;
+	uint32_t height = swapChainExtent.height;
 
 	CreateImage(width, height, 1, VK_SAMPLE_COUNT_1_BIT, swapChainImageFormat, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, waterTarget.image, waterTarget.memory);
 	waterTarget.view = CreateImageView(waterTarget.image, swapChainImageFormat, VK_IMAGE_ASPECT_COLOR_BIT, 1);
@@ -3184,11 +3210,11 @@ void VulkanRenderer::DrawFrame() {
 		imageAvailableSemaphores[currentFrame],
 		VK_NULL_HANDLE, &imageIndex);
 
-	if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR || acquireResult == VK_SUBOPTIMAL_KHR) {
+	if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR) {
 		RecreateSwapChain();
-		return; // skip this frame
+		return; // safely skip frame, no semaphore was signaled
 	}
-	else if (acquireResult != VK_SUCCESS) {
+	else if (acquireResult != VK_SUCCESS && acquireResult != VK_SUBOPTIMAL_KHR) {
 		throw std::runtime_error("Failed to acquire swapchain image.");
 	}
 

@@ -154,25 +154,16 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
                 tComp.isDirty = true;
 
                 RenderComponent rComp;
-                if (!propData.lodGroupName.empty()) {
-                    rComp.meshHash = StringHash::Hash(propData.lodGroupName);
-                }
-                else {
-                    rComp.meshHash = 0;
-                }
+                rComp.meshHash = propData.lodGroupName.empty() ? 0 : StringHash::Hash(propData.lodGroupName);
                 rComp.type = MeshType::Static;
                 rComp.isInstanced = true;
                 rComp.isVisible = true;
 
-                scene.GetRegistry().AddComponent<TransformComponent>(propEntity, tComp);
-                scene.GetRegistry().AddComponent<RenderComponent>(propEntity, rComp);
-
                 ChunkPropComponent cComp;
                 cComp.chunkKey = resultKey;
-                scene.GetRegistry().AddComponent<ChunkPropComponent>(propEntity, cComp);
 
+                // --- BULLETPROOF COLLIDER ASSIGNMENT ---
                 PropCollider baseCol = GetPropCollider(propData.lodGroupName);
-
                 ColliderComponent colComp;
                 colComp.type = baseCol.type;
 
@@ -187,6 +178,10 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
                     colComp.radius = baseCol.baseRadius * propData.scale.x;
                 }
 
+                // Attach everything to the ECS registry
+                scene.GetRegistry().AddComponent<TransformComponent>(propEntity, tComp);
+                scene.GetRegistry().AddComponent<RenderComponent>(propEntity, rComp);
+                scene.GetRegistry().AddComponent<ChunkPropComponent>(propEntity, cComp);
                 scene.GetRegistry().AddComponent<ColliderComponent>(propEntity, colComp);
 
                 staticSceneChanged = true;

@@ -105,7 +105,13 @@ void UIRenderer::DrawDebugStats(uint32_t sceneTotalIndices, uint32_t sceneTotalV
         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
         ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs;
 
-    ImGui::SetNextWindowPos(ImVec2(1280 - 240, 10), ImGuiCond_Always);
+    ImGuiIO& io = ImGui::GetIO();
+    float padding = 10.0f;
+
+    ImVec2 windowPos = ImVec2(io.DisplaySize.x - padding, padding);
+
+    ImGui::SetNextWindowPos(windowPos, ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+
     ImGui::SetNextWindowBgAlpha(0.35f);
 
     ImGui::Begin("Stats", nullptr, windowFlags);
