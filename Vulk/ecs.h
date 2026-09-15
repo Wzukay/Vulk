@@ -12,6 +12,7 @@
 #include <array>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+
 #include "mesh_types.h"
 
 class StringHash {
@@ -93,6 +94,21 @@ struct PlayerComponent {
     float playerHeight = 6.0f;
     float maxSlopeAngle = 45.0f;
     float minSlopeDot = 0.7071f;
+};
+
+enum class ColliderType {
+    Cylinder,
+    Box,
+    Sphere
+};
+struct ColliderComponent {
+    ColliderType type = ColliderType::Cylinder;
+    glm::vec3 offset = glm::vec3(0.0f); // Local offset from transform position
+
+    // Shape parameters (reused or specific per type)
+    float radius = 1.0f;                  // Used for Cylinder and Sphere
+    float height = 10.0f;                 // Used for Cylinder
+    glm::vec3 halfExtents = glm::vec3(1.0f); // Used for Box (width, height, depth / 2)
 };
 
 // Component Storage Interfaces

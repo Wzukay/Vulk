@@ -5,7 +5,6 @@
 #include "chunk.h"
 #include "player.h"
 #include "asset_manager.h"
-#include "player_system.h"
 #include "day_night.h"
 #include "scene_manager.h"
 #include "audio.h"

@@ -359,7 +359,9 @@ void VulkanRenderer::InitVulkan() {
 
 	CreateClusterPipelines(); // Builds the sets and populates AABBs
 
-	CreateImGui();
+	m_uiRenderer.Init(window, instance, physicalDevice, logicalDevice,
+		FindQueueFamilies(physicalDevice).graphicsFamily.value(), graphicsQueue,
+		static_cast<uint32_t>(swapChainImages.size()), compositionRenderPass);
 
 	g_AssetManager.SetRenderer(this);
 	g_AssetManager.SetDescriptorSet(descriptorSet);
@@ -674,17 +676,9 @@ void VulkanRenderer::RecreateSwapChain() {
 	imagesInFlight.assign(swapChainImages.size(), VK_NULL_HANDLE);
 	currentFrame = 0;
 
-	ImGui_ImplVulkan_Shutdown();
-	vkResetDescriptorPool(logicalDevice, imguiDescriptorPool, 0);
-
-	ImGui_ImplVulkan_InitInfo init_info = {};
-	init_info.Instance = instance; init_info.PhysicalDevice = physicalDevice; init_info.Device = logicalDevice;
-	init_info.QueueFamily = FindQueueFamilies(physicalDevice).graphicsFamily.value();
-	init_info.Queue = graphicsQueue; init_info.PipelineCache = VK_NULL_HANDLE; init_info.DescriptorPool = imguiDescriptorPool;
-	init_info.MinImageCount = 2; init_info.ImageCount = static_cast<uint32_t>(swapChainImages.size()); init_info.Allocator = nullptr;
-	init_info.UseDynamicRendering = false; init_info.PipelineInfoMain.RenderPass = compositionRenderPass;
-	init_info.PipelineInfoMain.Subpass = 0; init_info.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
-	ImGui_ImplVulkan_Init(&init_info);
+	m_uiRenderer.Recreate(instance, physicalDevice,
+		FindQueueFamilies(physicalDevice).graphicsFamily.value(), graphicsQueue,
+		static_cast<uint32_t>(swapChainImages.size()), compositionRenderPass);
 
 	CreateCompositionPipeline();
 }
@@ -1010,7 +1004,7 @@ void VulkanRenderer::UpdateUniformBuffer(const CameraData& cam) {
 	ubo.view = glm::lookAt(cam.pos, cam.pos + cam.front, cam.up);
 	ubo.proj = glm::perspective(glm::radians(45.0f),
 		swapChainExtent.width / (float)swapChainExtent.height,
-		2.0f,
+		0.1f,
 		g_Settings.renderDistance);
 	ubo.proj[1][1] *= -1;
 
@@ -1091,54 +1085,6 @@ void VulkanRenderer::SetLights(const std::vector<Light>& lights) {
 	}
 }
 
-void VulkanRenderer::CreateImGui() {
-	CreateImGuiDescriptorPool();
-
-	IMGUI_CHECKVERSION();
-	ImGui::CreateContext();
-	ImGui_ImplGlfw_InitForVulkan(window, true);
-
-	ImGui_ImplVulkan_InitInfo init_info = {};
-	init_info.Instance = instance;
-	init_info.PhysicalDevice = physicalDevice;
-	init_info.Device = logicalDevice;
-	init_info.QueueFamily = FindQueueFamilies(physicalDevice).graphicsFamily.value();
-	init_info.Queue = graphicsQueue;
-	init_info.PipelineCache = VK_NULL_HANDLE;
-	init_info.DescriptorPool = imguiDescriptorPool;
-	init_info.MinImageCount = 2;
-	init_info.ImageCount = static_cast<uint32_t>(swapChainImages.size());
-	init_info.Allocator = nullptr;
-
-	// --- FIX: TRADITIONAL SETUP ---
-	init_info.UseDynamicRendering = false;
-	init_info.PipelineInfoMain.RenderPass = compositionRenderPass;
-	init_info.PipelineInfoMain.Subpass = 0;
-	init_info.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
-
-	ImGui_ImplVulkan_Init(&init_info);
-}
-void VulkanRenderer::CreateImGuiDescriptorPool() {
-	VkDescriptorPoolSize pool_sizes[2] = {};
-	pool_sizes[0].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-	pool_sizes[0].descriptorCount = 100;
-	pool_sizes[1].type = VK_DESCRIPTOR_TYPE_SAMPLER;
-	pool_sizes[1].descriptorCount = 100;
-
-	VkDescriptorPoolCreateInfo pool_info = {};
-	pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-	pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-	pool_info.maxSets = 0;
-	for (VkDescriptorPoolSize& size : pool_sizes) {
-		pool_info.maxSets += size.descriptorCount;
-	}
-	pool_info.poolSizeCount = 2;
-	pool_info.pPoolSizes = pool_sizes;
-
-	if (vkCreateDescriptorPool(logicalDevice, &pool_info, nullptr, &imguiDescriptorPool) != VK_SUCCESS) {
-		throw std::runtime_error("Failed to create ImGui descriptor pool.");
-	}
-}
 void VulkanRenderer::CreateCompositionPass() {
 	VkAttachmentDescription colorAttachment{};
 	colorAttachment.format = swapChainImageFormat;
@@ -2848,10 +2794,8 @@ void VulkanRenderer::RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t
 		vkCmdDraw(commandBuffer, 3, 1, 0, 0);
 	}
 
-	if (ImGui::GetDrawData() != nullptr) {
-		ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), commandBuffer);
-		drawCallCount++;
-	}
+	m_uiRenderer.RecordCommands(commandBuffer);
+	if (ImGui::GetDrawData() != nullptr) drawCallCount++;
 
 	vkCmdEndRenderPass(commandBuffer);
 
@@ -3162,7 +3106,7 @@ void VulkanRenderer::CreateClusterPipelines() {
 }
 void VulkanRenderer::GenerateClusterAABBs() {
 	std::vector<ClusterAABB> aabbs(TOTAL_CLUSTERS);
-	float zNear = 2.0f;
+	float zNear = 0.1f;
 	float zFar = g_Settings.renderDistance;
 	float halfFov = glm::radians(45.0f) * 0.5f;
 	float tanHalfFov = std::tan(halfFov);
@@ -3299,68 +3243,19 @@ void VulkanRenderer::DrawFrame() {
 	currentFrame = (currentFrame + 1) % m_framesInFlight;
 }
 void VulkanRenderer::BeginUI() {
-	ImGui_ImplVulkan_NewFrame();
-	ImGui_ImplGlfw_NewFrame();
-	ImGui::NewFrame();
+	m_uiRenderer.BeginFrame();
 }
 void VulkanRenderer::EndUI() {
-	// We keep your awesome stats overlay here so it draws over every scene!
-	uint32_t triangleCount = sceneTotalIndices / 3;
-	uint32_t texturesLoaded = static_cast<uint32_t>(g_AssetManager.GetTextureRegistry().size());
+	// 1. Always draw the game HUD (passing a dummy 75% health value for now)
+	m_uiRenderer.DrawPlayerHUD(0.75f);
 
-	ImGuiWindowFlags windowFlags = ImGuiWindowFlags_NoDecoration |
-		ImGuiWindowFlags_AlwaysAutoResize |
-		ImGuiWindowFlags_NoSavedSettings |
-		ImGuiWindowFlags_NoFocusOnAppearing |
-		ImGuiWindowFlags_NoNav |
-		ImGuiWindowFlags_NoInputs;
-
-	ImGui::SetNextWindowPos(ImVec2(1280 - 240, 10), ImGuiCond_Always);
-	ImGui::SetNextWindowBgAlpha(0.35f);
-
-	ImGui::Begin("Stats", nullptr, windowFlags);
-
-	ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "PERFORMANCE");
-	ImGui::Text("FPS: %.1f", ImGui::GetIO().Framerate);
-	ImGui::Text("Ms/Frame: %.3f ms", 1000.0f / ImGui::GetIO().Framerate);
-
-	ImGui::Separator();
-	ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "PACING & SCALING");
-
-	if (g_Settings.frameCap == 0) {
-		ImGui::Text("Frame Cap: Uncapped");
-	}
-	else {
-		ImGui::Text("Frame Cap: %d FPS", g_Settings.frameCap);
+	// 2. Only draw the dev stats if the setting is enabled
+	if (g_Settings.showStats) {
+		m_uiRenderer.DrawDebugStats(sceneTotalIndices, sceneTotalVertices, drawCallCount, culledCount);
 	}
 
-	if (g_Settings.enableDRS) {
-		ImGui::Text("DRS: Active (Target %d FPS)", g_Settings.targetFPS);
-		ImGui::Text("Active Scale: %.0f%%", g_Settings.renderScale * 100.0f);
-	}
-	else {
-		ImGui::Text("DRS: Disabled");
-		ImGui::Text("Static Scale: %.0f%%", g_Settings.renderScale * 100.0f);
-	}
-
-	ImGui::Separator();
-
-	ImGui::TextColored(ImVec4(0.0f, 0.7f, 1.0f, 1.0f), "GEOMETRY");
-	ImGui::Text("Triangles: %u", triangleCount);
-	ImGui::Text("Vertices:  %u", sceneTotalVertices);
-	ImGui::Text("Indices:   %u", sceneTotalIndices);
-
-	ImGui::Separator();
-
-	ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "PIPELINE");
-	ImGui::Text("Draw Calls: %-8u", drawCallCount);
-	ImGui::Text("Culled:     %-8u", culledCount);
-	ImGui::Text("Textures:   %-8u", texturesLoaded);
-
-	ImGui::End();
-
-	// Finalize the ImGui frame
-	ImGui::Render();
+	// 3. Finalize ImGui rendering
+	m_uiRenderer.EndFrame();
 }
 void VulkanRenderer::UpdateScene(const Scene& scene) {
 	// Scene caches the ECS traversal, avoids rebuilding the static draw lists and instance buckets when nothing changed
@@ -3392,16 +3287,11 @@ void VulkanRenderer::Cleanup() {
 	m_staticMeshRenderer.Cleanup();
 	m_skybox.Cleanup(logicalDevice);
 	m_boidRenderer.Cleanup();
+	m_uiRenderer.Cleanup();
 
 	m_pendingDeletionsGlobal.Flush(UINT64_MAX, [&](BufferDeletion& del) {
 		for (size_t i = 0; i < del.buffers.size(); ++i) DestroyBuffer(del.buffers[i], del.memories[i]);
 		});
-
-	if (imguiDescriptorPool != VK_NULL_HANDLE) {
-		ImGui_ImplVulkan_Shutdown(); ImGui_ImplGlfw_Shutdown(); ImGui::DestroyContext();
-		vkDestroyDescriptorPool(logicalDevice, imguiDescriptorPool, nullptr);
-		imguiDescriptorPool = VK_NULL_HANDLE;
-	}
 
 	if (assetManager != nullptr) assetManager->Cleanup(logicalDevice);
 

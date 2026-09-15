@@ -33,6 +33,7 @@
 #include "renderer_static.h"
 #include "renderer_boid.h"
 #include "renderer_water.h"
+#include "renderer_ui.h"
 
 #include "ring_buffer_uploader.h"
 
@@ -323,11 +324,6 @@ private:
     void CreateCompositionPass();
     void CreateFrameBuffers();
 
-    VkDescriptorPool imguiDescriptorPool;
-
-    void CreateImGuiDescriptorPool();
-    void CreateImGui();
-
 public:
     VkCommandBuffer BeginSingleTimeCommands();
     void EndSingleTimeCommands(VkCommandBuffer commandBuffer);
@@ -432,6 +428,9 @@ private:
     void CreateClusterResources();
     void CreateClusterPipelines();
     void GenerateClusterAABBs();
+
+private:
+    UIRenderer m_uiRenderer;
 
 #ifdef NDEBUG
     const bool enableValidationLayers = false;

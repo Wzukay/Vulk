@@ -1,11 +1,13 @@
 #pragma once
 
+#include <random>
+
 #include "scene_interface.h"
 #include "scene.h"
 #include "chunk.h"
-#include "player_system.h"
+#include "player.h"
+#include "physics.h"
 #include "day_night.h"
-#include <random>
 
 class GameplayScene : public IScene {
 private:

@@ -81,7 +81,6 @@ void GameplayScene::Update(float deltaTime) {
     CameraData cam = m_ctx.input->ProcessInput(m_ctx.window);
 
     g_AudioEngine.Tick();
-
     g_AudioEngine.UpdateListener(cam.pos, cam.front, cam.up);
 
     auto& transform = m_scene.GetRegistry().GetComponent<TransformComponent>(m_playerEntity);
@@ -89,14 +88,16 @@ void GameplayScene::Update(float deltaTime) {
     auto& playerOpt = m_scene.GetRegistry().GetComponent<PlayerComponent>(m_playerEntity);
 
     if (g_CurrentMode == ControlMode::Player) {
-        PlayerSystem::Update(m_scene.GetRegistry(), m_ctx.window, cam.front, cam.up, deltaTime);
+        Player::Update(m_scene.GetRegistry(), m_playerEntity, m_ctx.window, cam.front, cam.up, deltaTime);
+
         cam.pos = transform.position + glm::vec3(0.0f, playerOpt.playerHeight, 0.0f);
     }
     else {
-        transform.position = cam.pos - glm::vec3(0.0f, playerOpt.playerHeight, 0.0f);
-        physics.velocity = glm::vec3(0.0f);
-        transform.isDirty = true;
+        physics.velocity.x = 0.0f;
+        physics.velocity.z = 0.0f;
     }
+
+    PhysicsSystem::Update(m_scene.GetRegistry(), deltaTime);
 
     m_ctx.renderer->UpdateUniformBuffer({ cam.pos, cam.front, cam.up });
     m_chunk.Update(cam.pos, m_scene, *m_ctx.renderer);

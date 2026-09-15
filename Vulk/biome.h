@@ -5,6 +5,7 @@
 #include <glm/glm.hpp>
 
 #include "gpu_instances.h"
+#include "ecs.h"
 
 enum class BiomeType {
     // Hot
@@ -93,6 +94,13 @@ struct BiomeDefinition {
     std::vector<StructureSpawnRule> structures;
 };
 
+struct PropCollider {
+    ColliderType type;
+    float baseRadius;
+    float baseHeight;
+    glm::vec3 baseHalfExtents;
+};
+
 // Global Data Access
 const BiomeDefinition& GetBiomeDefinition(BiomeType type);
 BiomeType DetermineBiome(float temperature, float moisture);
@@ -102,4 +110,18 @@ inline const BiomeDefinition& GetBiomeProperties(BiomeType type) {
     return GetBiomeDefinition(type);
 }
 
+inline const PropCollider& GetPropCollider(const std::string& lodGroupName) {
+    static std::unordered_map<std::string, PropCollider> colliders = {
+        { "TreeGroup",     { ColliderType::Cylinder, 12.0f, 250.0f, glm::vec3(0.0f) } },
+        { "RockGroup",     { ColliderType::Box,      0.0f,    0.0f, glm::vec3(3.0f, 2.0f, 3.0f) } },
+        { "TentGroup",     { ColliderType::Box,      0.0f,    0.0f, glm::vec3(5.0f, 4.0f, 5.0f) } },
+        { "CampfireGroup", { ColliderType::Sphere,   3.0f,    0.0f, glm::vec3(0.0f) } }
+    };
+
+    auto it = colliders.find(lodGroupName);
+    if (it != colliders.end()) return it->second;
+
+    static PropCollider defaultCol{ ColliderType::Cylinder, 2.5f, 5.0f, glm::vec3(1.0f) };
+    return defaultCol;
+}
 void InitBiomes();

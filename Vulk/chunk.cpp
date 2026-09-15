@@ -171,6 +171,24 @@ bool Chunk::Update(const glm::vec3& camPos, Scene& scene, VulkanRenderer& render
                 cComp.chunkKey = resultKey;
                 scene.GetRegistry().AddComponent<ChunkPropComponent>(propEntity, cComp);
 
+                PropCollider baseCol = GetPropCollider(propData.lodGroupName);
+
+                ColliderComponent colComp;
+                colComp.type = baseCol.type;
+
+                if (colComp.type == ColliderType::Cylinder) {
+                    colComp.radius = baseCol.baseRadius * propData.scale.x;
+                    colComp.height = baseCol.baseHeight * propData.scale.y;
+                }
+                else if (colComp.type == ColliderType::Box) {
+                    colComp.halfExtents = baseCol.baseHalfExtents * propData.scale;
+                }
+                else if (colComp.type == ColliderType::Sphere) {
+                    colComp.radius = baseCol.baseRadius * propData.scale.x;
+                }
+
+                scene.GetRegistry().AddComponent<ColliderComponent>(propEntity, colComp);
+
                 staticSceneChanged = true;
             }
 
@@ -1076,6 +1094,11 @@ void Chunk::GenerateChunkProps(int chunkX, int chunkZ, int lod, ChunkJobResult& 
 
             if (data.waterLevel > 0.0f) continue;
 
+            // --- NEW: Calculate the terrain normal to check for steep slopes ---
+            float hR = heightColorFunc(worldX + 2.0f, worldZ).height;
+            float hU = heightColorFunc(worldX, worldZ + 2.0f).height;
+            glm::vec3 normal = glm::normalize(glm::vec3(data.height - hR, 2.0f, data.height - hU));
+
             float rawTree = treeNoise.GetNoise(worldX, worldZ);
             float rawStone = stoneNoise.GetNoise(worldX, worldZ);
             float masks[2] = { (rawTree + 1.0f) * 0.5f, (rawStone + 1.0f) * 0.5f };
@@ -1086,6 +1109,9 @@ void Chunk::GenerateChunkProps(int chunkX, int chunkZ, int lod, ChunkJobResult& 
                 if (lod > rule.maxLod) continue;
                 if (data.height < rule.minHeight || data.height > rule.maxHeight) continue;
                 if (masks[rule.noiseIndex] < rule.noiseThreshold) continue;
+
+                // --- NEW: Prevent trees from spawning on slopes steeper than ~31 degrees ---
+                if (rule.lodGroupName == "TreeGroup" && normal.y < 0.85f) continue;
 
                 ruleHash ^= ruleHash << 13; ruleHash ^= ruleHash >> 17; ruleHash ^= ruleHash << 5;
                 float ruleRoll = (ruleHash % 1000) / 1000.0f;

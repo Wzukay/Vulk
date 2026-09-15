@@ -2,10 +2,12 @@
 
 #include <glm/glm.hpp>
 #include <GLFW/glfw3.h>
+
 #include "input.h"
+#include "ecs.h"
 
 class Player {
-public:
+private:
     glm::vec3 position;
     glm::vec3 velocity;
 
@@ -19,8 +21,8 @@ public:
 
     bool isGrounded = false;
 
+public:
     Player(glm::vec3 startPos);
 
-    void Update(float deltaTime, GLFWwindow* window, const glm::vec3& camFront, const glm::vec3& camUp);
-    void HandleTerrainCollisions(float deltaTime);
+    static void Update(Registry& registry, Entity playerEntity, GLFWwindow* window, const glm::vec3& camFront, const glm::vec3& camUp, float deltaTime);
 };
