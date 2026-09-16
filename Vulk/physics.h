@@ -2,6 +2,8 @@
 
 #include "ecs.h"
 #include "chunk.h"
+#include "settings.h"
+
 #include <cmath>
 #include <unordered_map>
 #include <vector>
@@ -161,35 +163,60 @@ public:
 
         if (physicsGroup.GetEntities().empty()) return;
 
-        s_spatialGrid.clear();
-
-        static bool loggedOnce = false;
-        if (!loggedOnce && !colliders.GetEntities().empty()) {
-            std::cout << "[PhysicsSystem] Successfully registered "
-                << colliders.GetEntities().size()
-                << " colliders into the spatial grid." << std::endl;
-            loggedOnce = true;
+        glm::vec3 simCenter(0.0f);
+        for (Entity physEntity : physicsGroup) {
+            if (registry.HasComponent<PlayerComponent>(physEntity)) {
+                simCenter = registry.GetComponent<TransformComponent>(physEntity).position;
+                break;
+            }
         }
 
-        for (Entity colEntity : colliders) {
-            const auto& colTransform = registry.GetComponent<TransformComponent>(colEntity);
-            const auto& col = registry.GetComponent<ColliderComponent>(colEntity);
+        float chunkSize = g_Settings.chunkSize;
+        int currentChunkX = static_cast<int>(std::floor(simCenter.x / chunkSize));
+        int currentChunkZ = static_cast<int>(std::floor(simCenter.z / chunkSize));
 
-            float boundRadius = col.radius;
-            if (col.type == ColliderType::Box) {
-                boundRadius = std::max(col.halfExtents.x, col.halfExtents.z);
-            }
+        static int lastChunkX = -999999;
+        static int lastChunkZ = -999999;
+        static size_t lastColliderCount = SIZE_MAX;
 
-            int minCellX = static_cast<int>(std::floor((colTransform.position.x - boundRadius) / CELL_SIZE));
-            int maxCellX = static_cast<int>(std::floor((colTransform.position.x + boundRadius) / CELL_SIZE));
-            int minCellZ = static_cast<int>(std::floor((colTransform.position.z - boundRadius) / CELL_SIZE));
-            int maxCellZ = static_cast<int>(std::floor((colTransform.position.z + boundRadius) / CELL_SIZE));
+        bool crossedChunkBorder = (currentChunkX != lastChunkX || currentChunkZ != lastChunkZ);
+        bool entityCountChanged = (colliders.GetEntities().size() != lastColliderCount);
 
-            for (int cx = minCellX; cx <= maxCellX; ++cx) {
-                for (int cz = minCellZ; cz <= maxCellZ; ++cz) {
-                    s_spatialGrid[GetCellKey(cx, cz)].push_back(colEntity);
+        if (crossedChunkBorder || entityCountChanged) {
+            s_spatialGrid.clear();
+
+            for (Entity colEntity : colliders) {
+                const auto& colTransform = registry.GetComponent<TransformComponent>(colEntity);
+                const auto& col = registry.GetComponent<ColliderComponent>(colEntity);
+
+                int colChunkX = static_cast<int>(std::floor(colTransform.position.x / chunkSize));
+                int colChunkZ = static_cast<int>(std::floor(colTransform.position.z / chunkSize));
+
+                if (std::abs(colChunkX - currentChunkX) > g_Settings.simulationDistance ||
+                    std::abs(colChunkZ - currentChunkZ) > g_Settings.simulationDistance) {
+                    continue; 
+                }
+
+                float boundRadius = col.radius;
+                if (col.type == ColliderType::Box) {
+                    boundRadius = std::max(col.halfExtents.x, col.halfExtents.z);
+                }
+
+                int minCellX = static_cast<int>(std::floor((colTransform.position.x - boundRadius) / CELL_SIZE));
+                int maxCellX = static_cast<int>(std::floor((colTransform.position.x + boundRadius) / CELL_SIZE));
+                int minCellZ = static_cast<int>(std::floor((colTransform.position.z - boundRadius) / CELL_SIZE));
+                int maxCellZ = static_cast<int>(std::floor((colTransform.position.z + boundRadius) / CELL_SIZE));
+
+                for (int cx = minCellX; cx <= maxCellX; ++cx) {
+                    for (int cz = minCellZ; cz <= maxCellZ; ++cz) {
+                        s_spatialGrid[GetCellKey(cx, cz)].push_back(colEntity);
+                    }
                 }
             }
+
+            lastChunkX = currentChunkX;
+            lastChunkZ = currentChunkZ;
+            lastColliderCount = colliders.GetEntities().size();
         }
 
         static std::vector<Entity> testedEntities;

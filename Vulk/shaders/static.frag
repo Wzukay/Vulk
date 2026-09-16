@@ -95,7 +95,7 @@ void main() {
     if (ditherNoise > 1.0 - fadeFactor) { discard; }
 
     vec3 geometricNormal = normalize(fragNormal);
-    float cheapStart = max(80.0, ubo.fadeParams.x * 0.5);
+    float cheapStart = max(150.0, ubo.fadeParams.x * 0.5);
     float cheapEnd = min(ubo.fadeParams.x, cheapStart + 60.0);
     float cheapRange = max(cheapEnd - cheapStart, 0.001);
     float cheapBlend = clamp((distanceToCamera - cheapStart) / cheapRange, 0.0, 1.0);
@@ -155,10 +155,18 @@ void main() {
             L = normalize(light.positionOrDir.xyz);
         }
 
-        if (dot(N, L) <= 0.0) continue;
+        float nDotL = dot(N, L);
+        // Foliage transmission: allow light through the back of leaves
+        float foliageFactor = max(nDotL, 0.0) + max(-nDotL, 0.0) * 0.4;
+        if (foliageFactor <= 0.001) continue;
 
         vec3 radiance = light.color.rgb * light.color.a * attenuation;
-        result += CalcPBR(N, V, L, radiance, albedo.rgb, roughness, metallic);
+        
+        if (nDotL > 0.0) {
+            result += CalcPBR(N, V, L, radiance, albedo.rgb, roughness, metallic);
+        } else {
+            result += (albedo.rgb / PI) * radiance * (max(-nDotL, 0.0) * 0.4);
+        }
     }
 
     vec3 skyColor = vec3(0.2, 0.3, 0.45);

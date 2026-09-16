@@ -1,6 +1,6 @@
 #version 450
+#include "common_structures.glsl"
 
-// FIX: Replaced physical vertex inputs with a Storage Buffer fetch mechanism
 struct GrassInstance {
     vec3 position;
     float rotation;
@@ -8,20 +8,13 @@ struct GrassInstance {
     float windOffset;
 };
 
-// Set 1 corresponds to `m_globalComputeSets`. Binding 1 is `m_culledBuffers`.
 layout(set = 1, binding = 1) readonly buffer CulledInstances {
     GrassInstance instances[];
 };
 
 layout(location = 0) out vec2 fragUV;
 layout(location = 1) out vec3 fragNormal;
-
-layout(set = 0, binding = 0) uniform UniformBufferObject {
-    mat4 view; mat4 proj; vec3 cameraPos; float ambient;
-    vec4 fadeParams; vec2 screenSize; float specularPower; uint lightCount;
-    float fogStart; float fogEnd; vec4 sunDirection; vec4 sunColor;
-    mat4 inverseViewProj; mat4 inverseProj; mat4 inverseView;
-} ubo;
+layout(location = 2) out vec3 fragWorldPos; // Output world position
 
 layout(push_constant) uniform PushConstants {
     float time; uint textureId; float windStrength; float windSpeed; float lodFactor;
@@ -38,7 +31,6 @@ vec3 EvaluateBezierDerivative(vec3 p0, vec3 p1, vec3 p2, vec3 p3, float t) {
 }
 
 void main() {
-    // FIX: Programmable Vertex Pulling! Grab the specific instance for this draw call
     GrassInstance inst = instances[gl_InstanceIndex];
     vec3 inPos = inst.position;
     float inRot = inst.rotation;
@@ -112,10 +104,7 @@ void main() {
     vec3 p1 = p0 + vec3(0.0, bladeHeight * 0.3, 0.0);
     vec3 naturalLean = forwardDir * 0.3 * bladeHeight;
     
-    // Define your exact desired wind direction (e.g., blowing towards positive X and Z)
-    vec3 windDir = normalize(vec3(0.8, 0.0, 0.6)); // Adjust these numbers to change the global direction
-
-    // Global world-space frequency makes the wind sweep across clumps uniformly
+    vec3 windDir = normalize(vec3(0.8, 0.0, 0.6));
     float spatialFrequency = 0.05; 
     float windWave = sin(pc.time * pc.windSpeed + (inPos.x * windDir.x + inPos.z * windDir.z) * spatialFrequency + inWindOff);
 
@@ -148,5 +137,7 @@ void main() {
     vec3 skewOffset = pushDir * (t * t) * topDownFactor * (bladeHeight * 0.35); 
     worldPos += skewOffset;
 
+    // Send correct world position down to fragment shader
+    fragWorldPos = worldPos;
     gl_Position = ubo.proj * ubo.view * vec4(worldPos, 1.0);
 }

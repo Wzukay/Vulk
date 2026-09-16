@@ -6,6 +6,7 @@ struct Settings {
     // --- Rendering ---
     float renderDistance = 5000.0f;
     float renderScale = 0.75f;
+    int simulationDistance = 1;
     bool vsync = false;
     int frameCap = 0;
 

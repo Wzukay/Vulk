@@ -3,7 +3,20 @@
 
 #include "common_structures.glsl"
 
-layout(binding = 2) uniform sampler2D globalTextures[];
+struct Light {
+    vec4 positionOrDir;
+    vec4 color;
+    vec4 params;
+};
+struct ClusterRecord { uint offset; uint count; };
+
+// --- BINDINGS ---
+layout(std430, set = 0, binding = 1) readonly buffer LightBuffer { Light lights[]; } lightBuffer;
+layout(set = 0, binding = 2) uniform sampler2D globalTextures[];
+
+// --- CLUSTER DATA (SET 1) ---
+layout(std430, set = 1, binding = 0) readonly buffer GridBuffer { ClusterRecord grid[]; };
+layout(std430, set = 1, binding = 1) readonly buffer IndexBuffer { uint globalIndexCount; uint indices[]; };
 
 layout(location = 0) in vec3 fragNormal;
 layout(location = 1) in vec2 fragTexCoord;
@@ -21,12 +34,7 @@ const float ALPHA_CUTOFF = 0.5;
 
 vec3 ApplyFog(vec3 color, float distanceToCamera) {
     float fogRange = max(ubo.fogEnd - ubo.fogStart, 0.001);
-
-    float fogFactor = clamp(
-        (distanceToCamera - ubo.fogStart) / fogRange,
-        0.0,
-        1.0);
-
+    float fogFactor = clamp((distanceToCamera - ubo.fogStart) / fogRange, 0.0, 1.0);
     return mix(color, vec3(0.6, 0.7, 0.8), fogFactor);
 }
 
@@ -53,56 +61,62 @@ void main() {
         }
     }
 
-    vec4 albedo = texture(
-        globalTextures[nonuniformEXT(fragTextureId)],
-        fragTexCoord);
+    vec4 albedo = texture(globalTextures[nonuniformEXT(fragTextureId)], fragTexCoord);
 
-    // Leaf-card holes must not write depth or pay for lighting.
-    if (albedo.a < ALPHA_CUTOFF) {
-        discard;
-    }
+    if (albedo.a < ALPHA_CUTOFF) discard;
 
-    float distanceToCamera =
-        length(ubo.cameraPos - fragWorldPos);
+    float distanceToCamera = length(ubo.cameraPos - fragWorldPos);
+    float fadeRange = max(ubo.fadeParams.y - ubo.fadeParams.x, 0.001);
+    float fadeFactor = clamp((distanceToCamera - ubo.fadeParams.x) / fadeRange, 0.0, 1.0);
+    float ditherNoise = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
 
-    float fadeRange =
-        max(ubo.fadeParams.y - ubo.fadeParams.x, 0.001);
+    if (ditherNoise > 1.0 - fadeFactor) discard;
 
-    float fadeFactor = clamp(
-        (distanceToCamera - ubo.fadeParams.x) / fadeRange,
-        0.0,
-        1.0);
-
-    float ditherNoise = fract(
-        52.9829189 *
-        fract(dot(
-            gl_FragCoord.xy,
-            vec2(0.06711056, 0.00583715))));
-
-    if (ditherNoise > 1.0 - fadeFactor) {
-        discard;
-    }
-
-    // Instanced trees, rocks, and foliage use a single directional light
-    // plus ambient. They do not run the point-light loop, normal-map lookup,
-    // ORM lookup, GGX distribution, or specular BRDF.
     vec3 normal = normalize(fragNormal);
     vec3 sunDirection = normalize(ubo.sunDirection.xyz);
-
-    float diffuse = max(dot(normal, sunDirection), 0.0);
-
+    float sunDiffuse = max(dot(normal, sunDirection), 0.0);
+    
     // A small wrap term keeps the underside of foliage readable.
-    float wrappedDiffuse = diffuse * 0.85 + 0.15;
+    float wrappedSun = sunDiffuse * 0.85 + 0.15;
 
-    vec3 lighting =
-        vec3(ubo.ambient * 0.9) +
-        ubo.sunColor.rgb *
-        ubo.sunColor.a *
-        wrappedDiffuse;
+    // Start with Ambient + Sun
+    vec3 lighting = vec3(ubo.ambient * 0.9) + ubo.sunColor.rgb * ubo.sunColor.a * wrappedSun;
 
-    outColor = vec4(
-        ApplyFog(albedo.rgb * lighting, distanceToCamera),
-        albedo.a);
+    // --- NEW: CLUSTERED FORWARD LOOKUP FOR POINT LIGHTS ---
+    float viewZ = -(ubo.view * vec4(fragWorldPos, 1.0)).z; 
+    float slice = log2(max(viewZ, 2.0) / 2.0) * (24.0 / log2(ubo._pad2.x / 2.0));
+    uint clusterZ = clamp(uint(slice), 0u, 23u);
+    uint clusterX = clamp(uint(gl_FragCoord.x / (ubo.screenSize.x / 16.0)), 0u, 15u);
+    uint clusterY = clamp(uint(gl_FragCoord.y / (ubo.screenSize.y / 9.0)), 0u, 8u);
+    uint clusterIdx = clusterX + (clusterY * 16u) + (clusterZ * 16u * 9u);
+
+    ClusterRecord record = grid[clusterIdx];
+
+    for (uint i = 0u; i < record.count; ++i) {
+        uint lightIdx = indices[record.offset + i];
+        Light light = lightBuffer.lights[lightIdx];
+
+        bool isPointLight = light.positionOrDir.w > 0.5;
+        if (!isPointLight) continue;
+
+        vec3 toLight = light.positionOrDir.xyz - fragWorldPos;
+        float distanceSquared = dot(toLight, toLight);
+        float range = max(light.params.x, 0.001);
+        
+        if (distanceSquared >= range * range) continue;
+        
+        vec3 L = toLight * inversesqrt(max(distanceSquared, 0.0001));
+
+        // FIX: Synchronized Attenuation Math with Terrain!
+        float attenuation = pow(max(1.0 - (sqrt(distanceSquared) / range), 0.0), 2.0);
+
+        float nDotL = dot(normal, L);
+        float wrappedPointLight = max(nDotL, 0.0) * 0.85 + max(-nDotL, 0.0) * 0.4 + 0.05;
+
+        lighting += light.color.rgb * light.color.a * wrappedPointLight * attenuation;
+    }
+
+    outColor = vec4(ApplyFog(albedo.rgb * lighting, distanceToCamera), albedo.a);
 
     if (fragNormalTextureId == 999999) {
         outColor.a += fragTangentHandedness;
