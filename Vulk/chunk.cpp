@@ -531,6 +531,9 @@ TerrainData Chunk::CalculateHeightAndColor(float worldX, float worldZ) {
 float Chunk::GetHeight(float worldX, float worldZ) {
     return CalculateHeightAndColor(worldX, worldZ).height;
 }
+float Chunk::GetWaterLevel(float worldX, float worldZ) {
+    return CalculateHeightAndColor(worldX, worldZ).waterLevel;
+}
 
 float Chunk::GetCachedHeightFromGrid(float worldX, float worldZ) {
     const float chunkSize = m_chunkSize;
@@ -1157,6 +1160,11 @@ void Chunk::GenerateChunkSwarms(int chunkX, int chunkZ, int lod, ChunkJobResult&
             SwarmData swarmData;
             swarmData.behavior = rule.behavior;
             swarmData.instances.reserve(rule.boidCount);
+
+            if (swarmData.behavior.animationType == 0) { // 0 = Butterfly
+                AssetRecord* rec = g_AssetManager.GetAssetRecord("butterfly");
+                swarmData.behavior.textureId = rec ? rec->resourceId : 0;
+            }
 
             for (int i = 0; i < rule.boidCount; i++) {
                 BoidInstance b{};

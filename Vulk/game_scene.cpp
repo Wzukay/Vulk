@@ -17,15 +17,10 @@ void GameplayScene::OnEnter() {
 
     g_AssetManager.LoadTextureFromFile("assets/textures/butterfly_albedo.dds", "butterfly");
 
-    g_AssetManager.LoadMesh("assets/models/tree/tree_lod0.glb");
-    g_AssetManager.LoadMesh("assets/models/tree/tree_lod1.glb");
-    g_AssetManager.LoadMesh("assets/models/tree/tree_lod2.glb");
-    g_AssetManager.LoadMesh("assets/models/tree/tree_lod3.glb");
-    g_AssetManager.LoadMesh("assets/models/rock/rock.glb");
-    g_AssetManager.LoadMesh("assets/models/tent/tent.glb", "tent");
-    g_AssetManager.LoadMesh("assets/models/campfire/campfire.glb", "campfire");
-
-    InitBiomes();
+    g_AssetManager.AutoLoadLodGroup("assets/models/tree/tree_lod0.glb", "TreeGroup");
+    g_AssetManager.AutoLoadLodGroup("assets/models/rock/rock_lod0.glb", "RockGroup");
+    g_AssetManager.AutoLoadLodGroup("assets/models/tent/tent_lod0.glb", "TentGroup");
+    g_AssetManager.AutoLoadLodGroup("assets/models/campfire/campfire_lod0.glb", "CampfireGroup");
 
     m_chunk.Init(*m_ctx.renderer);
     m_chunk.SetRandomSeed();

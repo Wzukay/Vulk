@@ -275,11 +275,42 @@ public:
                 physics.isGrounded = false;
             }
 
-            if (!physics.isGrounded) {
+            float waterLevel = Chunk::GetWaterLevel(transform.position.x, transform.position.z);
+            bool inWater = (waterLevel > 0.0f && transform.position.y < waterLevel);
+
+            if (inWater) {
+                // 1. Calculate submersion (1.0 = 75% submerged)
+                float submergedRatio = std::clamp((waterLevel - transform.position.y) / (height * 0.75f), 0.0f, 2.0f);
+
+                // 2. Archimedes: Upward force
+                float buoyancy = std::abs(physics.gravity) * submergedRatio;
+                physics.velocity.y += buoyancy * deltaTime;
+
+                // 3. Apply standard downward gravity against buoyancy
                 physics.velocity.y += physics.gravity * deltaTime;
+
+                // 4. Fluid Viscosity: slow down all movement
+                float waterDrag = 4.0f;
+                physics.velocity -= physics.velocity * (waterDrag * deltaTime);
+
+                // 5. Ground Detachment
+                if (physics.velocity.y > 0.0f) {
+                    // Buoyancy overpowered gravity, lift off the terrain!
+                    physics.isGrounded = false;
+                }
+                else if (physics.isGrounded) {
+                    // Prevent accumulating massive downward velocity in ankle-deep water
+                    physics.velocity.y = -1.0f;
+                }
             }
-            else if (physics.velocity.y < 0.0f) {
-                physics.velocity.y = -1.0f;
+            else {
+                // Standard Air Gravity
+                if (!physics.isGrounded) {
+                    physics.velocity.y += physics.gravity * deltaTime;
+                }
+                else if (physics.velocity.y < 0.0f) {
+                    physics.velocity.y = -1.0f;
+                }
             }
 
             transform.position += physics.velocity * deltaTime;

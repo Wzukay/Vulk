@@ -2,7 +2,6 @@
 #include <algorithm>
 #include "asset_manager.h"
 
-// --- Global Generation Constants ---
 constexpr int NOISE_INDEX_TREES = 0;
 constexpr int NOISE_INDEX_ROCKS = 1;
 
@@ -12,28 +11,6 @@ constexpr int CULL_LOD_ROCKS = 1;
 constexpr float ROCK_SINK_DEPTH = -0.15f;
 constexpr float TREE_GROUND_OFFSET = 0.0f;
 
-// --- Reusable Mesh Arrays ---
-const std::vector<std::string> TREE_MESHES = {
-    "assets/models/tree/tree_lod0.glb",
-    "assets/models/tree/tree_lod1.glb",
-    "assets/models/tree/tree_lod2.glb",
-    "assets/models/tree/tree_lod3.glb"
-};
-
-const std::vector<std::string> ROCK_MESHES = {
-    "assets/models/rock/rock.glb"
-};
-
-const std::vector<std::string> TENT_MESHES = {
-    "assets/models/tent/tent.glb"
-};
-
-const std::vector<std::string> CAMPFIRE_MESHES = {
-    "assets/models/campfire/campfire.glb"
-};
-
-
-// --- BOID BEHAVIOR TEMPLATES ---
 BoidBehavior GetButterflyBehavior() {
     BoidBehavior b;
     b.separationRadius = 12.0f; b.alignmentRadius = 0.0f; b.cohesionRadius = 20.0f;
@@ -78,7 +55,6 @@ StructureTemplate GetCampStructure() {
     return camp;
 }
 
-// Texture Weights: X = Dirt/Sand, Y = Grass, Z = Rock/Snow
 static BiomeDefinition G_BIOMES[] = {
 
     // ==========================================
@@ -170,7 +146,7 @@ static BiomeDefinition G_BIOMES[] = {
         .props = { },
         .swarms = { SwarmSpawnRule{ 46, 0.40f, 15.0f, 2.0f, 80.0f, 0.5f, 1.0f, 4.0f, GetButterflyBehavior() } },
         .structures = {
-            StructureSpawnRule{ GetCampStructure(), 0.5f } // 5% chance per Plains chunk
+            StructureSpawnRule{ GetCampStructure(), 0.05f }
         }
     },
     {
@@ -284,26 +260,5 @@ BiomeType DetermineBiome(float temperature, float moisture) {
         if (moisture < 0.60f) return BiomeType::Taiga;
         if (moisture < 0.85f) return BiomeType::SnowWastes;
         return BiomeType::Alpine;
-    }
-}
-
-void InitBiomes() {
-    g_AssetManager.RegisterLodGroup("TreeGroup", TREE_MESHES);
-    g_AssetManager.RegisterLodGroup("RockGroup", ROCK_MESHES);
-    g_AssetManager.RegisterLodGroup("TentGroup", TENT_MESHES);
-    g_AssetManager.RegisterLodGroup("CampfireGroup", CAMPFIRE_MESHES);
-    
-
-    // Fetch the texture ID safely at runtime
-    AssetRecord* record = g_AssetManager.GetAssetRecord("butterfly");
-    uint32_t butterflyTexId = record ? record->resourceId : 0;
-
-    // Apply it to all butterfly swarms in the biome definitions
-    for (auto& biome : G_BIOMES) {
-        for (auto& swarm : biome.swarms) {
-            if (swarm.behavior.animationType == 0) { // 0 = Butterfly
-                swarm.behavior.textureId = butterflyTexId;
-            }
-        }
     }
 }

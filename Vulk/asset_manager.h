@@ -117,6 +117,7 @@ public:
 
     void RegisterLodGroup(const std::string& name, const std::vector<std::string>& paths);
     const LodGroup* GetLodGroup(const std::string& name) const;
+    void AutoLoadLodGroup(const std::string& baseLodPath, const std::string& groupName);
 
     void SetDescriptorSet(VkDescriptorSet set) { m_descriptorSet = set; }
 

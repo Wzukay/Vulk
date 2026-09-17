@@ -1200,10 +1200,43 @@ void AssetManager::RegisterLodGroup(const std::string& name, const std::vector<s
     }
     std::cout << "[AssetManager] Registered LOD Group: " << name << " with " << paths.size() << " levels.\n";
 }
-
 const LodGroup* AssetManager::GetLodGroup(const std::string& name) const {
     auto it = m_lodGroups.find(name);
     return it != m_lodGroups.end() ? &it->second : nullptr;
+}
+void AssetManager::AutoLoadLodGroup(const std::string& baseLodPath, const std::string& groupName) {
+    std::vector<std::string> paths;
+    size_t lodIdx = baseLodPath.find("lod0");
+
+    // If the path doesn't contain "lod0", just load it as a single-level LOD group
+    if (lodIdx == std::string::npos) {
+        std::ifstream file(baseLodPath);
+        if (file.good()) {
+            paths.push_back(baseLodPath);
+        }
+    }
+    else {
+        // Automatically probe for lod0, lod1, lod2, etc. (up to 8 levels)
+        for (int i = 0; i < 8; ++i) {
+            std::string currentPath = baseLodPath;
+            currentPath.replace(lodIdx, 4, "lod" + std::to_string(i));
+
+            std::ifstream file(currentPath);
+            if (file.good()) {
+                paths.push_back(currentPath);
+            }
+            else {
+                break; // Stop looking as soon as an LOD level is missing
+            }
+        }
+    }
+
+    if (!paths.empty()) {
+        RegisterLodGroup(groupName, paths);
+    }
+    else {
+        std::cerr << "[AssetManager] Failed to auto-load LOD group '" << groupName << "'. Base path not found: " << baseLodPath << "\n";
+    }
 }
 
 uint32_t AssetManager::FindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {

@@ -145,6 +145,7 @@ public:
     static void PublishGridCache(int64_t chunkKey, ChunkGridCache&& gridCache);
     static void RemoveGridCache(int64_t chunkKey);
     static float GetHeight(float worldX, float worldZ);
+    static float GetWaterLevel(float worldX, float worldZ);
 
     void Shutdown();
 

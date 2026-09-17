@@ -23,13 +23,35 @@ void Player::Update(Registry& registry, Entity playerEntity, GLFWwindow* window,
         moveIntent = glm::normalize(moveIntent);
     }
 
-    // Apply input velocity directly. (Gravity and slope pushing belong to the PhysicsSystem now).
-    physics.velocity.x = moveIntent.x * player.movementSpeed;
-    physics.velocity.z = moveIntent.z * player.movementSpeed;
+    auto& transform = registry.GetComponent<TransformComponent>(playerEntity);
+    float waterLevel = Chunk::GetWaterLevel(transform.position.x, transform.position.z);
+    bool inWater = (waterLevel > 0.0f && transform.position.y < waterLevel);
 
-    // 2. Process Jump Input (Checks the grounded state determined by last frame's Physics pass)
-    if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS && physics.isGrounded) {
-        physics.velocity.y = physics.jumpForce;
-        physics.isGrounded = false;
+    bool isSprinting = glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
+
+    float speed = isSprinting ? player.movementSpeed * 1.6f : player.movementSpeed;
+
+    float waterSpeedPenalty = 1.0f;
+    if (inWater) {
+        waterSpeedPenalty = isSprinting ? 0.55f : 0.35f;
     }
+
+    speed *= waterSpeedPenalty;
+
+    if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS) {
+        if (physics.isGrounded && !inWater) {
+            physics.velocity.y = physics.jumpForce;
+            physics.isGrounded = false;
+        }
+        else if (inWater) {
+            physics.velocity.y += 40.0f * deltaTime;
+        }
+    }
+
+    if (inWater && glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS) {
+        physics.velocity.y -= 40.0f * deltaTime;
+    }
+
+    physics.velocity.x = moveIntent.x * speed;
+    physics.velocity.z = moveIntent.z * speed;
 }

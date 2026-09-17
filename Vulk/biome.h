@@ -101,11 +101,9 @@ struct PropCollider {
     glm::vec3 baseHalfExtents;
 };
 
-// Global Data Access
 const BiomeDefinition& GetBiomeDefinition(BiomeType type);
 BiomeType DetermineBiome(float temperature, float moisture);
 
-// Wrapper to prevent breaking your existing terrain color generation
 inline const BiomeDefinition& GetBiomeProperties(BiomeType type) {
     return GetBiomeDefinition(type);
 }
@@ -124,4 +122,3 @@ inline const PropCollider& GetPropCollider(const std::string& lodGroupName) {
     static PropCollider defaultCol{ ColliderType::Cylinder, 2.5f, 5.0f, glm::vec3(1.0f) };
     return defaultCol;
 }
-void InitBiomes();

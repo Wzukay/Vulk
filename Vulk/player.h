@@ -5,6 +5,7 @@
 
 #include "input.h"
 #include "ecs.h"
+#include "chunk.h"
 
 class Player {
 private:
